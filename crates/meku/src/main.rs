@@ -879,7 +879,7 @@ impl MekuShell {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(title),
                         )
-                        .child(Input::new(&input).small())
+                        .child(Input::new(&input).id("naming-input").small())
                         .child(
                             h_flex()
                                 .gap_2()
@@ -1070,4 +1070,181 @@ fn main() {
         })
         .detach();
     });
+}
+
+#[cfg(test)]
+mod ui_tests {
+    //! Headless UI integration tests (require `gpui-kit/test-support`).
+    //! They drive the real shell through real key/mouse events — in
+    //! particular the modal keyboard flows no unit test can cover.
+
+    // NOTE: no `use super::*` here on purpose. The crate-root globs
+    // (`use gpui_kit::*`) pull GPUI's `test` proc-macro into scope, which
+    // would shadow the builtin `#[test]` and send the harness into macro
+    // recursion. Import everything this module needs explicitly.
+    use crate::{
+        CancelOverlay, CloseTab, MekuShell, NamingMode, NewTab, NextTab, OpenFolder, ToggleSidebar,
+    };
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AppContext, Entity, KeyBinding, TestAppContext, px, size};
+    use std::path::PathBuf;
+
+    /// Manual equivalent of `#[gpui_kit::test]` (whose macro overflows
+    /// rustc in this crate). Mirrors the harness the macro generates:
+    /// build a TestAppContext, run the body, drain and quit.
+    fn run_ui_test(name: &'static str, f: fn(&mut TestAppContext)) {
+        gpui_kit::run_test(
+            1,
+            &[],
+            0,
+            &mut |dispatcher, _seed| {
+                let mut cx = gpui_kit::TestAppContext::build(dispatcher.clone(), Some(name));
+                let _entity_refcounts = cx.app.borrow().ref_counts_drop_handle();
+                f(&mut cx);
+                cx.run_until_parked();
+                cx.update(|cx| {
+                    cx.background_executor().forbid_parking();
+                    cx.quit();
+                });
+                cx.run_until_parked();
+                drop(cx);
+                dispatcher.drain_tasks();
+                drop(dispatcher);
+            },
+            None,
+        );
+    }
+
+    fn boot(cx: &mut TestAppContext) -> (Entity<MekuShell>, gpui_kit::AnyWindowHandle) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-b", ToggleSidebar, Some("Meku")),
+                KeyBinding::new("ctrl-t", NewTab, Some("Meku")),
+                KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
+                KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
+                KeyBinding::new("ctrl-o", OpenFolder, Some("Meku")),
+                KeyBinding::new("escape", CancelOverlay, None),
+            ]);
+        });
+        let mut view = None;
+        let handle = cx.open_window(size(px(1200.0), px(800.0)), |window, cx| {
+            let shell = cx.new(MekuShell::new);
+            view = Some(shell.clone());
+            Root::new(shell, window, cx)
+        });
+        (view.unwrap(), handle.into())
+    }
+
+    fn open_fixture(cx: &mut TestAppContext, view: &Entity<MekuShell>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.md"), "# Note\n").unwrap();
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_mekuto(&root, cx));
+        });
+        dir
+    }
+
+    #[test]
+    fn escape_cancels_naming_while_input_focused() {
+        run_ui_test("escape_cancels", escape_cancels_body);
+    }
+
+    fn escape_cancels_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+
+        // Open the rename modal for note.md through the real entry point.
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin_naming(
+                    NamingMode::Rename,
+                    PathBuf::from("note.md"),
+                    Some(PathBuf::from("note.md")),
+                    cx,
+                );
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("naming-input", cx);
+            assert!(window.find("naming-input").focused().unwrap_or(false));
+            window.press("escape", cx);
+        })
+        .unwrap();
+
+        // Modal gone, file untouched.
+        let (naming_open, tabs) = cx
+            .update(|cx| view.read_with(cx, |shell, _| (shell.naming.is_some(), shell.tabs.len())));
+        assert!(!naming_open);
+        assert_eq!(tabs, 1);
+    }
+
+    #[test]
+    fn enter_commits_naming_and_opens_note() {
+        run_ui_test("enter_commits", enter_commits_body);
+    }
+
+    fn enter_commits_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let dir = open_fixture(cx, &view);
+
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("naming-input", cx);
+            // Accept the "Untitled.md" preset as-is.
+            window.press("enter", cx);
+        })
+        .unwrap();
+
+        assert!(dir.path().join("Untitled.md").exists());
+        let (naming_open, tabs) = cx
+            .update(|cx| view.read_with(cx, |shell, _| (shell.naming.is_some(), shell.tabs.len())));
+        assert!(!naming_open);
+        assert_eq!(tabs, 2); // Welcome + Untitled.md
+    }
+
+    #[test]
+    fn invalid_name_keeps_modal_open_with_notice() {
+        run_ui_test("invalid_keeps_modal", invalid_keeps_modal_body);
+    }
+
+    fn invalid_keeps_modal_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin_naming(
+                    NamingMode::Rename,
+                    PathBuf::from("note.md"),
+                    Some(PathBuf::from("note.md")),
+                    cx,
+                );
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("naming-input", cx);
+            // A separator makes the preset an invalid file name.
+            window.input("/", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+
+        let (naming_open, notice) = cx.update(|cx| {
+            view.read_with(cx, |shell, _| {
+                (shell.naming.is_some(), shell.notice.clone())
+            })
+        });
+        assert!(naming_open);
+        assert!(notice.is_some());
+    }
 }

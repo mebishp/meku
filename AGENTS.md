@@ -36,6 +36,13 @@ gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(|cx| {
 
 `mekuto` = plain folder of `.md` + `.meku/session.json` sidecar. No wikilinks/backlinks/graph in v0.1 — render `[[x]]` literally.
 
+## UI tests (headless, `gpui-kit/test-support` dev-dep)
+
+- Run: `cargo test -p meku`. Tests live in `crates/meku/src/main.rs::ui_tests` (binary crate, so no `tests/` dir yet).
+- **Never use `#[gpui_kit::test]` / `#[test]` under a `use gpui_kit::*` glob**: the glob imports GPUI's `test` proc-macro, which shadows the builtin and sends rustc into macro-expansion stack overflow. Import test-module items explicitly (`use gpui_kit::test::TestWindowExt;` etc., never `super::*` where super has the globs).
+- Use the local `run_ui_test(name, fn_ptr)` harness (plain `#[test]` + manual `TestAppContext::build`/`run_until_parked`/`quit` teardown). Takes a `fn` pointer, not a closure (unwind-safety across the harness boundary).
+- Pattern: `cx.update(gpui_kit::init)` → bind keys → `cx.open_window(size, |window, cx| Root::new(view, window, cx))` → `cx.update_window(handle.into(), |_, window, cx| { window.render_frame(cx); window.click/find/press/input(...) })`. Give interactive elements `.id("...")` for `find`/`click`.
+
 ## Workflow (user-imposed, follow exactly)
 
 - `CHECKLIST.md` is the living tracker: check boxes as work lands.
