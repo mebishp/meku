@@ -70,24 +70,24 @@ crates/
   meku-theme/          # Zed-like tokens, font stack, MekuAction/keymap — deps: gpui+gpui-component
 ```
 
-- [ ] Create workspace `Cargo.toml` with exact `gpui-pre` pins + `Cargo.lock` committed
-- [ ] Enforce direction: `markdown` knows no FS/GPUI · `buffer/vault/index` know no views · `editor` never writes FS (via `workspace.request_save`) · `theme` is a leaf
+- [x] Create workspace `Cargo.toml` with exact `gpui-pre` pins + `Cargo.lock` committed (5 members; `gpui-kit = "=0.7.1"` umbrella only, `Cargo.lock` committed on pre-release 2026-10-08)
+- [x] Enforce direction: `markdown` knows no FS/GPUI · `buffer/vault/index` know no views · `editor` never writes FS (via `workspace.request_save`) · `theme` is a leaf
 - [ ] Add `meku-ui` facade over `gpui-component` (so kit swap doesn't ripple) + feature-audit (import only used modules)
 
 ### 2B. Live-preview editor LLD
 
 Pipeline: `keystroke → OpenBuffer.apply_edit (<1ms) → debounce 80–120ms Task → background_spawn parse(snapshot,version) → drop if stale → StyledDoc → Entity update → Render (cached doc, rebuild active line only)`.
 
-- [ ] Define `meku-markdown` types: `SourceSpan{start,end}` · `BlockKind{Para,Heading(u8),CodeFence(Option<String>),List,Quote,Hr,Table}` · `StyledSpan{start,end,style}` · `StyledBlock{kind,span,spans}` · `StyledDoc{version,blocks,headings}` · `parse_incremental()` + `parse_fallback()` (single-Para, never blank)
+- [x] Define `meku-markdown` types: `SourceSpan{start,end}` · `BlockKind{Para,Heading(u8),CodeFence(Option<String>),List,Quote,Hr,Table}` · `StyledSpan{start,end,style}` · `StyledBlock{kind,span,spans}` · `StyledDoc{version,blocks,headings}` · `parse()` + `parse_fallback()` (single-Para, never blank) — `crates/meku-markdown`, 8 tests green
 - [ ] Define `meku-editor` view: `LivePreviewView{buffer: Entity<BufferModel>, doc, pending: Task}` · `schedule_reparse()` · `on_parse_done()` (stale-version drop) · `active_byte_range()` (cursor line → `\n` boundaries) · `offset_to_visual()`/`visual_to_offset()` (binary search, round-trip invariant)
 - [ ] Render rule: every block styled **except** cursor line → raw monospace with dimmed markers; selection resolved in source-offset space, painted per-block; `catch_unwind` → keep old doc + `preview stale` toast
 - [ ] Targets: raw-line keystroke→paint <16ms · styled settle ≤150ms
 
 ### 2C. Workspace / mekuto LLD
 
-- [ ] Define `meku-vault`: `Mekuto{root}` · `VaultFile{rel,abs,mtime}` · `VaultEvent{Created,Modified,Removed,SessionChanged}` · `open_root/scan_md/start_watcher/session_path`
-- [ ] Define `meku-index`: `FileIndex{rel→FileMeta}` · `FileMeta{title,headings,mtime}` · `rebuild/upsert/remove/fuzzy_match`
-- [ ] Define `meku-buffer`: `OpenBuffer{rel,text:Rope,version,dirty,disk_mtime}` · `load/apply_edit/mark_saved/snapshot`
+- [x] Define `meku-vault`: `Mekuto{root}` · `VaultFile{rel,abs,mtime}` · `VaultEvent{Created,Modified,Removed}` · `open_root/scan_md(sorted, skips .meku)/start_watcher(.meku-filtered)/session_path` · session v1 + atomic save + corrupt-backup — `crates/meku-vault` (`notify 8` stable, not the 9 RC)
+- [x] Define `meku-index`: `FileIndex{rel→FileMeta}` · `FileMeta{title,headings,mtime}` · `rebuild/upsert/remove/fuzzy_match` (ATX scan, fenced-code aware) — `crates/meku-index`
+- [x] Define `meku-buffer`: `OpenBuffer{rel,text:Rope,version,dirty,disk_mtime}` · `load(streaming)/from_text/apply_edit(byte-range)/mark_saved/snapshot` — `crates/meku-buffer` (`ropey 2.0.0-beta.1`, byte-native API, `metric_lines_lf`)
 - [ ] Define `meku-workspace`: `Workspace{vault,index,tabs,dirty}` · `TabState{rel,buffer_id,cursor,scroll_px}` · `Session{root,open_tabs,active}` · `open_folder/open_file/on_watcher_event/request_save(atomic tmp+rename)/poll_autosave 800ms/resolve_external_change{KeepMine,LoadDisk}`
 - [ ] Tree rule: `*.md` sorted case-insensitive, ignore `.meku/`+dotfiles, incremental `VaultEvent` updates (no full rescan); watcher: `notify` inotify + 50ms coalesce → `cx.spawn` channel
 
@@ -99,10 +99,10 @@ Pipeline: `keystroke → OpenBuffer.apply_edit (<1ms) → debounce 80–120ms Ta
 
 ### 2E. Testing seams (per module, no GUI unless noted)
 
-- [ ] `meku-markdown`: golden `md→StyledDoc` snapshots + fuzz unclosed fences/tables + offset round-trip assert
-- [ ] `meku-buffer`: version bumps, snapshot isolation, tempdir round-trip
-- [ ] `meku-vault`: tempdir `scan_md` ignores `.meku/`, watcher delivers <500ms, corrupt session → empty no-panic
-- [ ] `meku-index`: upsert/remove headings, fuzzy ranking
+- [x] `meku-markdown`: golden `md→StyledDoc` asserts (headings/offsets, strong/emph/strike/code spans, tasklist, fence lang, table) + unclosed-fence no-panic + fallback single-para
+- [x] `meku-buffer`: version bumps, replace/multibyte byte-ranges, snapshot isolation, tempdir load round-trip
+- [x] `meku-vault`: tempdir `scan_md` ignores `.meku/` + sorted, watcher delivers Created, sidecar writes ignored, corrupt session → empty no-panic
+- [x] `meku-index`: upsert/remove headings, fenced-code exclusion, filename-fallback title, fuzzy ranking
 - [ ] `meku-editor`: active-line calc, stale-drop, one headless GPUI type→styled test
 - [ ] `meku-workspace`: fake watcher → dirty dot / external prompt / tmp+rename autosave / session round-trip
 - [ ] `meku-theme`: token hex snapshot, keymap contains `Ctrl+O/P/S/W`, manual contrast check
