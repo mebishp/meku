@@ -112,7 +112,7 @@ Pipeline: `keystroke → OpenBuffer.apply_edit (<1ms) → debounce 80–120ms Ta
 ## Section 3 — Build (implementation order, commit after each)
 
 - [x] **0. Scaffold + hello-window** — workspace + `crates/meku` on latest `gpui-kit 0.7.1` (pins `gpui-pre 0.3.8`), `gpui_kit::init` + `Root` pattern, `cargo check -p meku` green (2026-10-08). → _ask user to commit_
-- [ ] **1. App shell (Zed theme)** — TitleBar, Sidebar, TabBar, StatusBar, light/dark tokens, 15-command keymap, empty states. → _commit_
+- [x] **1. App shell (Zed theme)** — TitleBar + Sidebar (Explorer/Search/Outline) + TabBar (new/select/close) + StatusBar, `h_resizable` 240px shell, keymap `Ctrl-B/T/W/Tab` under `Meku` context, empty states. `check`+`fmt`+`clippy` green (2026-10-08). → _ask user to commit_
 - [ ] **2. Mekuto open + file tree** — open folder, tree ops (new/rename/delete/folder), watcher refresh, session restore. → _commit_
 - [ ] **3. Editor buffer + tabs** — multi-tab, dirty dot, undo/redo, autosave + reload prompt, 10k-line <16ms. → _commit_
 - [ ] **4. Live preview (inline GFM)** — background parse → styled spans, active-line raw, cursor never jumps, GFM round-trip fixture passes. → _commit_
