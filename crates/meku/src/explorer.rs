@@ -11,6 +11,17 @@ use gpui_kit::component::tree::TreeItem;
 use meku_index::FileIndex;
 use meku_vault::{Mekuto, Session, VaultEvent, VaultFile};
 
+/// One renderable file-tree row: path, nesting depth, and presentation data.
+/// Produced by [`Explorer::flat_rows`] in display order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub rel: PathBuf,
+    pub depth: usize,
+    pub is_dir: bool,
+    pub expanded: bool,
+    pub label: String,
+}
+
 pub struct Explorer {
     vault: Option<Mekuto>,
     files: Vec<VaultFile>,
@@ -156,8 +167,27 @@ impl Explorer {
         self.dirs.contains(rel)
     }
 
-    pub fn is_expanded(&self, rel: &Path) -> bool {
-        self.expanded.contains(rel)
+    /// Flat, render-ready rows in display order, honoring expansion.
+    /// The UI renders these directly (no virtualized tree state to fight).
+    pub fn flat_rows(&self) -> Vec<TreeRow> {
+        fn walk(items: &[TreeItem], depth: usize, explorer: &Explorer, out: &mut Vec<TreeRow>) {
+            for item in items {
+                let rel = PathBuf::from(item.id.to_string());
+                out.push(TreeRow {
+                    label: item.label.to_string(),
+                    expanded: item.is_expanded(),
+                    is_dir: explorer.is_dir(&rel),
+                    depth,
+                    rel,
+                });
+                if item.is_expanded() {
+                    walk(&item.children, depth + 1, explorer, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.tree_items(), 0, self, &mut out);
+        out
     }
 
     /// Expand every ancestor of `rel` so it becomes visible in the tree.
@@ -364,6 +394,28 @@ mod tests {
         assert!(explorer.tree_items()[0].children.is_empty());
         explorer.toggle(Path::new("notes"));
         assert_eq!(explorer.tree_items()[0].children.len(), 3); // a, b, projects/
+    }
+
+    #[test]
+    fn flat_rows_follow_expansion() {
+        let (_dir, mut explorer) = open_fixture();
+        let rows = explorer.flat_rows();
+        // notes/ expanded by default: dir + a, b, projects/ + top-level top.md.
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].rel, PathBuf::from("notes"));
+        assert!(rows[0].is_dir && rows[0].expanded);
+        assert_eq!(rows[0].depth, 0);
+        assert_eq!(rows[1].rel, PathBuf::from("notes/projects"));
+        assert_eq!(rows[1].depth, 1);
+        assert!(rows[1].is_dir && !rows[1].expanded);
+        assert_eq!(rows[2].rel, PathBuf::from("notes/a.md"));
+        assert!(!rows[2].is_dir);
+        assert_eq!(rows[4].rel, PathBuf::from("top.md"));
+
+        explorer.toggle(Path::new("notes"));
+        let rows = explorer.flat_rows();
+        assert_eq!(rows.len(), 2); // collapsed notes/ + top.md
+        assert_eq!(rows[1].rel, PathBuf::from("top.md"));
     }
 
     #[test]

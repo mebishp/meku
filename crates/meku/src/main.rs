@@ -11,12 +11,8 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::PopupMenuItem;
-use gpui_kit::component::sidebar::{
-    Sidebar, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem,
-};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tree::{TreeState, tree};
 use gpui_kit::component::*;
 use gpui_kit::*;
 // InteractiveElement (div().on_click / overflow_y_scroll) is not in the globs.
@@ -75,7 +71,6 @@ pub struct MekuShell {
     tabs: Vec<EditorTab>,
     active_tab: usize,
     explorer: Explorer,
-    tree: Entity<TreeState>,
     buffers: HashMap<PathBuf, Entity<OpenBuffer>>,
     editors: HashMap<PathBuf, Entity<EditorState>>,
     _editor_subs: HashMap<PathBuf, Subscription>,
@@ -99,7 +94,6 @@ pub struct MekuShell {
 
 impl MekuShell {
     fn new(cx: &mut Context<Self>) -> Self {
-        let tree = cx.new(|cx| TreeState::new(cx));
         let this = Self {
             focus_handle: cx.focus_handle(),
             show_sidebar: true,
@@ -109,7 +103,6 @@ impl MekuShell {
             }],
             active_tab: 0,
             explorer: Explorer::new(),
-            tree,
             buffers: HashMap::new(),
             editors: HashMap::new(),
             _editor_subs: HashMap::new(),
@@ -161,7 +154,6 @@ impl MekuShell {
     fn open_file(&mut self, rel: &Path, cx: &mut Context<Self>) {
         if self.explorer.is_dir(rel) {
             self.explorer.toggle(rel);
-            self.sync_tree(cx);
             cx.notify();
             return;
         }
@@ -171,7 +163,6 @@ impl MekuShell {
     fn open_file_inner(&mut self, rel: &Path, cx: &mut Context<Self>) {
         if let Some(ix) = self.tabs.iter().position(|t| t.rel.as_deref() == Some(rel)) {
             self.active_tab = ix;
-            self.sync_tree_selection(cx);
             self.save_session();
             cx.notify();
             return;
@@ -195,7 +186,6 @@ impl MekuShell {
                 self.notice = Some(format!("Cannot open {}: {e}", rel.display()));
             }
         }
-        self.sync_tree_selection(cx);
         self.save_session();
         cx.notify();
     }
@@ -250,7 +240,6 @@ impl MekuShell {
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
-        self.sync_tree_selection(cx);
         self.save_session();
         cx.notify();
     }
@@ -262,7 +251,6 @@ impl MekuShell {
     fn on_next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
-            self.sync_tree_selection(cx);
             self.save_session();
             cx.notify();
         }
@@ -370,7 +358,6 @@ impl MekuShell {
                     self.active_tab = 0;
                 }
                 self.notice = None;
-                self.sync_tree(cx);
                 self.save_session();
                 cx.notify();
             }
@@ -437,7 +424,6 @@ impl MekuShell {
             }
             if tree_changed {
                 self.explorer.refresh();
-                self.sync_tree(cx);
             }
             cx.notify();
         }
@@ -763,109 +749,94 @@ impl MekuShell {
         }
     }
 
-    // -- tree ----------------------------------------------------------
+    // -- file tree (plain rows; selection derives from the active tab) --
 
-    fn sync_tree(&mut self, cx: &mut Context<Self>) {
-        let items = self.explorer.tree_items();
-        let selected = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|t| t.rel.clone())
-            .map(|r| SharedString::from(r.to_string_lossy().to_string()));
-        self.tree.update(cx, |state, cx| {
-            state.set_items(items, cx);
-            if let Some(id) = &selected
-                && let Some(ix) = state.index_of(id)
-            {
-                state.set_selected_index(Some(ix), cx);
-            }
-        });
-    }
-
-    fn sync_tree_selection(&mut self, cx: &mut Context<Self>) {
-        let selected = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|t| t.rel.clone())
-            .map(|r| SharedString::from(r.to_string_lossy().to_string()));
-        self.tree.update(cx, |state, cx| {
-            let ix = selected.as_ref().and_then(|id| state.index_of(id));
-            state.set_selected_index(ix, cx);
-        });
-    }
-
-    fn render_tree(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Plain file rows from [`Explorer::flat_rows`]: no virtualized tree
+    /// state to starve of height, selection derived from the active tab.
+    fn render_file_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shell = cx.entity();
-        let menu_shell = shell.clone();
-        tree(&self.tree, move |_ix, entry, _selected, _window, cx| {
-            let id = entry.item().id.clone();
-            let rel = PathBuf::from(id.to_string());
-            let is_dir = shell.read(cx).explorer.is_dir(&rel);
-            let expanded = shell.read(cx).explorer.is_expanded(&rel);
-            let depth = entry.depth();
-            let open_shell = shell.clone();
-            let open_rel = rel.clone();
-            let chevron = if is_dir {
-                if expanded { "▾ " } else { "▸ " }
-            } else {
-                "  "
-            };
-            ListItem::new(id.clone())
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .pl(px(depth as f32 * 12.0 + 4.0))
-                        .text_sm()
-                        .child(chevron)
-                        .child(entry.item().label.clone()),
-                )
-                .on_click(move |_, _, cx| {
-                    open_shell.update(cx, |view, cx| view.open_file(&open_rel, cx));
-                })
-        })
-        .context_menu(move |_ix, entry, menu, _window, cx| {
-            let rel = PathBuf::from(entry.item().id.to_string());
-            let is_dir = menu_shell.read(cx).explorer.is_dir(&rel);
-            let mut menu = menu;
-            if is_dir {
-                for (label, mode) in [
-                    ("New note", NamingMode::NewNote),
-                    ("New folder", NamingMode::NewFolder),
-                ] {
-                    let s = menu_shell.clone();
-                    let dir = rel.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        s.update(cx, |view, cx| {
-                            view.begin_naming(mode, dir.clone(), None, cx)
-                        });
-                    }));
-                }
-                menu = menu.item(PopupMenuItem::separator());
-            }
-            {
-                let s = menu_shell.clone();
-                let target = rel.clone();
-                menu = menu.item(PopupMenuItem::new("Rename").on_click(move |_, _, cx| {
-                    s.update(cx, |view, cx| {
-                        view.begin_naming(
-                            NamingMode::Rename,
-                            target.clone(),
-                            Some(target.clone()),
-                            cx,
-                        )
-                    });
-                }));
-            }
-            {
-                let s = menu_shell.clone();
-                let target = rel.clone();
-                menu = menu.item(PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
-                    s.update(cx, |view, cx| view.ask_delete(target.clone(), cx));
-                }));
-            }
-            menu
-        })
+        let active_rel = self.tabs.get(self.active_tab).and_then(|t| t.rel.clone());
+        let rows: Vec<AnyElement> = self
+            .explorer
+            .flat_rows()
+            .into_iter()
+            .map(|row| {
+                let open_shell = shell.clone();
+                let menu_shell = shell.clone();
+                let open_rel = row.rel.clone();
+                let menu_rel = row.rel.clone();
+                let row_id = format!("tree-row-{}", row.rel.display());
+                let chevron = if row.is_dir {
+                    if row.expanded { "▾ " } else { "▸ " }
+                } else {
+                    "  "
+                };
+                let selected = active_rel.as_ref() == Some(&row.rel);
+                ListItem::new(row_id)
+                    .selected(selected)
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .pl(px(row.depth as f32 * 12.0 + 4.0))
+                            .text_sm()
+                            .child(chevron)
+                            .child(row.label),
+                    )
+                    .on_click(move |_, _, cx| {
+                        open_shell.update(cx, |view, cx| view.open_file(&open_rel, cx));
+                    })
+                    .context_menu(move |menu, _window, cx| {
+                        let is_dir = menu_shell.read(cx).explorer.is_dir(&menu_rel);
+                        let mut menu = menu;
+                        if is_dir {
+                            for (label, mode) in [
+                                ("New note", NamingMode::NewNote),
+                                ("New folder", NamingMode::NewFolder),
+                            ] {
+                                let s = menu_shell.clone();
+                                let dir = menu_rel.clone();
+                                menu = menu.item(PopupMenuItem::new(label).on_click(
+                                    move |_, _, cx| {
+                                        s.update(cx, |view, cx| {
+                                            view.begin_naming(mode, dir.clone(), None, cx)
+                                        });
+                                    },
+                                ));
+                            }
+                            menu = menu.item(PopupMenuItem::separator());
+                        }
+                        {
+                            let s = menu_shell.clone();
+                            let target = menu_rel.clone();
+                            menu = menu.item(PopupMenuItem::new("Rename").on_click(
+                                move |_, _, cx| {
+                                    s.update(cx, |view, cx| {
+                                        view.begin_naming(
+                                            NamingMode::Rename,
+                                            target.clone(),
+                                            Some(target.clone()),
+                                            cx,
+                                        )
+                                    });
+                                },
+                            ));
+                        }
+                        {
+                            let s = menu_shell.clone();
+                            let target = menu_rel.clone();
+                            menu = menu.item(PopupMenuItem::new("Delete").on_click(
+                                move |_, _, cx| {
+                                    s.update(cx, |view, cx| view.ask_delete(target.clone(), cx));
+                                },
+                            ));
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        v_flex().children(rows).into_any_element()
     }
 
     // -- naming modal (new note / new folder / rename) --------------------
@@ -980,13 +951,11 @@ impl MekuShell {
                     }
                     Done::OpenNote(note) => {
                         self.explorer.reveal(&note);
-                        self.sync_tree(cx);
                         self.open_file_inner(&note, cx);
                         return;
                     }
                     Done::Renamed => {}
                 }
-                self.sync_tree(cx);
                 cx.notify();
             }
             Err(e) => {
@@ -1066,7 +1035,6 @@ impl MekuShell {
                 self.notice = None;
                 self.explorer.refresh();
                 self.close_tabs_for(&rel, cx);
-                self.sync_tree(cx);
                 cx.notify();
             }
             Err(e) => {
@@ -1095,75 +1063,98 @@ impl MekuShell {
 
     // -- chrome ----------------------------------------------------------
 
-    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Plain themed sidebar: header, file tree, footer. Deliberately plain
+    /// `div`s — the virtualized `Sidebar`/`Tree` components starve of
+    /// measured height in this layout and render nothing.
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let base = v_flex()
+            .size_full()
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
+            .border_color(cx.theme().sidebar_border);
         if !self.explorer.is_open() {
-            return Sidebar::new("meku-sidebar")
-                .header(SidebarHeader::new().child("No mekuto open"))
+            return base
                 .child(
-                    SidebarMenu::new()
-                        .child(SidebarMenuItem::new("Explorer"))
-                        .child(SidebarMenuItem::new("Search"))
-                        .child(SidebarMenuItem::new("Outline")),
+                    div()
+                        .p_3()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("No mekuto open"),
                 )
-                .footer(SidebarFooter::new().child("Meku v0.1"))
+                .child(
+                    div()
+                        .px_3()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Open a folder (Ctrl-O) to begin."),
+                )
                 .into_any_element();
         }
         let shell = cx.entity();
         let new_note = shell.clone();
         let new_folder = shell.clone();
-        Sidebar::new("meku-sidebar")
-            .header(
-                SidebarHeader::new().child(
+        base.child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .px_3()
+                .py_2()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(self.explorer.root_name())
+                .child(
                     h_flex()
-                        .justify_between()
-                        .items_center()
-                        .child(self.explorer.root_name())
+                        .gap_1()
                         .child(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Button::new("new-note")
-                                        .label("+ Note")
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(move |_, _, cx| {
-                                            new_note.update(cx, |view, cx| {
-                                                view.begin_naming(
-                                                    NamingMode::NewNote,
-                                                    PathBuf::new(),
-                                                    None,
-                                                    cx,
-                                                )
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    Button::new("new-folder")
-                                        .label("+ Dir")
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(move |_, _, cx| {
-                                            new_folder.update(cx, |view, cx| {
-                                                view.begin_naming(
-                                                    NamingMode::NewFolder,
-                                                    PathBuf::new(),
-                                                    None,
-                                                    cx,
-                                                )
-                                            });
-                                        }),
-                                ),
+                            Button::new("new-note")
+                                .label("+ Note")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    new_note.update(cx, |view, cx| {
+                                        view.begin_naming(
+                                            NamingMode::NewNote,
+                                            PathBuf::new(),
+                                            None,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("new-folder")
+                                .label("+ Dir")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    new_folder.update(cx, |view, cx| {
+                                        view.begin_naming(
+                                            NamingMode::NewFolder,
+                                            PathBuf::new(),
+                                            None,
+                                            cx,
+                                        )
+                                    });
+                                }),
                         ),
                 ),
-            )
-            .child(
-                SidebarMenu::new()
-                    .child(SidebarMenuItem::new("Explorer"))
-                    .child(SidebarMenuItem::new("Search"))
-                    .child(SidebarMenuItem::new("Outline")),
-            )
-            .footer(SidebarFooter::new().child("Meku v0.1"))
-            .into_any_element()
+        )
+        .child(
+            div()
+                .flex_1()
+                .id("file-tree-scroll")
+                .overflow_y_scroll()
+                .child(self.render_file_tree(cx)),
+        )
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Meku v0.1"),
+        )
+        .into_any_element()
     }
 
     fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1175,7 +1166,6 @@ impl MekuShell {
                 let index = *index;
                 bar_entity.update(cx, |view, cx| {
                     view.active_tab = index;
-                    view.sync_tree_selection(cx);
                     view.save_session();
                     cx.notify();
                 });
@@ -1273,6 +1263,39 @@ impl MekuShell {
             let blocks: Vec<_> = doc.blocks.to_vec();
             (blocks, idx, range)
         };
+        if blocks.is_empty() {
+            // Empty file: a single raw editor over the empty range so the
+            // note is immediately editable (this also covers brand-new notes).
+            if !self.active.contains_key(rel) {
+                self.active
+                    .insert(rel.to_path_buf(), ActiveBlock { start: 0, len: 0 });
+            }
+            let mut column = v_flex().size_full();
+            if self.conflict.as_deref() == Some(rel) {
+                column = column.child(self.render_conflict_banner(rel, cx));
+            }
+            return match self.ensure_editor(rel, window, cx) {
+                Some(editor) => column
+                    .child(
+                        div()
+                            .flex_1()
+                            .p_4()
+                            .child(Editor::new(&editor).bordered(false).appearance(false)),
+                    )
+                    .into_any_element(),
+                None => column
+                    .child(
+                        div()
+                            .flex_1()
+                            .items_center()
+                            .justify_center()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Could not open this file.")
+                            .into_any_element(),
+                    )
+                    .into_any_element(),
+            };
+        }
         let mut kids: Vec<AnyElement> = Vec::new();
         if self.conflict.as_deref() == Some(rel) {
             kids.push(self.render_conflict_banner(rel, cx));
@@ -1574,18 +1597,7 @@ impl Render for MekuShell {
                                 .visible(self.show_sidebar)
                                 .size(px(240.))
                                 .size_range(px(200.)..px(400.))
-                                .child(
-                                    v_flex()
-                                        .size_full()
-                                        .child(self.render_sidebar(cx))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .child(self.render_tree(cx)),
-                                        )
-                                        .into_any_element(),
-                                ),
+                                .child(self.render_sidebar(cx)),
                         )
                         .child(self.render_center(window, cx).into_any_element()),
                 ),
@@ -2002,6 +2014,65 @@ mod ui_tests {
     #[test]
     fn external_edit_on_clean_buffer_reloads_silently() {
         run_ui_test("clean_reload", clean_reload_body);
+    }
+
+    #[test]
+    fn file_tree_rows_open_and_toggle() {
+        run_ui_test("tree_rows", tree_rows_body);
+    }
+
+    fn tree_rows_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("notes")).unwrap();
+        std::fs::write(dir.path().join("notes/b.md"), "# B\n").unwrap();
+        std::fs::write(dir.path().join("a.md"), "# A\n").unwrap();
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_mekuto(&root, cx));
+        });
+
+        // Both rows render with stable ids.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("tree-row-a.md").is_some());
+            assert!(window.try_find("tree-row-notes").is_some());
+            // Clicking a file row opens it in a tab.
+            window.click("tree-row-a.md", cx);
+        })
+        .unwrap();
+        let tabs = cx.update(|cx| {
+            view.read_with(cx, |shell, _| {
+                shell
+                    .tabs
+                    .iter()
+                    .map(|t| t.title.clone())
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert!(
+            tabs.iter().any(|t| t == "a.md"),
+            "click opened a.md: {tabs:?}"
+        );
+
+        // Clicking a directory toggles expansion: children vanish…
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tree-row-notes", cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("tree-row-notes/b.md").is_none());
+            // …and come back on the next click.
+            window.click("tree-row-notes", cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("tree-row-notes/b.md").is_some());
+        })
+        .unwrap();
     }
 
     fn clean_reload_body(cx: &mut TestAppContext) {
