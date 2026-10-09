@@ -143,6 +143,60 @@ fn end_tag_matches(tag: BlockTag, end: &TagEnd) -> bool {
     )
 }
 
+/// Push a styled span for `range`, first emitting a bullet span when a list
+/// item just opened (so `- `/`1. ` markers survive in rendered output).
+/// Out-of-range inputs are skipped; parsing never panics.
+fn push_span(
+    current: &mut OpenBlock,
+    text: &str,
+    pending_item: &mut Option<usize>,
+    range: std::ops::Range<usize>,
+    style: InlineStyle,
+    content: &str,
+) {
+    if range.start > range.end || range.end > text.len() {
+        pending_item.take();
+        return;
+    }
+    if let Some(item_start) = pending_item.take() {
+        if item_start <= range.start && range.start - item_start <= 12 {
+            if let Some(bullet) = text.get(item_start..range.start) {
+                if is_bullet(bullet) {
+                    current.spans.push(StyledSpan {
+                        start: item_start,
+                        end: range.start,
+                        style: InlineStyle::empty(),
+                    });
+                }
+            }
+        }
+    }
+    if text.get(range.clone()).is_none() {
+        return;
+    }
+    current.spans.push(StyledSpan {
+        start: range.start,
+        end: range.end,
+        style,
+    });
+    current.text.push_str(content);
+}
+
+/// True for list-item markers (`- `, `* `, `+ `, `1. `, `2) `), including
+/// leading indentation so nested items keep their offset.
+fn is_bullet(slice: &str) -> bool {
+    let trimmed = slice.trim_start_matches([' ', '\t']);
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+        return true;
+    }
+    let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits > 0 && digits < 10 {
+        let rest = &trimmed[digits..];
+        return rest.starts_with(". ") || rest.starts_with(") ");
+    }
+    false
+}
+
 /// Parse Markdown into styled blocks. Never panics on hostile input;
 /// unclosed constructs simply run to end of input.
 pub fn parse(text: &str, version: u64) -> StyledDoc {
@@ -153,6 +207,7 @@ pub fn parse(text: &str, version: u64) -> StyledDoc {
     };
     let mut open: Option<OpenBlock> = None;
     let mut inline: Vec<u8> = Vec::new();
+    let mut pending_item: Option<usize> = None;
 
     for (event, range) in parser {
         match event {
@@ -171,6 +226,35 @@ pub fn parse(text: &str, version: u64) -> StyledDoc {
                     if let Some(bit) = bit {
                         inline.push(bit);
                     }
+                    // A list item opening inside a list block arms bullet
+                    // capture for the item's first content span. A whitespace
+                    // gap since the previous span (newlines, nesting indent)
+                    // is kept verbatim; anything else is markup and skipped.
+                    if matches!(tag, Tag::Item)
+                        && open.as_ref().is_some_and(|b| b.tag == BlockTag::List)
+                    {
+                        if let Some(current) = open.as_mut() {
+                            let gap_start = current.spans.last().map(|s| s.end);
+                            if let Some(start) = gap_start {
+                                let end = range.start.min(text.len());
+                                let keep = end > start
+                                    && text.get(start..end).is_some_and(|gap| {
+                                        !gap.is_empty()
+                                            && gap
+                                                .bytes()
+                                                .all(|b| b == b'\n' || b == b'\r' || b == b' ')
+                                    });
+                                if keep {
+                                    current.spans.push(StyledSpan {
+                                        start,
+                                        end,
+                                        style: InlineStyle::empty(),
+                                    });
+                                }
+                            }
+                        }
+                        pending_item = Some(range.start);
+                    }
                     // Stray inline tag with no block: open a paragraph so its
                     // text is not dropped (e.g. tight-list edge cases).
                     if open.is_none() {
@@ -185,6 +269,30 @@ pub fn parse(text: &str, version: u64) -> StyledDoc {
                         close_block(&mut doc, current, end);
                     } else {
                         open = Some(current);
+                    }
+                }
+                if matches!(end, TagEnd::Item) {
+                    pending_item = None;
+                    // Keep the item's trailing newline (tight lists have no
+                    // break event between items), but only when it is pure
+                    // whitespace — never markup.
+                    if let Some(current) = open.as_mut() {
+                        let tail_start = current.spans.last().map(|s| s.end);
+                        if let Some(start) = tail_start {
+                            let end = range.end.min(text.len());
+                            let whitespace_tail = end > start
+                                && text.get(start..end).is_some_and(|tail| {
+                                    !tail.is_empty()
+                                        && tail.bytes().all(|b| b == b'\n' || b == b'\r')
+                                });
+                            if whitespace_tail {
+                                current.spans.push(StyledSpan {
+                                    start,
+                                    end,
+                                    style: InlineStyle::empty(),
+                                });
+                            }
+                        }
                     }
                 }
                 // Pop one inline bit for the matching inline end tag.
@@ -205,12 +313,16 @@ pub fn parse(text: &str, version: u64) -> StyledDoc {
                         style = style.with(bit);
                     }
                     if !content.is_empty() {
-                        current.spans.push(StyledSpan {
-                            start: range.start,
-                            end: range.end,
+                        push_span(
+                            current,
+                            text,
+                            &mut pending_item,
+                            range.start..range.end,
                             style,
-                        });
-                        current.text.push_str(&content);
+                            &content,
+                        );
+                    } else {
+                        pending_item.take();
                     }
                 }
             }
@@ -223,21 +335,31 @@ pub fn parse(text: &str, version: u64) -> StyledDoc {
                     for &bit in &inline {
                         style = style.with(bit);
                     }
-                    current.spans.push(StyledSpan {
-                        start: range.start,
-                        end: range.end,
+                    push_span(
+                        current,
+                        text,
+                        &mut pending_item,
+                        range.start..range.end,
                         style,
-                    });
-                    current.text.push_str(&content);
+                        &content,
+                    );
                 }
             }
             Event::TaskListMarker(_) => {
                 if let Some(current) = open.as_mut() {
-                    current.spans.push(StyledSpan {
-                        start: range.start,
-                        end: range.end,
-                        style: InlineStyle::empty().with(InlineStyle::CODE),
-                    });
+                    // Swallow following spaces so "[ ]todo" can't happen.
+                    let mut end = range.end;
+                    while text.as_bytes().get(end) == Some(&b' ') {
+                        end += 1;
+                    }
+                    push_span(
+                        current,
+                        text,
+                        &mut pending_item,
+                        range.start..end,
+                        InlineStyle::empty().with(InlineStyle::CODE),
+                        "",
+                    );
                 }
             }
             Event::Rule => {
@@ -255,8 +377,19 @@ pub fn parse(text: &str, version: u64) -> StyledDoc {
                 });
             }
             Event::SoftBreak | Event::HardBreak => {
+                if open.is_none() {
+                    ensure_block(&mut open, BlockTag::Para, BlockKind::Para, range.start);
+                }
                 if let Some(current) = open.as_mut() {
-                    current.text.push('\n');
+                    // Record the break so rendered text keeps its newlines.
+                    push_span(
+                        current,
+                        text,
+                        &mut pending_item,
+                        range.start..range.end,
+                        InlineStyle::empty(),
+                        "\n",
+                    );
                 }
             }
             Event::Html(_) | Event::InlineHtml(_) => {
@@ -435,5 +568,50 @@ mod tests {
         assert_eq!(doc.blocks.len(), 1);
         assert_eq!(doc.blocks[0].kind, BlockKind::Para);
         assert_eq!(doc.blocks[0].span.end, "anything\nat all".len());
+    }
+
+    fn rendered_text(text: &str, block: &StyledBlock) -> String {
+        block.spans.iter().map(|s| &text[s.start..s.end]).collect()
+    }
+
+    #[test]
+    fn list_bullets_survive_in_spans() {
+        let text = "- a\n  - b\n";
+        let doc = parse(text, 0);
+        assert_eq!(doc.blocks.len(), 1);
+        assert!(matches!(doc.blocks[0].kind, BlockKind::List(false)));
+        let rendered = rendered_text(text, &doc.blocks[0]);
+        assert!(rendered.contains("- a"), "bullet kept: {rendered:?}");
+        assert!(
+            rendered.contains("  - b"),
+            "nested indent kept: {rendered:?}"
+        );
+
+        let text = "1. c\n2. d\n";
+        let doc = parse(text, 0);
+        assert!(matches!(doc.blocks[0].kind, BlockKind::List(true)));
+        let rendered = rendered_text(text, &doc.blocks[0]);
+        assert!(
+            rendered.contains("1. c"),
+            "ordered marker kept: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn soft_breaks_keep_newlines() {
+        let text = "a\nb\n";
+        let doc = parse(text, 0);
+        assert_eq!(doc.blocks.len(), 1);
+        let rendered = rendered_text(text, &doc.blocks[0]);
+        // Interior newline kept; the terminal one has no event (invisible).
+        assert_eq!(rendered, "a\nb");
+    }
+
+    #[test]
+    fn task_items_keep_bullet_and_marker() {
+        let text = "- [ ] todo\n";
+        let doc = parse(text, 0);
+        let rendered = rendered_text(text, &doc.blocks[0]);
+        assert_eq!(rendered, "- [ ] todo\n");
     }
 }

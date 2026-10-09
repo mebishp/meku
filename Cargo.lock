@@ -3892,6 +3892,7 @@ dependencies = [
  "gpui-kit",
  "meku-buffer",
  "meku-index",
+ "meku-markdown",
  "meku-vault",
  "notify",
  "rfd",

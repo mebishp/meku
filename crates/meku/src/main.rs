@@ -1,4 +1,5 @@
 mod explorer;
+mod preview;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +19,12 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tree::{TreeState, tree};
 use gpui_kit::component::*;
 use gpui_kit::*;
-use meku_buffer::OpenBuffer;
+// InteractiveElement (div().on_click / overflow_y_scroll) is not in the globs.
+use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
+use meku_buffer::{BufferVersion, OpenBuffer};
+use meku_markdown::StyledDoc;
 use meku_vault::{OpenTab, Session, VaultEvent};
+use preview::render_styled_block;
 
 actions!(
     meku,
@@ -38,6 +43,15 @@ actions!(
 struct EditorTab {
     rel: Option<PathBuf>,
     title: String,
+}
+
+/// The buffer byte range currently opened as a raw editor.
+/// Earlier blocks are immutable while this region is active, so `start`
+/// stays valid; `len` tracks the region's current length for splicing.
+#[derive(Debug, Clone, Copy)]
+struct ActiveBlock {
+    start: usize,
+    len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +80,12 @@ pub struct MekuShell {
     editors: HashMap<PathBuf, Entity<EditorState>>,
     _editor_subs: HashMap<PathBuf, Subscription>,
     last_edit: HashMap<PathBuf, Instant>,
+    /// Parsed block model per open file (background-refreshed).
+    docs: HashMap<PathBuf, StyledDoc>,
+    /// Raw-editing region per open file.
+    active: HashMap<PathBuf, ActiveBlock>,
+    /// In-flight debounce + parse tasks; replacing one cancels it.
+    parse_tasks: HashMap<PathBuf, Task<()>>,
     /// Rel path with unsaved edits that changed on disk underneath us.
     conflict: Option<PathBuf>,
     watcher: Option<notify::RecommendedWatcher>,
@@ -94,6 +114,9 @@ impl MekuShell {
             editors: HashMap::new(),
             _editor_subs: HashMap::new(),
             last_edit: HashMap::new(),
+            docs: HashMap::new(),
+            active: HashMap::new(),
+            parse_tasks: HashMap::new(),
             conflict: None,
             watcher: None,
             watcher_rx: None,
@@ -166,6 +189,7 @@ impl MekuShell {
                 });
                 self.active_tab = self.tabs.len() - 1;
                 self.notice = None;
+                self.initial_parse(rel, cx);
             }
             Err(e) => {
                 self.notice = Some(format!("Cannot open {}: {e}", rel.display()));
@@ -174,6 +198,31 @@ impl MekuShell {
         self.sync_tree_selection(cx);
         self.save_session();
         cx.notify();
+    }
+
+    /// First parse for a freshly opened file. Small files parse
+    /// synchronously (well under a frame for typical notes); large ones go
+    /// through the debounced background path with a placeholder meanwhile.
+    fn initial_parse(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        let Some((version, text)) = self.buffer_snapshot(rel, cx) else {
+            return;
+        };
+        if text.len() <= 256 * 1024 {
+            let doc = meku_markdown::parse(&text, version);
+            if !doc.blocks.is_empty() {
+                let span = &doc.blocks[0].span;
+                self.active.insert(
+                    rel.to_path_buf(),
+                    ActiveBlock {
+                        start: span.start,
+                        len: span.end.saturating_sub(span.start),
+                    },
+                );
+            }
+            self.docs.insert(rel.to_path_buf(), doc);
+        } else {
+            self.schedule_reparse(rel, cx);
+        }
     }
 
     fn new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -232,6 +281,10 @@ impl MekuShell {
         self.buffers.retain(|r, _| r != rel && !r.starts_with(rel));
         self.editors.retain(|r, _| r != rel && !r.starts_with(rel));
         self._editor_subs
+            .retain(|r, _| r != rel && !r.starts_with(rel));
+        self.docs.retain(|r, _| r != rel && !r.starts_with(rel));
+        self.active.retain(|r, _| r != rel && !r.starts_with(rel));
+        self.parse_tasks
             .retain(|r, _| r != rel && !r.starts_with(rel));
         self.last_edit
             .retain(|r, _| r != rel && !r.starts_with(rel));
@@ -292,6 +345,9 @@ impl MekuShell {
                 self.editors.clear();
                 self._editor_subs.clear();
                 self.last_edit.clear();
+                self.docs.clear();
+                self.active.clear();
+                self.parse_tasks.clear();
                 self.conflict = None;
                 for tab in &session.open_tabs {
                     if root.join(&tab.path).is_file() {
@@ -423,9 +479,10 @@ impl MekuShell {
         cx.notify();
     }
 
-    /// Swap a buffer's text without touching dirty state, and drop its editor
-    /// so the next frame rebuilds it from the buffer (cursor resets; this
-    /// only runs for explicit reload decisions, never on keystrokes).
+    /// Swap a buffer's text without touching dirty state, and drop its
+    /// editor, doc and active region: the next frame reparses and the user
+    /// clicks back into the fresh model. This only runs for explicit reload
+    /// decisions, never on keystrokes, so the cursor is never stolen.
     fn replace_buffer_text(&mut self, rel: &Path, text: &str, cx: &mut Context<Self>) {
         if let Some(buffer) = self.buffers.get(rel) {
             let len = buffer.read_with(cx, |b, _| b.len_bytes());
@@ -435,27 +492,34 @@ impl MekuShell {
             });
         }
         self.editors.remove(rel);
+        self.docs.remove(rel);
+        self.active.remove(rel);
         self.last_edit.remove(rel);
     }
 
     // -- editor ----------------------------------------------------------
 
-    /// Lazily create (or fetch) the editing state for an open buffer.
-    /// Called from render, where a Window is available.
+    /// Lazily create (or fetch) the editing state for the file's active
+    /// block. Called from render, where a Window is available; a freshly
+    /// created editor takes focus.
     fn ensure_editor(
         &mut self,
         rel: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<EditorState>> {
-        if self.editors.contains_key(rel) {
-            return self.editors.get(rel).cloned();
+        if let Some(editor) = self.editors.get(rel) {
+            return Some(editor.clone());
         }
-        let text = self
+        let active = self.active.get(rel).cloned()?;
+        let snapshot = self
             .buffers
             .get(rel)
             .map(|b| b.read_with(cx, |b, _| b.snapshot().1))?;
-        let editor = cx.new(|cx| EditorState::new(window, cx).default_value(text));
+        let end = active.start.saturating_add(active.len).min(snapshot.len());
+        let start = active.start.min(end);
+        let slice = snapshot.get(start..end).unwrap_or_default().to_string();
+        let editor = cx.new(|cx| EditorState::new(window, cx).default_value(slice));
         // Resolve the path dynamically: renames move the entity to a new
         // key, and a captured path would go stale and drop keystrokes.
         let sub = cx.subscribe(
@@ -471,29 +535,144 @@ impl MekuShell {
                 }
             },
         );
+        window.focus(&editor.read(cx).focus_handle(cx), cx);
         self._editor_subs.insert(rel.to_path_buf(), sub);
         self.editors.insert(rel.to_path_buf(), editor.clone());
         Some(editor)
     }
 
+    /// Splice the active block's editor text back into the buffer at the
+    /// block's current range, then reparse in the background.
     fn on_editor_change(&mut self, rel: &Path, cx: &mut Context<Self>) {
         let text = self
             .editors
             .get(rel)
             .map(|e| e.read_with(cx, |e, _| e.value().to_string()));
         let Some(text) = text else { return };
+        let Some(active) = self.active.get(rel).cloned() else {
+            return;
+        };
         if let Some(buffer) = self.buffers.get(rel) {
+            let end = active.start + active.len;
             buffer.update(cx, |b, _| {
-                let len = b.len_bytes();
-                b.apply_edit(0..len, &text);
+                b.apply_edit(active.start..end, &text);
             });
         }
+        if let Some(active) = self.active.get_mut(rel) {
+            active.len = text.len();
+        }
         self.last_edit.insert(rel.to_path_buf(), Instant::now());
+        self.schedule_reparse(rel, cx);
         cx.notify();
     }
 
     fn is_dirty(&self, rel: &Path, cx: &App) -> bool {
         self.buffers.get(rel).is_some_and(|b| b.read(cx).dirty)
+    }
+
+    // -- live-preview parse pipeline ---------------------------------------
+
+    fn buffer_snapshot(&self, rel: &Path, cx: &App) -> Option<(BufferVersion, String)> {
+        self.buffers
+            .get(rel)
+            .map(|b| b.read_with(cx, |b, _| b.snapshot()))
+    }
+
+    /// Debounced background reparse: 120ms quiet period, parse off the main
+    /// thread, stale versions dropped on arrival. Replacing a pending task
+    /// cancels it.
+    fn schedule_reparse(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        if !self.buffers.contains_key(rel) {
+            return;
+        }
+        let rel = rel.to_path_buf();
+        self.parse_tasks.insert(
+            rel.clone(),
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let Some(view) = this.upgrade() else {
+                    return;
+                };
+                let snapshot: Option<(u64, String)> =
+                    cx.update(|cx| view.read_with(cx, |v, cx| v.buffer_snapshot(&rel, cx)));
+                let Some((version, text)) = snapshot else {
+                    return;
+                };
+                let doc = cx
+                    .background_executor()
+                    .spawn(async move { meku_markdown::parse(&text, version) })
+                    .await;
+                if let Some(view) = this.upgrade() {
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| v.on_parse_done(&rel, doc, cx));
+                    });
+                }
+            }),
+        );
+    }
+
+    fn on_parse_done(&mut self, rel: &Path, doc: StyledDoc, cx: &mut Context<Self>) {
+        let current = self
+            .buffers
+            .get(rel)
+            .map(|b| b.read_with(cx, |b, _| b.version));
+        if current != Some(doc.version) {
+            return; // Stale: a newer edit already queued its own parse.
+        }
+        if !self.active.contains_key(rel) && !doc.blocks.is_empty() {
+            let span = &doc.blocks[0].span;
+            self.active.insert(
+                rel.to_path_buf(),
+                ActiveBlock {
+                    start: span.start,
+                    len: span.end.saturating_sub(span.start),
+                },
+            );
+        }
+        self.docs.insert(rel.to_path_buf(), doc);
+        cx.notify();
+    }
+
+    /// Switch raw editing to another block. The previous block's text is
+    /// already in the buffer (synced per keystroke); its editor is dropped
+    /// and rebuilt on return. Cursor starts at the block start — a second
+    /// click positions natively inside the editor.
+    fn activate_block(&mut self, rel: &Path, index: usize, cx: &mut Context<Self>) {
+        let span = self
+            .docs
+            .get(rel)
+            .and_then(|doc| doc.blocks.get(index))
+            .map(|block| block.span);
+        let Some(span) = span else { return };
+        if self
+            .active
+            .get(rel)
+            .is_some_and(|active| active.start == span.start)
+        {
+            return;
+        }
+        self.editors.remove(rel);
+        self._editor_subs.remove(rel);
+        self.active.insert(
+            rel.to_path_buf(),
+            ActiveBlock {
+                start: span.start,
+                len: span.end.saturating_sub(span.start),
+            },
+        );
+        cx.notify();
+    }
+
+    /// Index of the block containing the active region's start, if any.
+    fn active_index(&self, rel: &Path) -> Option<usize> {
+        let active = self.active.get(rel)?;
+        self.docs
+            .get(rel)?
+            .blocks
+            .iter()
+            .position(|block| block.span.start <= active.start && active.start < block.span.end)
     }
 
     // -- saving ----------------------------------------------------------
@@ -845,7 +1024,13 @@ impl MekuShell {
                     self._editor_subs.insert(moved.clone(), sub);
                 }
                 if let Some(at) = self.last_edit.remove(&key) {
-                    self.last_edit.insert(moved, at);
+                    self.last_edit.insert(moved.clone(), at);
+                }
+                if let Some(doc) = self.docs.remove(&key) {
+                    self.docs.insert(moved.clone(), doc);
+                }
+                if let Some(region) = self.active.remove(&key) {
+                    self.active.insert(moved, region);
                 }
             }
         }
@@ -1025,7 +1210,7 @@ impl MekuShell {
                 title: "Welcome".to_string(),
             });
         let body: AnyElement = match active.rel.clone() {
-            Some(rel) if self.buffers.contains_key(&rel) => self.render_editor(&rel, window, cx),
+            Some(rel) if self.buffers.contains_key(&rel) => self.render_doc(&rel, window, cx),
             _ => self.render_empty_state(&active.title, cx),
         };
 
@@ -1057,34 +1242,92 @@ impl MekuShell {
             .into_any_element()
     }
 
-    fn render_editor(
+    /// Render the open note as live preview: every block styled except the
+    /// active one, which is a raw editor. Blocks fully covered by the active
+    /// region (stale duplicates after a structural edit) are skipped.
+    fn render_doc(
         &mut self,
         rel: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut column = v_flex().size_full();
+        if !self.docs.contains_key(rel) {
+            return div()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_color(cx.theme().muted_foreground)
+                .child("Parsing…")
+                .into_any_element();
+        }
+        let snapshot = self
+            .buffers
+            .get(rel)
+            .map(|b| b.read_with(cx, |b, _| b.snapshot().1))
+            .unwrap_or_default();
+        // Clone the small inputs up front: rendering below needs &mut self.
+        let (blocks, active_idx, active_range) = {
+            let doc = self.docs.get(rel).unwrap();
+            let range = self.active.get(rel).map(|a| (a.start, a.start + a.len));
+            let idx = self.active_index(rel);
+            let blocks: Vec<_> = doc.blocks.to_vec();
+            (blocks, idx, range)
+        };
+        let mut kids: Vec<AnyElement> = Vec::new();
         if self.conflict.as_deref() == Some(rel) {
-            column = column.child(self.render_conflict_banner(rel, cx));
+            kids.push(self.render_conflict_banner(rel, cx));
         }
-        match self.ensure_editor(rel, window, cx) {
-            Some(editor) => column.child(
-                div()
-                    .flex_1()
-                    .p_2()
-                    .child(Editor::new(&editor))
-                    .into_any_element(),
-            ),
-            None => column.child(
-                div()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Could not open this file."),
-            ),
+        let shell = cx.entity();
+        for (ix, block) in blocks.iter().enumerate() {
+            if Some(ix) == active_idx {
+                match self.ensure_editor(rel, window, cx) {
+                    Some(editor) => {
+                        kids.push(
+                            div()
+                                .w_full()
+                                .child(Editor::new(&editor).bordered(false).appearance(false))
+                                .into_any_element(),
+                        );
+                    }
+                    None => {
+                        kids.push(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("…")
+                                .into_any_element(),
+                        );
+                    }
+                }
+                continue;
+            }
+            if let Some((start, end)) = active_range {
+                // Stale twin of the active region: skip instead of doubling.
+                if block.span.start < end && start < block.span.end {
+                    continue;
+                }
+            }
+            let activate_shell = shell.clone();
+            let activate_rel = rel.to_path_buf();
+            kids.push(render_styled_block(
+                block,
+                &snapshot,
+                ix,
+                move |_, _, cx| {
+                    activate_shell
+                        .update(cx, |view, cx| view.activate_block(&activate_rel, ix, cx));
+                },
+                window,
+                cx,
+            ));
         }
-        .into_any_element()
+        let column = v_flex().gap_1().children(kids);
+        div()
+            .flex_1()
+            .id("md-scroll")
+            .overflow_y_scroll()
+            .p_4()
+            .child(column)
+            .into_any_element()
     }
 
     fn render_conflict_banner(&mut self, rel: &Path, cx: &mut Context<Self>) -> AnyElement {
@@ -1776,5 +2019,121 @@ mod ui_tests {
         assert_eq!(text, "# Fresh\n");
         let conflict = cx.update(|cx| view.read_with(cx, |shell, _| shell.conflict.clone()));
         assert!(conflict.is_none());
+    }
+
+    fn preview_fixture(cx: &mut TestAppContext) -> (Entity<MekuShell>, tempfile::TempDir, PathBuf) {
+        let (view, _window) = boot(cx);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doc.md"), "# T\n\nbody **bold** here\n").unwrap();
+        let rel = PathBuf::from("doc.md");
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_mekuto(&root, cx));
+        });
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        (view, dir, rel)
+    }
+
+    #[test]
+    fn styled_blocks_hide_markup() {
+        run_ui_test("styled_hide_markup", styled_hide_markup_body);
+    }
+
+    fn styled_hide_markup_body(cx: &mut TestAppContext) {
+        let (view, _dir, rel) = preview_fixture(cx);
+        let rendered: Vec<String> = cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                let doc = shell.docs.get(&rel).unwrap();
+                let (_, snapshot) = shell.buffer_snapshot(&rel, cx).unwrap();
+                doc.blocks
+                    .iter()
+                    .map(|b| crate::preview::display_text(b, &snapshot))
+                    .collect()
+            })
+        });
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(rendered[0], "T", "heading marker hidden");
+        assert_eq!(rendered[1], "body bold here", "emphasis markers hidden");
+        // Active region starts on the first block.
+        let active = cx.update(|cx| view.read_with(cx, |shell, _| shell.active.get(&rel).cloned()));
+        assert!(active.is_some());
+    }
+
+    #[test]
+    fn click_activates_block_without_touching_buffer() {
+        run_ui_test("click_activates", click_activates_body);
+    }
+
+    fn click_activates_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doc.md"), "# T\n\nbody here\n").unwrap();
+        let rel = PathBuf::from("doc.md");
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_mekuto(&root, cx));
+        });
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+
+        let before = buffer_text(cx, &view, &rel).0;
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("md-block-1", cx);
+        })
+        .unwrap();
+
+        let (active, after) = cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                (
+                    shell.active.get(&rel).cloned(),
+                    shell.buffer_snapshot(&rel, cx).map(|(_, text)| text),
+                )
+            })
+        });
+        // Second block (the paragraph) is now the raw region…
+        assert_eq!(active.map(|a| a.start), Some("# T\n\n".len()));
+        // …and merely activating changed nothing on disk-model level.
+        assert_eq!(after.as_deref(), Some(before.as_str()));
+        let _ = dir;
+    }
+
+    #[test]
+    fn typing_in_second_block_splices_around_it() {
+        run_ui_test("splice_second_block", splice_second_block_body);
+    }
+
+    fn splice_second_block_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doc.md"), "# T\n\nbody here\n").unwrap();
+        let rel = PathBuf::from("doc.md");
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_mekuto(&root, cx));
+        });
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("md-block-1", cx);
+        })
+        .unwrap();
+
+        focus_editor_for(cx, &view, window, &rel);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("! ", cx);
+        })
+        .unwrap();
+
+        let (text, dirty) = buffer_text(cx, &view, &rel);
+        assert_eq!(text, "# T\n\n! body here\n");
+        assert!(dirty);
+        let _ = dir;
     }
 }

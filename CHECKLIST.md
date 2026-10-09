@@ -117,9 +117,11 @@ Pipeline: `keystroke → OpenBuffer.apply_edit (<1ms) → debounce 80–120ms Ta
   - Esc **does** cancel the naming modal while the Input is focused (verified by headless UI test, not just analysis): Input's `escape()` ends in `cx.propagate()`, and our later-added no-context `CancelOverlay` binding dispatches next. No fix needed.
   - Headless UI tests live in `crates/meku/src/main.rs::ui_tests` (manual `run_ui_test` harness mirroring the `#[gpui::test]` expansion — see AGENTS.md for why the attribute macro can't be used). Covered: Esc-cancel, Enter-commit, invalid-name-keeps-modal.
 - [x] **3. Editor buffer + tabs** — `Editor`/`EditorState` per open note (lazy, buffer-synced via Change events), dirty `•` dots + status bar, built-in undo/redo (`Ctrl-Z/Y`), `Ctrl-S` + 800ms-idle autosave, external-change conflict banner (Load disk/Keep mine), identical-content reload is a no-op (no cursor jumps on own saves). `test(35)`+`check`+`fmt`+`clippy` green (2026-10-09). → _committed on pre-release_
-- [ ] **4. Live preview (inline GFM)** — background parse → styled spans, active-line raw, cursor never jumps, GFM round-trip fixture passes. → _commit_
+- [x] **4. Live preview (inline GFM)** — `StyledText` runs (bold/italic/strike/code/link, heading scale), quote borders, code-fence blocks, HR; active block swaps to raw `Editor`, others stay styled; 120ms-debounce background reparse with stale-drop; splice edits at block ranges (cursor never jumps); click activates (cursor at 0, second click positions natively). `test(41)`+`check`+`fmt`+`clippy` green (2026-10-09). → _committed on pre-release_
+  - Known v0.1 simplifications: tables render as raw monospace (no cell grid yet) · click-to-cursor is approximate (two-click flow) · undo history is per block visit · all blocks render every frame (virtualization is Build 7).
 - [ ] **5. Preview mode + highlight** — Edit/Live/Read toggle, tree-sitter 5 langs, images, scroll-sync. → _commit_
 - [ ] **6. Search + palette + outline** — `Ctrl-P` finder, `Ctrl-Shift-P` palette, full-text (grep lib), heading tree + follow-cursor. → _commit_
 - [ ] **7. Perf + polish** — virtualized lists everywhere, 120ms debounce audit, lazy images/grammars, benches green, RSS <120MB, docs + Linux packaging. → _commit_
 
 _Deferred past v0.1: links/backlinks/graph, vim, plugins/sync, export PDF/HTML, minimap, >100k-line mmap paging, tantivy, settings UI beyond ~10 keys._
+
