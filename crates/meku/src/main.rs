@@ -12,6 +12,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::*;
 use gpui_kit::*;
@@ -1142,7 +1143,9 @@ impl MekuShell {
         .child(
             div()
                 .flex_1()
+                .min_h_0()
                 .id("file-tree-scroll")
+                .test_support()
                 .overflow_y_scroll()
                 .child(self.render_file_tree(cx)),
         )
@@ -1206,8 +1209,8 @@ impl MekuShell {
 
         v_flex()
             .size_full()
-            .child(tab_bar)
-            .child(div().flex_1().child(body))
+            .child(div().flex_none().child(tab_bar))
+            .child(v_flex().flex_1().min_h_0().child(body))
     }
 
     fn render_empty_state(&mut self, title: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -1244,6 +1247,7 @@ impl MekuShell {
         if !self.docs.contains_key(rel) {
             return div()
                 .flex_1()
+                .min_h_0()
                 .items_center()
                 .justify_center()
                 .text_color(cx.theme().muted_foreground)
@@ -1279,6 +1283,9 @@ impl MekuShell {
                     .child(
                         div()
                             .flex_1()
+                            .min_h_0()
+                            .id("md-scroll")
+                            .overflow_y_scroll()
                             .p_4()
                             .child(Editor::new(&editor).bordered(false).appearance(false)),
                     )
@@ -1346,7 +1353,9 @@ impl MekuShell {
         let column = v_flex().gap_1().children(kids);
         div()
             .flex_1()
+            .min_h_0()
             .id("md-scroll")
+            .test_support()
             .overflow_y_scroll()
             .p_4()
             .child(column)
@@ -1416,19 +1425,15 @@ impl MekuShell {
         } else {
             "○ No mekuto open".to_string()
         };
-        h_flex()
-            .h(px(28.))
-            .px_2()
-            .gap_3()
-            .items_center()
-            .justify_between()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar)
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(left)
-            .child(h_flex().gap_3().child("Markdown").child("Ln 1, Col 1"))
+        // gpui-kit's StatusBar draws the strip itself; the wrapper pins it as
+        // the last child of the root column (flex_none keeps it from shrinking)
+        // and carries the test id, since StatusBar is not interactive.
+        div().id("status-bar").test_support().flex_none().child(
+            StatusBar::new()
+                .left(left)
+                .right("Markdown")
+                .right("Ln 1, Col 1"),
+        )
     }
 
     fn render_naming_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1576,7 +1581,7 @@ impl Render for MekuShell {
             (true, None) => format!("Meku — {}", self.explorer.root_name()),
             (false, _) => "Meku — no mekuto open".to_string(),
         };
-        let mut root = div()
+        let mut root = v_flex()
             .size_full()
             .relative()
             .track_focus(&focus)
@@ -1590,7 +1595,7 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_save))
             .child(TitleBar::new().child(title))
             .child(
-                div().flex_1().child(
+                v_flex().flex_1().min_h_0().overflow_hidden().child(
                     h_resizable("meku-shell")
                         .child(
                             resizable_panel()
@@ -1696,6 +1701,14 @@ mod ui_tests {
     }
 
     fn boot(cx: &mut TestAppContext) -> (Entity<MekuShell>, gpui_kit::AnyWindowHandle) {
+        boot_sized(cx, 1200.0, 800.0)
+    }
+
+    fn boot_sized(
+        cx: &mut TestAppContext,
+        width: f32,
+        height: f32,
+    ) -> (Entity<MekuShell>, gpui_kit::AnyWindowHandle) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             cx.bind_keys([
@@ -1709,7 +1722,7 @@ mod ui_tests {
             ]);
         });
         let mut view = None;
-        let handle = cx.open_window(size(px(1200.0), px(800.0)), |window, cx| {
+        let handle = cx.open_window(size(px(width), px(height)), |window, cx| {
             let shell = cx.new(MekuShell::new);
             view = Some(shell.clone());
             Root::new(shell, window, cx)
@@ -2206,5 +2219,114 @@ mod ui_tests {
         assert_eq!(text, "# T\n\n! body here\n");
         assert!(dirty);
         let _ = dir;
+    }
+
+    /// Open a note of `body` in a window of `width`×`height` and return the
+    /// window handle plus the temp dir (kept alive by the caller).
+    fn open_note_in(
+        cx: &mut TestAppContext,
+        width: f32,
+        height: f32,
+        body: &str,
+    ) -> (
+        Entity<MekuShell>,
+        gpui_kit::AnyWindowHandle,
+        tempfile::TempDir,
+    ) {
+        let (view, window) = boot_sized(cx, width, height);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doc.md"), body).unwrap();
+        let rel = PathBuf::from("doc.md");
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_mekuto(&root, cx));
+        });
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        (view, window, dir)
+    }
+
+    /// Chrome must fill the window: title bar on top, status bar pinned to
+    /// the bottom edge, document area filling everything between them.
+    fn assert_shell_geometry(cx: &mut TestAppContext, width: f32, height: f32, body: &str) {
+        let (view, window, dir) = open_note_in(cx, width, height, body);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let status = window.find("status-bar").bounds();
+            let status_top = status.origin.y.as_f32();
+            let status_h = status.size.height.as_f32();
+            let status_bottom = status_top + status_h;
+            assert!(
+                (status_bottom - height).abs() <= 1.0,
+                "status bar bottom {status_bottom} must sit on the {height}px window edge"
+            );
+            assert!(
+                (20.0..40.0).contains(&status_h),
+                "status bar height {status_h} should be a thin strip"
+            );
+
+            let doc = window.find("md-scroll").bounds();
+            let doc_bottom = doc.origin.y.as_f32() + doc.size.height.as_f32();
+            assert!(
+                (doc_bottom - status_top).abs() <= 1.0,
+                "document area must end where the status bar starts ({doc_bottom} vs {status_top})"
+            );
+            // Title bar is 34px; the tab bar sits above the document inside
+            // the centre column, so the document must start below both and
+            // can never be taller than the middle region.
+            let middle_h = status_top - 34.0;
+            assert!(
+                doc.size.height.as_f32() <= middle_h + 1.0,
+                "document area {} must stay inside the middle region {middle_h}",
+                doc.size.height.as_f32()
+            );
+            assert!(
+                doc.origin.y.as_f32() >= 34.0 + 20.0,
+                "document must sit below the title bar and tab bar, top at {}",
+                doc.origin.y.as_f32()
+            );
+
+            let tree = window.find("file-tree-scroll").bounds();
+            let tree_bottom = tree.origin.y.as_f32() + tree.size.height.as_f32();
+            assert!(
+                tree_bottom <= status_top + 1.0,
+                "sidebar tree must stay above the status bar ({tree_bottom} vs {status_top})"
+            );
+        })
+        .unwrap();
+        let _ = (view, dir);
+    }
+
+    #[test]
+    fn shell_fills_window_at_1200x800() {
+        run_ui_test("shell_1200", shell_1200_body);
+    }
+
+    fn shell_1200_body(cx: &mut TestAppContext) {
+        assert_shell_geometry(cx, 1200.0, 800.0, "# T\n\nbody here\n");
+    }
+
+    #[test]
+    fn shell_fills_window_at_1158x763() {
+        run_ui_test("shell_1158", shell_1158_body);
+    }
+
+    fn shell_1158_body(cx: &mut TestAppContext) {
+        assert_shell_geometry(cx, 1158.0, 763.0, "# T\n\nbody here\n");
+    }
+
+    #[test]
+    fn long_note_scrolls_inside_middle_region() {
+        run_ui_test("long_note_scrolls", long_note_body);
+    }
+
+    fn long_note_body(cx: &mut TestAppContext) {
+        // 60 paragraphs would grow far past an 800px window if the document
+        // area were not bounded; it must stay inside the middle and scroll.
+        let body: String = (0..60)
+            .map(|i| format!("Paragraph {i} text.\n\n"))
+            .collect();
+        assert_shell_geometry(cx, 1158.0, 763.0, &body);
     }
 }
