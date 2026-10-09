@@ -3,12 +3,12 @@ mod explorer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use explorer::Explorer;
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::sidebar::{
@@ -29,7 +29,8 @@ actions!(
         CloseTab,
         NextTab,
         OpenFolder,
-        CancelOverlay
+        CancelOverlay,
+        Save
     ]
 );
 
@@ -62,6 +63,11 @@ pub struct MekuShell {
     explorer: Explorer,
     tree: Entity<TreeState>,
     buffers: HashMap<PathBuf, Entity<OpenBuffer>>,
+    editors: HashMap<PathBuf, Entity<EditorState>>,
+    _editor_subs: HashMap<PathBuf, Subscription>,
+    last_edit: HashMap<PathBuf, Instant>,
+    /// Rel path with unsaved edits that changed on disk underneath us.
+    conflict: Option<PathBuf>,
     watcher: Option<notify::RecommendedWatcher>,
     watcher_rx: Option<mpsc::Receiver<VaultEvent>>,
     naming: Option<Naming>,
@@ -85,6 +91,10 @@ impl MekuShell {
             explorer: Explorer::new(),
             tree,
             buffers: HashMap::new(),
+            editors: HashMap::new(),
+            _editor_subs: HashMap::new(),
+            last_edit: HashMap::new(),
+            conflict: None,
             watcher: None,
             watcher_rx: None,
             naming: None,
@@ -220,6 +230,18 @@ impl MekuShell {
                 .is_none_or(|r| r != rel && !r.starts_with(rel))
         });
         self.buffers.retain(|r, _| r != rel && !r.starts_with(rel));
+        self.editors.retain(|r, _| r != rel && !r.starts_with(rel));
+        self._editor_subs
+            .retain(|r, _| r != rel && !r.starts_with(rel));
+        self.last_edit
+            .retain(|r, _| r != rel && !r.starts_with(rel));
+        if self
+            .conflict
+            .as_ref()
+            .is_some_and(|c| c == rel || c.starts_with(rel))
+        {
+            self.conflict = None;
+        }
         if self.tabs.is_empty() {
             self.tabs.push(EditorTab {
                 rel: None,
@@ -267,6 +289,10 @@ impl MekuShell {
                 }
                 self.tabs.clear();
                 self.buffers.clear();
+                self.editors.clear();
+                self._editor_subs.clear();
+                self.last_edit.clear();
+                self.conflict = None;
                 for tab in &session.open_tabs {
                     if root.join(&tab.path).is_file() {
                         self.open_file_inner(&tab.path, cx);
@@ -331,44 +357,230 @@ impl MekuShell {
                 events.push(event);
             }
         }
-        if events.is_empty() {
+        if !events.is_empty() {
+            let mut tree_changed = false;
+            let mut reload = Vec::new();
+            let mut removed = Vec::new();
+            for event in &events {
+                match event {
+                    VaultEvent::Modified(file) if self.buffers.contains_key(&file.rel) => {
+                        reload.push(file.rel.clone());
+                    }
+                    VaultEvent::Removed(rel) => removed.push(rel.clone()),
+                    _ => {}
+                }
+                if self.explorer.on_vault_event(event) {
+                    tree_changed = true;
+                }
+            }
+            for rel in reload {
+                self.sync_buffer_with_disk(&rel, cx);
+            }
+            for rel in removed {
+                self.close_tabs_for(&rel, cx);
+            }
+            if tree_changed {
+                self.explorer.refresh();
+                self.sync_tree(cx);
+            }
+            cx.notify();
+        }
+        self.autosave(cx);
+    }
+
+    /// Reconcile an open buffer with its file after a watcher Modified event.
+    /// Identical content (e.g. our own save) only refreshes the mtime, so the
+    /// editor is never rebuilt from under the cursor. A dirty buffer with
+    /// genuinely different disk content raises [`Self::conflict`] instead of
+    /// reloading; a clean one reloads silently.
+    fn sync_buffer_with_disk(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        let (Some(abs), Some(buffer)) = (self.explorer.abs(rel), self.buffers.get(rel).cloned())
+        else {
+            return;
+        };
+        let disk = std::fs::read_to_string(&abs).unwrap_or_default();
+        let (dirty, snapshot) = buffer.read_with(cx, |b, _| (b.dirty, b.snapshot().1));
+        if disk == snapshot {
+            let mtime = std::fs::metadata(&abs).and_then(|m| m.modified()).ok();
+            buffer.update(cx, |b, _| {
+                if let Some(mtime) = mtime {
+                    b.disk_mtime = Some(mtime);
+                }
+            });
             return;
         }
-        let mut tree_changed = false;
-        let mut reload = Vec::new();
-        let mut removed = Vec::new();
-        for event in &events {
-            match event {
-                VaultEvent::Modified(file) if self.buffers.contains_key(&file.rel) => {
-                    reload.push(file.rel.clone());
+        if dirty {
+            self.conflict = Some(rel.to_path_buf());
+            self.notice = Some(format!(
+                "{} changed on disk — resolve above to keep editing",
+                rel.display()
+            ));
+            cx.notify();
+            return;
+        }
+        self.replace_buffer_text(rel, &disk, cx);
+        self.notice = Some(format!("Reloaded {} (changed on disk)", rel.display()));
+        cx.notify();
+    }
+
+    /// Swap a buffer's text without touching dirty state, and drop its editor
+    /// so the next frame rebuilds it from the buffer (cursor resets; this
+    /// only runs for explicit reload decisions, never on keystrokes).
+    fn replace_buffer_text(&mut self, rel: &Path, text: &str, cx: &mut Context<Self>) {
+        if let Some(buffer) = self.buffers.get(rel) {
+            let len = buffer.read_with(cx, |b, _| b.len_bytes());
+            buffer.update(cx, |b, _| {
+                b.apply_edit(0..len, text);
+                b.dirty = false;
+            });
+        }
+        self.editors.remove(rel);
+        self.last_edit.remove(rel);
+    }
+
+    // -- editor ----------------------------------------------------------
+
+    /// Lazily create (or fetch) the editing state for an open buffer.
+    /// Called from render, where a Window is available.
+    fn ensure_editor(
+        &mut self,
+        rel: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<EditorState>> {
+        if self.editors.contains_key(rel) {
+            return self.editors.get(rel).cloned();
+        }
+        let text = self
+            .buffers
+            .get(rel)
+            .map(|b| b.read_with(cx, |b, _| b.snapshot().1))?;
+        let editor = cx.new(|cx| EditorState::new(window, cx).default_value(text));
+        // Resolve the path dynamically: renames move the entity to a new
+        // key, and a captured path would go stale and drop keystrokes.
+        let sub = cx.subscribe(
+            &editor,
+            move |this: &mut Self, editor: Entity<EditorState>, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change)
+                    && let Some(rel) = this
+                        .editors
+                        .iter()
+                        .find_map(|(r, e)| (*e == editor).then(|| r.clone()))
+                {
+                    this.on_editor_change(&rel, cx);
                 }
-                VaultEvent::Removed(rel) => removed.push(rel.clone()),
-                _ => {}
+            },
+        );
+        self._editor_subs.insert(rel.to_path_buf(), sub);
+        self.editors.insert(rel.to_path_buf(), editor.clone());
+        Some(editor)
+    }
+
+    fn on_editor_change(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        let text = self
+            .editors
+            .get(rel)
+            .map(|e| e.read_with(cx, |e, _| e.value().to_string()));
+        let Some(text) = text else { return };
+        if let Some(buffer) = self.buffers.get(rel) {
+            buffer.update(cx, |b, _| {
+                let len = b.len_bytes();
+                b.apply_edit(0..len, &text);
+            });
+        }
+        self.last_edit.insert(rel.to_path_buf(), Instant::now());
+        cx.notify();
+    }
+
+    fn is_dirty(&self, rel: &Path, cx: &App) -> bool {
+        self.buffers.get(rel).is_some_and(|b| b.read(cx).dirty)
+    }
+
+    // -- saving ----------------------------------------------------------
+
+    fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(rel) = self.tabs.get(self.active_tab).and_then(|t| t.rel.clone()) {
+            self.save_buffer(&rel, cx);
+        }
+    }
+
+    fn save_buffer(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        let (Some(abs), Some(buffer)) = (self.explorer.abs(rel), self.buffers.get(rel).cloned())
+        else {
+            return;
+        };
+        let text = buffer.read_with(cx, |b, _| b.snapshot().1);
+        match std::fs::write(&abs, &text) {
+            Ok(()) => {
+                let mtime = std::fs::metadata(&abs).and_then(|m| m.modified()).ok();
+                buffer.update(cx, |b, _| {
+                    b.dirty = false;
+                    if let Some(mtime) = mtime {
+                        b.disk_mtime = Some(mtime);
+                    }
+                });
+                self.last_edit.remove(rel);
+                // A save from a conflicted buffer resolves the conflict.
+                if self.conflict.as_deref() == Some(rel) {
+                    self.conflict = None;
+                }
+                self.notice = None;
             }
-            if self.explorer.on_vault_event(event) {
-                tree_changed = true;
+            Err(e) => {
+                self.notice = Some(format!("Save failed for {}: {e}", rel.display()));
             }
-        }
-        for rel in reload {
-            self.reload_buffer(&rel, cx);
-        }
-        for rel in removed {
-            self.close_tabs_for(&rel, cx);
-        }
-        if tree_changed {
-            self.explorer.refresh();
-            self.sync_tree(cx);
         }
         cx.notify();
     }
 
-    fn reload_buffer(&mut self, rel: &Path, cx: &mut Context<Self>) {
-        let Some(abs) = self.explorer.abs(rel) else {
-            return;
-        };
-        if let Ok(buffer) = OpenBuffer::load(rel.to_path_buf(), &abs) {
-            self.buffers.insert(rel.to_path_buf(), cx.new(|_| buffer));
-            self.notice = Some(format!("Reloaded {} (changed on disk)", rel.display()));
+    /// Save dirty buffers idle for longer than the debounce window.
+    /// Runs inside the watcher pump, a few times per second.
+    fn autosave(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let due: Vec<PathBuf> = self
+            .buffers
+            .iter()
+            .filter(|(rel, b)| {
+                b.read_with(cx, |b, _| b.dirty)
+                    && self
+                        .last_edit
+                        .get(*rel)
+                        .is_none_or(|at| now.duration_since(*at) > Duration::from_millis(800))
+            })
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        for rel in due {
+            self.save_buffer(&rel, cx);
+        }
+    }
+
+    // -- conflict banner --------------------------------------------------
+
+    fn resolve_keep_mine(&mut self, cx: &mut Context<Self>) {
+        if let Some(rel) = self.conflict.clone()
+            && let (Some(abs), Some(buffer)) =
+                (self.explorer.abs(&rel), self.buffers.get(&rel).cloned())
+        {
+            // Adopt the on-disk mtime without touching text or dirty state;
+            // no further event will arrive for this change.
+            if let Ok(mtime) = std::fs::metadata(&abs).and_then(|m| m.modified()) {
+                buffer.update(cx, |b, _| b.disk_mtime = Some(mtime));
+            }
+        }
+        self.conflict = None;
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn resolve_load_disk(&mut self, cx: &mut Context<Self>) {
+        if let Some(rel) = self.conflict.clone()
+            && let Some(abs) = self.explorer.abs(&rel)
+            && let Ok(disk) = std::fs::read_to_string(&abs)
+        {
+            self.replace_buffer_text(&rel, &disk, cx);
+            self.conflict = None;
+            self.notice = Some(format!("Reloaded {} from disk", rel.display()));
+            cx.notify();
         }
     }
 
@@ -615,7 +827,8 @@ impl MekuShell {
                 tab.title = Self::tab_title(&tab.rel.clone().unwrap());
             }
         }
-        // Move cached buffers along; directories move whole subtrees.
+        // Move cached buffers and editors along; directories move subtrees.
+        // Editor text is path-independent, so entities move as-is.
         let keys: Vec<PathBuf> = self.buffers.keys().cloned().collect();
         for key in keys {
             if (key == *old || key.starts_with(old))
@@ -624,7 +837,16 @@ impl MekuShell {
                 let suffix = key.strip_prefix(old).unwrap_or(Path::new(""));
                 let moved = new.join(suffix);
                 entity.update(cx, |buffer, _| buffer.rel = moved.clone());
-                self.buffers.insert(moved, entity);
+                self.buffers.insert(moved.clone(), entity);
+                if let Some(editor) = self.editors.remove(&key) {
+                    self.editors.insert(moved.clone(), editor);
+                }
+                if let Some(sub) = self._editor_subs.remove(&key) {
+                    self._editor_subs.insert(moved.clone(), sub);
+                }
+                if let Some(at) = self.last_edit.remove(&key) {
+                    self.last_edit.insert(moved, at);
+                }
             }
         }
         self.save_session();
@@ -759,7 +981,7 @@ impl MekuShell {
             .into_any_element()
     }
 
-    fn render_center(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let bar_entity = entity.clone();
         let tab_bar = TabBar::new("meku-tabs")
@@ -775,7 +997,13 @@ impl MekuShell {
             })
             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                 let entity = entity.clone();
-                Tab::new().label(tab.title.clone()).suffix(
+                let dirty = tab.rel.as_ref().is_some_and(|rel| self.is_dirty(rel, cx));
+                let label = if dirty {
+                    format!("• {}", tab.title)
+                } else {
+                    tab.title.clone()
+                };
+                Tab::new().label(label).suffix(
                     Button::new(format!("close-tab-{index}"))
                         .label("×")
                         .ghost()
@@ -796,7 +1024,19 @@ impl MekuShell {
                 rel: None,
                 title: "Welcome".to_string(),
             });
-        let empty_state = v_flex()
+        let body: AnyElement = match active.rel.clone() {
+            Some(rel) if self.buffers.contains_key(&rel) => self.render_editor(&rel, window, cx),
+            _ => self.render_empty_state(&active.title, cx),
+        };
+
+        v_flex()
+            .size_full()
+            .child(tab_bar)
+            .child(div().flex_1().child(body))
+    }
+
+    fn render_empty_state(&mut self, title: &str, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
             .size_full()
             .items_center()
             .justify_center()
@@ -807,25 +1047,106 @@ impl MekuShell {
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground)
-                    .child(active.title),
+                    .child(title.to_string()),
             )
             .child(if self.explorer.is_open() {
-                "Select a note in the explorer — editing lands in Build 3."
+                "Select a note in the explorer to start editing."
             } else {
                 "Open a folder (Ctrl-O) or pass it on the command line."
-            });
+            })
+            .into_any_element()
+    }
 
-        v_flex()
-            .size_full()
-            .child(tab_bar)
-            .child(div().flex_1().child(empty_state).into_any_element())
+    fn render_editor(
+        &mut self,
+        rel: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut column = v_flex().size_full();
+        if self.conflict.as_deref() == Some(rel) {
+            column = column.child(self.render_conflict_banner(rel, cx));
+        }
+        match self.ensure_editor(rel, window, cx) {
+            Some(editor) => column.child(
+                div()
+                    .flex_1()
+                    .p_2()
+                    .child(Editor::new(&editor))
+                    .into_any_element(),
+            ),
+            None => column.child(
+                div()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Could not open this file."),
+            ),
+        }
+        .into_any_element()
+    }
+
+    fn render_conflict_banner(&mut self, rel: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let shell = cx.entity();
+        let load_shell = shell.clone();
+        let keep_shell = shell.clone();
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .text_xs()
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(cx.theme().foreground)
+                    .child(format!(
+                        "{} changed on disk. Load the disk version or keep your edits?",
+                        rel.display()
+                    )),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("conflict-keep")
+                            .label("Keep mine")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                keep_shell.update(cx, |view, cx| view.resolve_keep_mine(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("conflict-load")
+                            .label("Load disk")
+                            .primary()
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                load_shell.update(cx, |view, cx| view.resolve_load_disk(cx));
+                            }),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_dirty = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.rel.as_deref())
+            .is_some_and(|rel| self.is_dirty(rel, cx));
         let left = if let Some(notice) = &self.notice {
             notice.clone()
         } else if self.explorer.is_open() {
-            format!("● {}", self.explorer.root_name())
+            let dot = if active_dirty { "●" } else { "○" };
+            format!("{dot} {}", self.explorer.root_name())
         } else {
             "○ No mekuto open".to_string()
         };
@@ -1000,6 +1321,7 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_open_folder))
             .on_action(cx.listener(Self::on_cancel_overlay))
+            .on_action(cx.listener(Self::on_save))
             .child(TitleBar::new().child(title))
             .child(
                 div().flex_1().child(
@@ -1022,7 +1344,7 @@ impl Render for MekuShell {
                                         .into_any_element(),
                                 ),
                         )
-                        .child(self.render_center(cx).into_any_element()),
+                        .child(self.render_center(window, cx).into_any_element()),
                 ),
             )
             .child(self.render_status_bar(cx));
@@ -1050,6 +1372,7 @@ fn main() {
             KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
             KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
             KeyBinding::new("ctrl-o", OpenFolder, Some("Meku")),
+            KeyBinding::new("ctrl-s", Save, Some("Meku")),
             KeyBinding::new("escape", CancelOverlay, None),
         ]);
 
@@ -1083,12 +1406,13 @@ mod ui_tests {
     // would shadow the builtin `#[test]` and send the harness into macro
     // recursion. Import everything this module needs explicitly.
     use crate::{
-        CancelOverlay, CloseTab, MekuShell, NamingMode, NewTab, NextTab, OpenFolder, ToggleSidebar,
+        CancelOverlay, CloseTab, MekuShell, NamingMode, NewTab, NextTab, OpenFolder, Save,
+        ToggleSidebar,
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, Entity, KeyBinding, TestAppContext, px, size};
-    use std::path::PathBuf;
+    use gpui_kit::{AppContext, Entity, Focusable, KeyBinding, TestAppContext, px, size};
+    use std::path::{Path, PathBuf};
 
     /// Manual equivalent of `#[gpui_kit::test]` (whose macro overflows
     /// rustc in this crate). Mirrors the harness the macro generates:
@@ -1125,6 +1449,7 @@ mod ui_tests {
                 KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
                 KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
                 KeyBinding::new("ctrl-o", OpenFolder, Some("Meku")),
+                KeyBinding::new("ctrl-s", Save, Some("Meku")),
                 KeyBinding::new("escape", CancelOverlay, None),
             ]);
         });
@@ -1246,5 +1571,210 @@ mod ui_tests {
         });
         assert!(naming_open);
         assert!(notice.is_some());
+    }
+
+    fn focus_editor_for(
+        cx: &mut TestAppContext,
+        view: &Entity<MekuShell>,
+        window: gpui_kit::AnyWindowHandle,
+        rel: &Path,
+    ) {
+        let handle = cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                shell
+                    .editors
+                    .get(rel)
+                    .map(|e| e.read(cx).focus_handle(cx).clone())
+            })
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            if let Some(handle) = handle {
+                window.focus(&handle, cx);
+            }
+        })
+        .unwrap();
+    }
+
+    fn buffer_text(
+        cx: &mut TestAppContext,
+        view: &Entity<MekuShell>,
+        rel: &Path,
+    ) -> (String, bool) {
+        cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                shell
+                    .buffers
+                    .get(rel)
+                    .map(|b| b.read_with(cx, |b, _| (b.snapshot().1, b.dirty)))
+                    .unwrap_or_default()
+            })
+        })
+    }
+
+    #[test]
+    fn typing_flows_into_buffer_and_marks_dirty() {
+        run_ui_test("typing_dirty", typing_dirty_body);
+    }
+
+    fn typing_dirty_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        let rel = PathBuf::from("note.md");
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        focus_editor_for(cx, &view, window, &rel);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("Hello ", cx);
+        })
+        .unwrap();
+
+        let (text, dirty) = buffer_text(cx, &view, &rel);
+        assert!(
+            text.starts_with("Hello "),
+            "typed text lands in buffer: {text:?}"
+        );
+        assert!(dirty, "buffer is dirty after typing");
+        // Tab label gains a dirty dot.
+        let label = cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                let tab = &shell.tabs[shell.active_tab];
+                let dirty = tab.rel.as_ref().is_some_and(|r| shell.is_dirty(r, cx));
+                format!("{}{}", if dirty { "• " } else { "" }, tab.title)
+            })
+        });
+        assert!(label.starts_with("• "), "dirty tab shows a dot: {label:?}");
+    }
+
+    #[test]
+    fn save_writes_file_and_clears_dirty() {
+        run_ui_test("save_clears", save_clears_body);
+    }
+
+    fn save_clears_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let dir = open_fixture(cx, &view);
+        let rel = PathBuf::from("note.md");
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        focus_editor_for(cx, &view, window, &rel);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("saved!", cx);
+        })
+        .unwrap();
+        assert!(buffer_text(cx, &view, &rel).1);
+
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.save_buffer(&rel, cx));
+        });
+        let (text, dirty) = buffer_text(cx, &view, &rel);
+        assert!(!dirty);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.md")).unwrap(),
+            text
+        );
+    }
+
+    #[test]
+    fn undo_reverts_typed_text() {
+        run_ui_test("undo_reverts", undo_reverts_body);
+    }
+
+    fn undo_reverts_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        let rel = PathBuf::from("note.md");
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        focus_editor_for(cx, &view, window, &rel);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("xyz", cx);
+        })
+        .unwrap();
+        assert!(buffer_text(cx, &view, &rel).0.starts_with("xyz"));
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-z", cx);
+        })
+        .unwrap();
+        let (text, _) = buffer_text(cx, &view, &rel);
+        assert!(
+            !text.starts_with("xyz"),
+            "undo removed typed text: {text:?}"
+        );
+    }
+
+    #[test]
+    fn external_edit_on_dirty_buffer_raises_conflict() {
+        run_ui_test("conflict_flow", conflict_flow_body);
+    }
+
+    fn conflict_flow_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let dir = open_fixture(cx, &view);
+        let rel = PathBuf::from("note.md");
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        focus_editor_for(cx, &view, window, &rel);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("mine ", cx);
+        })
+        .unwrap();
+        assert!(
+            buffer_text(cx, &view, &rel).1,
+            "buffer dirty before conflict"
+        );
+
+        // Someone else rewrites the file behind our back.
+        std::fs::write(dir.path().join("note.md"), "# Theirs\n").unwrap();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.sync_buffer_with_disk(&rel, cx));
+        });
+        let conflict = cx.update(|cx| view.read_with(cx, |shell, _| shell.conflict.clone()));
+        assert_eq!(conflict, Some(rel.clone()));
+        // Buffer text untouched by the external write.
+        assert!(buffer_text(cx, &view, &rel).0.starts_with("mine "));
+
+        // Loading disk wins: buffer follows the file.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("conflict-load", cx);
+        })
+        .unwrap();
+        let (text, _) = buffer_text(cx, &view, &rel);
+        assert_eq!(text, "# Theirs\n");
+        let conflict = cx.update(|cx| view.read_with(cx, |shell, _| shell.conflict.clone()));
+        assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn external_edit_on_clean_buffer_reloads_silently() {
+        run_ui_test("clean_reload", clean_reload_body);
+    }
+
+    fn clean_reload_body(cx: &mut TestAppContext) {
+        let (view, _window) = boot(cx);
+        let dir = open_fixture(cx, &view);
+        let rel = PathBuf::from("note.md");
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        std::fs::write(dir.path().join("note.md"), "# Fresh\n").unwrap();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.sync_buffer_with_disk(&rel, cx));
+        });
+        let (text, _) = buffer_text(cx, &view, &rel);
+        assert_eq!(text, "# Fresh\n");
+        let conflict = cx.update(|cx| view.read_with(cx, |shell, _| shell.conflict.clone()));
+        assert!(conflict.is_none());
     }
 }
