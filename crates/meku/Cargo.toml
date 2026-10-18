@@ -1,7 +1,7 @@
 [package]
 name = "meku"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.92"
 
 [[bin]]
@@ -9,4 +9,17 @@ name = "meku"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 gpui-kit = { workspace = true }
+meku-buffer = { workspace = true }
+meku-index = { workspace = true }
+meku-markdown = { workspace = true }
+meku-vault = { workspace = true }
+notify = { workspace = true }
+rfd = "0.17"
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+# Headless UI integration tests (#[gpui_kit::test], TestWindowExt).
+gpui-kit = { workspace = true, features = ["test-support"] }
