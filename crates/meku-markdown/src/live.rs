@@ -14,7 +14,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use crate::{parser_options, InlineStyle};
+use crate::{InlineStyle, parser_options};
 
 /// Structural class of a source line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,21 @@ pub enum RowKind {
     Table,
     /// Thematic break (`---`, `***`, `___`).
     Rule,
+}
+
+/// A source line that is exactly one image: `![alt](target)` after optional
+/// leading whitespace. Targets are used verbatim (`http(s)`, `data:`, paths).
+pub fn standalone_image(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim_start_matches(' ').trim_end();
+    let bang = trimmed.strip_prefix("![")?;
+    let alt_end = bang.find("]")?;
+    let target = bang[alt_end + 1..].trim_start();
+    let target = target.strip_prefix("(")?;
+    let target = target.strip_suffix(")")?;
+    if target.is_empty() || target.contains("\n") {
+        return None;
+    }
+    Some((&bang[..alt_end], target))
 }
 
 /// What a byte range is, beyond its inline style.
@@ -702,5 +717,18 @@ mod tests {
         let spans = content_spans(text);
         let covered: String = spans.iter().map(|(r, _)| &text[r.clone()]).collect();
         assert_eq!(covered, "a b c");
+    }
+
+    #[test]
+    fn standalone_image_lines_parse() {
+        assert_eq!(
+            standalone_image("![alt](assets/x.png)"),
+            Some(("alt", "assets/x.png"))
+        );
+        assert_eq!(standalone_image("  ![](y.png)"), Some(("", "y.png")));
+        // Not a standalone image, not an image at all, empty target.
+        assert_eq!(standalone_image("text ![x](y.png)"), None);
+        assert_eq!(standalone_image("[link](x.png)"), None);
+        assert_eq!(standalone_image("![x]()"), None);
     }
 }

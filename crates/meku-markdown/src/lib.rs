@@ -86,6 +86,9 @@ pub struct StyledDoc {
 /// Single-surface live-preview model (rows, roles, hidden/reveal projection).
 pub mod live;
 
+/// Fenced-code syntax highlighting into [`crate::highlight::Tok`] spans.
+pub mod highlight;
+
 pub fn parser_options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
@@ -161,18 +164,17 @@ fn push_span(
         pending_item.take();
         return;
     }
-    if let Some(item_start) = pending_item.take() {
-        if item_start <= range.start && range.start - item_start <= 12 {
-            if let Some(bullet) = text.get(item_start..range.start) {
-                if is_bullet(bullet) {
-                    current.spans.push(StyledSpan {
-                        start: item_start,
-                        end: range.start,
-                        style: InlineStyle::empty(),
-                    });
-                }
-            }
-        }
+    if let Some(item_start) = pending_item.take()
+        && item_start <= range.start
+        && range.start - item_start <= 12
+        && let Some(bullet) = text.get(item_start..range.start)
+        && is_bullet(bullet)
+    {
+        current.spans.push(StyledSpan {
+            start: item_start,
+            end: range.start,
+            style: InlineStyle::empty(),
+        });
     }
     if text.get(range.clone()).is_none() {
         return;

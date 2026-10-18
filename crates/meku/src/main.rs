@@ -33,6 +33,7 @@ actions!(
         OpenFolder,
         CancelOverlay,
         Save,
+        CycleMode,
         DocLeft,
         DocRight,
         DocUp,
@@ -57,10 +58,39 @@ actions!(
     ]
 );
 
+/// How the open document is presented. Live is the default: one surface,
+/// caret row raw, everything else preview-styled. Edit shows raw source
+/// everywhere; Read styles every row, hides the caret and blocks edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Edit,
+    Live,
+    Read,
+}
+
+impl Mode {
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Edit => "Edit",
+            Mode::Live => "Live",
+            Mode::Read => "Read",
+        }
+    }
+
+    fn next(self) -> Mode {
+        match self {
+            Mode::Edit => Mode::Live,
+            Mode::Live => Mode::Read,
+            Mode::Read => Mode::Edit,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct EditorTab {
     rel: Option<PathBuf>,
     title: String,
+    mode: Mode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +143,7 @@ impl MekuShell {
             tabs: vec![EditorTab {
                 rel: None,
                 title: "Welcome".to_string(),
+                mode: Mode::Live,
             }],
             active_tab: 0,
             explorer: Explorer::new(),
@@ -189,6 +220,7 @@ impl MekuShell {
                 self.tabs.push(EditorTab {
                     rel: Some(rel.to_path_buf()),
                     title: Self::tab_title(rel),
+                    mode: Mode::Live,
                 });
                 self.active_tab = self.tabs.len() - 1;
                 self.notice = None;
@@ -206,6 +238,7 @@ impl MekuShell {
         self.tabs.push(EditorTab {
             rel: None,
             title: format!("Untitled-{n}"),
+            mode: Mode::Live,
         });
         self.active_tab = self.tabs.len() - 1;
         self.save_session();
@@ -221,6 +254,7 @@ impl MekuShell {
             self.tabs.push(EditorTab {
                 rel: None,
                 title: "Welcome".to_string(),
+                mode: Mode::Live,
             });
             self.active_tab = 0;
         } else if self.active_tab >= self.tabs.len() {
@@ -238,6 +272,33 @@ impl MekuShell {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
             self.save_session();
+            cx.notify();
+        }
+    }
+
+    /// Presentation mode of the tab currently visible, defaulting to Live.
+    fn tab_mode(&self) -> Mode {
+        self.tabs
+            .get(self.active_tab)
+            .map(|t| t.mode)
+            .unwrap_or(Mode::Live)
+    }
+
+    fn on_cycle_mode(&mut self, _: &CycleMode, _: &mut Window, cx: &mut Context<Self>) {
+        if self.doc_rel().is_some() {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.mode = tab.mode.next();
+            }
+            // Rows do not change count, only presentation: keep the viewport.
+            cx.notify();
+        }
+    }
+
+    fn set_tab_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        if self.doc_rel().is_some() {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.mode = mode;
+            }
             cx.notify();
         }
     }
@@ -268,6 +329,7 @@ impl MekuShell {
             self.tabs.push(EditorTab {
                 rel: None,
                 title: "Welcome".to_string(),
+                mode: Mode::Live,
             });
         }
         self.active_tab = self.active_tab.min(self.tabs.len() - 1);
@@ -331,6 +393,7 @@ impl MekuShell {
                     self.tabs.push(EditorTab {
                         rel: None,
                         title: "Welcome".to_string(),
+                        mode: Mode::Live,
                     });
                     self.active_tab = 0;
                 }
@@ -1076,6 +1139,7 @@ impl MekuShell {
             .unwrap_or(EditorTab {
                 rel: None,
                 title: "Welcome".to_string(),
+                mode: Mode::Live,
             });
         let body: AnyElement = match active.rel.clone() {
             Some(rel) if self.buffers.contains_key(&rel) => {
@@ -1084,6 +1148,7 @@ impl MekuShell {
                     column = column.child(self.render_conflict_banner(&rel, cx));
                 }
                 column
+                    .child(self.render_mode_switch(active.mode, cx))
                     .child(self.render_document(&rel, window, cx))
                     .into_any_element()
             }
@@ -1094,6 +1159,41 @@ impl MekuShell {
             .size_full()
             .child(div().flex_none().child(tab_bar))
             .child(v_flex().flex_1().min_h_0().child(body))
+    }
+
+    /// Edit / Live / Read buttons, right-aligned above the document. Only
+    /// shown while a note is open; the active one is filled.
+    fn render_mode_switch(&mut self, mode: Mode, cx: &mut Context<Self>) -> AnyElement {
+        let shell = cx.entity();
+        let buttons: Vec<AnyElement> = [Mode::Edit, Mode::Live, Mode::Read]
+            .into_iter()
+            .map(|m| {
+                let click_shell = shell.clone();
+                let mut button = Button::new(format!("mode-{:?}", m).to_lowercase())
+                    .label(m.label())
+                    .xsmall();
+                button = if m == mode {
+                    button.primary()
+                } else {
+                    button.ghost()
+                };
+                button
+                    .on_click(move |_, _, cx| {
+                        click_shell.update(cx, |view, cx| view.set_tab_mode(m, cx));
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        h_flex()
+            .flex_none()
+            .justify_end()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .children(buttons)
+            .into_any_element()
     }
 
     fn render_empty_state(&mut self, title: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -1188,7 +1288,11 @@ impl MekuShell {
             StatusBar::new()
                 .left(left)
                 .right("Markdown")
-                .right("Ln 1, Col 1"),
+                .right(if self.doc_rel().is_some() {
+                    self.tab_mode().label()
+                } else {
+                    "Ln 1, Col 1"
+                }),
         )
     }
 
@@ -1348,6 +1452,7 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_open_folder))
             .on_action(cx.listener(Self::on_cancel_overlay))
+            .on_action(cx.listener(Self::on_cycle_mode))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_doc_left))
             .on_action(cx.listener(Self::on_doc_right))
@@ -1410,6 +1515,7 @@ fn main() {
             KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
             KeyBinding::new("ctrl-o", OpenFolder, Some("Meku")),
             KeyBinding::new("ctrl-s", Save, Some("Meku")),
+            KeyBinding::new("ctrl-e", CycleMode, Some("Meku")),
             KeyBinding::new("escape", CancelOverlay, None),
             KeyBinding::new("left", DocLeft, Some("Meku")),
             KeyBinding::new("right", DocRight, Some("Meku")),
@@ -1465,10 +1571,11 @@ mod ui_tests {
     // would shadow the builtin `#[test]` and send the harness into macro
     // recursion. Import everything this module needs explicitly.
     use crate::{
-        CancelOverlay, CloseTab, DocBackspace, DocCopy, DocCut, DocDelete, DocDown, DocEnd,
-        DocEnter, DocHome, DocLeft, DocPaste, DocRedo, DocRight, DocSelectAll, DocSelectDown,
-        DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectRight, DocSelectUp, DocUndo, DocUp,
-        MekuShell, NamingMode, NewTab, NextTab, OpenFolder, Save, ToggleSidebar,
+        CancelOverlay, CloseTab, CycleMode, DocBackspace, DocCopy, DocCut, DocDelete, DocDown,
+        DocEnd, DocEnter, DocHome, DocLeft, DocPaste, DocRedo, DocRight, DocSelectAll,
+        DocSelectDown, DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectRight, DocSelectUp,
+        DocUndo, DocUp, MekuShell, Mode, NamingMode, NewTab, NextTab, OpenFolder, Save,
+        ToggleSidebar,
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
@@ -1519,6 +1626,7 @@ mod ui_tests {
                 KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
                 KeyBinding::new("ctrl-o", OpenFolder, Some("Meku")),
                 KeyBinding::new("ctrl-s", Save, Some("Meku")),
+                KeyBinding::new("ctrl-e", CycleMode, Some("Meku")),
                 KeyBinding::new("escape", CancelOverlay, None),
                 KeyBinding::new("left", DocLeft, Some("Meku")),
                 KeyBinding::new("right", DocRight, Some("Meku")),
@@ -2165,12 +2273,27 @@ mod ui_tests {
             })
             .unwrap();
         // Caret div is row-local; the element reports window-space, so shift
-        // the glyph point into the row before comparing. The plain paragraph
-        // has no row padding, so the two must agree.
+        // the glyph point into the row before comparing. `position_for_index`
+        // is layout-space (no line-box padding) while paint centers glyphs in
+        // the line box: add that padding to the expected y.
         let got_x = caret_b.origin.x.as_f32() - row_b.origin.x.as_f32();
         let got_y = caret_b.origin.y.as_f32() - row_b.origin.y.as_f32();
         let want_x = glyph.x.as_f32() - row_b.origin.x.as_f32();
-        let want_y = glyph.y.as_f32() - row_b.origin.y.as_f32();
+        let want_y = view.read_with(cx, |shell, _| {
+            let views = shell.doc_views.borrow();
+            let rv = views[2].as_ref().unwrap();
+            let baseline = rv
+                .layout
+                .position_for_index(rv.display.to_disp(dest))
+                .unwrap();
+            let wrapped = rv
+                .layout
+                .line_layout_for_index(rv.display.to_disp(dest))
+                .unwrap();
+            let font_box = wrapped.unwrapped_layout.ascent + wrapped.unwrapped_layout.descent;
+            let padding = (rv.layout.line_height() - font_box) / 2.0;
+            baseline.y.as_f32() - row_b.origin.y.as_f32() + padding.as_f32()
+        });
         assert!(
             (got_x - want_x).abs() <= 1.5,
             "caret x {got_x} must match painted glyph x {want_x}"
@@ -2288,5 +2411,201 @@ mod ui_tests {
             .map(|i| format!("Paragraph {i} text.\n\n"))
             .collect();
         assert_shell_geometry(cx, 1158.0, 763.0, &body);
+    }
+
+    // -- Build 5: modes, code highlighting, images, scroll-sync -------------
+
+    fn doc_mode(cx: &mut TestAppContext, view: &Entity<MekuShell>) -> Mode {
+        cx.update(|cx| view.read_with(cx, |shell, _| shell.tabs[shell.active_tab].mode))
+    }
+
+    fn cycle_with_key(
+        cx: &mut TestAppContext,
+        view: &Entity<MekuShell>,
+        window: gpui_kit::AnyWindowHandle,
+    ) {
+        focus_doc_for(cx, &view, window);
+        cx.update_window(window, |_, window, cx| window.press("ctrl-e", cx))
+            .unwrap();
+    }
+
+    #[test]
+    fn read_mode_hides_caret_and_blocks_typing() {
+        run_ui_test("read_mode_blocks", read_mode_blocks_body);
+    }
+
+    fn read_mode_blocks_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# T\n\nbody here\n");
+
+        // Live -> Read.
+        cycle_with_key(cx, &view, window);
+        assert_eq!(doc_mode(cx, &view), Mode::Read);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("doc-caret").is_none(), "no caret in Read");
+            window.input("typed ", cx);
+        })
+        .unwrap();
+        let (text, dirty) = buffer_text(cx, &view, &PathBuf::from("doc.md"));
+        assert_eq!(text, "# T\n\nbody here\n", "Read mode must not edit");
+        assert!(!dirty, "Read mode must not mark the buffer dirty");
+
+        // Live -> Read -> Edit -> Live: the cycle wraps back.
+        cycle_with_key(cx, &view, window);
+        assert_eq!(doc_mode(cx, &view), Mode::Edit);
+        cycle_with_key(cx, &view, window);
+        assert_eq!(doc_mode(cx, &view), Mode::Live);
+
+        // Buttons flip modes too; the roll starts from Live again.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("mode-read", cx);
+        })
+        .unwrap();
+        assert_eq!(doc_mode(cx, &view), Mode::Read);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("mode-edit", cx);
+        })
+        .unwrap();
+        assert_eq!(doc_mode(cx, &view), Mode::Edit);
+    }
+
+    #[test]
+    fn mode_cycling_keeps_the_row_in_view() {
+        run_ui_test("scroll_sync", scroll_sync_body);
+    }
+
+    fn scroll_sync_body(cx: &mut TestAppContext) {
+        // 80 rows: far past the viewport, so Live scrolling matters.
+        let body: String = (0..80).map(|i| format!("Row {i}\n")).collect();
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, &body);
+        let rel = PathBuf::from("doc.md");
+        let tail = body.len();
+        focus_doc_for(cx, &view, window);
+        // Put the caret on the last row, then End: the raw row scrolls in.
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                if let Some(buffer) = shell.buffers.get(&rel).cloned() {
+                    buffer.update(cx, |b, _| b.move_caret(tail, false));
+                }
+            });
+        });
+        // The list refines its height estimates while scrolling, so a few
+        // frames are needed before the tail settles in view.
+        for step in 0..4 {
+            cx.update_window(window, |_, window, cx| {
+                if step > 0 {
+                    window.press("end", cx);
+                }
+                window.render_frame(cx);
+            })
+            .unwrap();
+        }
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("doc-row", 80usize)).is_some(),
+                "Live scrolled the tail row in",
+            );
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.click("mode-read", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("doc-row", 80usize)).is_some(),
+                "Read mode keeps the tail row in view",
+            );
+            window.click("mode-edit", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("doc-row", 80usize)).is_some(),
+                "Edit mode keeps the tail row in view",
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn images_draw_when_their_row_is_hidden() {
+        run_ui_test("image_rows", image_rows_body);
+    }
+
+    fn image_rows_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(
+            cx,
+            1200.0,
+            800.0,
+            "# Title\n\n![pic](assets/pic.png)\n\nafter\n",
+        );
+        // Caret starts on the heading: the image row (2) is hidden -> drawn.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("image-row", 2usize)).is_some(),
+                "hidden image row draws the picture element"
+            );
+        })
+        .unwrap();
+        // In Edit mode the row shows raw text instead.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("mode-edit", cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("image-row", 2usize)).is_none(),
+                "Edit mode shows raw image markup, not the picture"
+            );
+            assert!(
+                window.try_find(("doc-row", 2usize)).is_some(),
+                "Edit mode shows the raw markup row"
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn code_fences_get_syntax_spans() {
+        run_ui_test("code_spans", code_spans_body);
+    }
+
+    fn code_spans_body(cx: &mut TestAppContext) {
+        let (view, _window, _dir) =
+            open_note_in(cx, 1200.0, 800.0, "```rust\nlet x = 1;\n```\nafter\n");
+        let (hl, kinds) = cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                let model = shell.doc_model(&PathBuf::from("doc.md"), cx).unwrap();
+                (
+                    model.hl,
+                    model.rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
+                )
+            })
+        });
+        assert_eq!(
+            kinds,
+            vec![
+                meku_markdown::live::RowKind::Code,
+                meku_markdown::live::RowKind::Code,
+                meku_markdown::live::RowKind::Code,
+                meku_markdown::live::RowKind::Text,
+                meku_markdown::live::RowKind::Blank,
+            ]
+        );
+        assert!(hl[0].is_none() && hl[2].is_none() && hl[3].is_none() && hl[4].is_none());
+        let spans = hl[1]
+            .clone()
+            .unwrap_or_else(|| panic!("rust fence must highlight"));
+        let text = "let x = 1;";
+        assert!(
+            spans
+                .iter()
+                .any(|(r, t)| t == &meku_markdown::highlight::Tok::Keyword
+                    && &text[r.clone()] == "let"),
+            "keyword `let` should be a token: {spans:?}"
+        );
     }
 }

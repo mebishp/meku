@@ -17,9 +17,17 @@ use std::time::Instant;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 use meku_markdown::InlineStyle;
+use meku_markdown::highlight::{Tok, highlight};
 use meku_markdown::live::{Display, Row, RowKind, build_rows, project, row_at};
 
 use crate::MekuShell;
+use crate::Mode;
+
+/// Per-row syntax spans in line-content byte offsets (`None` = plain).
+pub(crate) type RowSpans = Vec<Option<meku_markdown::highlight::SharedSpans>>;
+
+/// Syntax spans of one row, shared with the markdown cache.
+pub(crate) type RowColors = Option<meku_markdown::highlight::SharedSpans>;
 
 /// Editing commands reachable from the keymap and the platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +55,8 @@ pub(crate) struct DocModel {
     pub version: u64,
     pub text: Rc<str>,
     pub rows: Rc<Vec<Row>>,
+    /// Syntax spans per code row, in line-content byte offsets.
+    pub hl: Rc<RowSpans>,
 }
 
 /// What a rendered row exposes for hit testing: its text layout and the
@@ -83,10 +93,12 @@ impl MekuShell {
         }
         let text: Rc<str> = Rc::from(buffer.read(cx).text_string());
         let rows = Rc::new(build_rows(&text));
+        let hl = Self::colored_rows(&text, &rows);
         let model = DocModel {
             version,
             text,
             rows,
+            hl,
         };
         self.doc_models.insert(rel.to_path_buf(), model.clone());
         Some(model)
@@ -96,6 +108,38 @@ impl MekuShell {
         self.last_edit.insert(rel.to_path_buf(), Instant::now());
     }
 
+    /// Syntax spans for every row: code-fence content rows get tree-sitter
+    /// spans (cached in meku-markdown), everything else stays plain. The
+    /// fence language comes from the delimiter row above; closing delimiters
+    /// and the delimiter rows themselves stay uncolored.
+    pub(crate) fn colored_rows(text: &str, rows: &[Row]) -> Rc<RowSpans> {
+        let mut fence_lang: Option<String> = None;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let line = &text[row.src.clone()];
+            let trimmed = line.trim_start();
+            let is_delim = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+            let colored = if row.kind != RowKind::Code {
+                fence_lang = None;
+                None
+            } else if is_delim {
+                let tag = if fence_lang.is_none() {
+                    trimmed[3..].split_whitespace().next()
+                } else {
+                    None
+                };
+                fence_lang = tag.map(str::to_string);
+                None
+            } else {
+                match fence_lang.as_deref() {
+                    Some(tag) if !tag.is_empty() => highlight(tag, line),
+                    _ => None,
+                }
+            };
+            out.push(colored);
+        }
+        Rc::new(out)
+    }
     /// Render the open note as one list of rows, with a caret and selection.
     pub(crate) fn render_document(
         &mut self,
@@ -109,6 +153,19 @@ impl MekuShell {
         let Some(buffer) = self.buffers.get(rel).cloned() else {
             return div().flex_1().into_any_element();
         };
+        let mode = self.tab_mode();
+        let note_rel = rel.to_path_buf();
+        let images: Rc<Vec<Option<ImageSrc>>> = Rc::new(
+            model
+                .rows
+                .iter()
+                .map(|row| {
+                    self.explorer
+                        .root()
+                        .and_then(|root| image_source_of(row, &model.text, root, &note_rel))
+                })
+                .collect(),
+        );
         let (caret, selection) = {
             let b = buffer.read(cx);
             (b.caret(), b.selection())
@@ -126,17 +183,29 @@ impl MekuShell {
         let shell = cx.entity();
         let rows = model.rows.clone();
         let text = model.text.clone();
+        let hls = model.hl.clone();
         let views = self.doc_views.clone();
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
-            let is_active = ix == active;
+            // Edit reveals every row, Live only the caret's, Read none.
+            let is_caret_row = mode != Mode::Read && ix == active;
+            let reveal = match mode {
+                Mode::Edit => true,
+                Mode::Live => is_caret_row,
+                Mode::Read => false,
+            };
             row_element(
                 ix,
                 row,
                 &text,
-                is_active,
-                is_active.then_some(caret),
-                selection_for(row, &selection),
+                reveal,
+                is_caret_row.then_some(caret),
+                match mode {
+                    Mode::Read => None,
+                    _ => selection_for(row, &selection),
+                },
+                hls[ix].clone(),
+                images[ix].clone(),
                 &shell,
                 &views,
                 window,
@@ -168,7 +237,6 @@ impl MekuShell {
             .child(list_body)
             .into_any_element()
     }
-
     /// Source byte offset for a point hit on row `ix`. Rows without a text
     /// layout (blank rules, spacers) resolve to their start.
     fn row_source(&self, ix: usize, pos: Point<Pixels>) -> Option<usize> {
@@ -239,7 +307,7 @@ impl MekuShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.modal_open() {
+        if self.modal_open() || self.tab_mode() == Mode::Read {
             return;
         }
         let Some(rel) = self.doc_rel() else {
@@ -389,6 +457,35 @@ fn heading_scale(kind: RowKind) -> f32 {
     }
 }
 
+/// Where an `![alt](target)` row's pixels come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImageSrc {
+    Url(String),
+    Path(PathBuf),
+}
+
+/// A row whose whole source line is one image: targeted when hidden (Live/
+/// Read presentation); the caret row and Edit mode show the raw text.
+fn image_source_of(row: &Row, text: &str, root: &Path, note_rel: &Path) -> Option<ImageSrc> {
+    if row.kind != RowKind::Text {
+        return None;
+    }
+    let (_, target) = meku_markdown::live::standalone_image(&text[row.src.clone()])?;
+    if target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("data:")
+    {
+        return Some(ImageSrc::Url(target.to_string()));
+    }
+    let note_dir = note_rel.parent().unwrap_or(Path::new(""));
+    let joined = root.join(note_dir).join(target);
+    if joined.starts_with(root) {
+        Some(ImageSrc::Path(joined))
+    } else {
+        None
+    }
+}
+
 fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
     if bits.contains(InlineStyle::STRONG) {
         style.font_weight = FontWeight::BOLD;
@@ -415,12 +512,34 @@ fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
     }
 }
 
-/// Text runs for a display projection: inline styles, dimmed markup and the
-/// selection background, split at every boundary so runs cover the text exactly.
+/// Zed-like code palette for tree-sitter token classes.
+fn tok_color(token: Tok, cx: &App) -> Hsla {
+    match token {
+        Tok::Comment => cx.theme().muted_foreground,
+        Tok::Str => hex(0xa6_e3_a1),
+        Tok::Num => hex(0xfa_b3_87),
+        Tok::Const => hex(0xf5_c2_e7),
+        Tok::Prop => hex(0x94_e2_d5),
+        Tok::Func => hex(0x89_b4_fa),
+        Tok::Type => hex(0xf9_e2_af),
+        Tok::Op => hex(0x94_e2_d5),
+        Tok::Keyword => hex(0xcb_a6_f7),
+        Tok::Other => cx.theme().foreground,
+    }
+}
+
+fn hex(argb: u32) -> Hsla {
+    rgb(argb).into()
+}
+
+/// Text runs for a display projection: syntax colors, inline styles, dimmed
+/// markup and the selection background, split at every boundary so runs cover
+/// the text exactly.
 fn text_runs(
     display: &Display,
     base: &TextStyle,
     selection: Option<(usize, usize)>,
+    colored: &[(Range<usize>, Tok)],
     cx: &App,
 ) -> Vec<TextRun> {
     let len = display.text.len();
@@ -431,6 +550,10 @@ fn text_runs(
     for run in &display.runs {
         cuts.push(run.range.start);
         cuts.push(run.range.end);
+    }
+    for (range, _) in colored {
+        cuts.push(range.start.min(len));
+        cuts.push(range.end.min(len));
     }
     if let Some((a, b)) = selection {
         cuts.push(a.min(len));
@@ -446,14 +569,21 @@ fn text_runs(
             continue;
         }
         let mut style = base.clone();
-        let covering = display
-            .runs
+        let colored = colored
             .iter()
-            .find(|r| r.range.start <= a && a < r.range.end);
-        if let Some(run) = covering {
-            apply_inline(&mut style, run.style, cx);
-            if run.markup {
-                style.color = cx.theme().muted_foreground;
+            .find(|(range, _)| range.start <= a && a < range.end);
+        if let Some((_, token)) = colored {
+            style.color = tok_color(*token, cx);
+        } else {
+            let covering = display
+                .runs
+                .iter()
+                .find(|r| r.range.start <= a && a < r.range.end);
+            if let Some(run) = covering {
+                apply_inline(&mut style, run.style, cx);
+                if run.markup {
+                    style.color = cx.theme().muted_foreground;
+                }
             }
         }
         if selection.is_some_and(|(s, e)| s <= a && a < e) {
@@ -469,6 +599,9 @@ fn text_runs(
 /// `TextLayout::position_for_index`, which panics before element measurement
 /// ("measurement has not been performed"). Shaped with the same text, runs
 /// and size the row paints with, so the caret tracks the glyphs exactly.
+/// Returns `(x_advance, y_offset, height)`, offset in the row-local box:
+/// glyphs are painted centered in the line box (`(line_h - box_h) / 2`
+/// padding), so the caret starts there instead of the box top.
 /// Single visual line only: rows that wrap past the viewport width keep the
 /// caret on the first visual line until wrap-aware positioning lands.
 fn caret_geometry(
@@ -477,7 +610,7 @@ fn caret_geometry(
     runs: &[TextRun],
     font_size: Pixels,
     index: usize,
-) -> Option<(Pixels, Pixels)> {
+) -> Option<(Pixels, Pixels, Pixels)> {
     let mut ix = index.min(text.len());
     while ix > 0 && !text.is_char_boundary(ix) {
         ix -= 1;
@@ -486,7 +619,13 @@ fn caret_geometry(
         .text_system()
         .shape_line(text.to_string().into(), font_size, runs, None);
     let (prefix, _) = shaped.split_at(ix);
-    Some((prefix.width(), shaped.ascent + shaped.descent))
+    let font_box = shaped.ascent + shaped.descent;
+    let line_height = window
+        .text_style()
+        .line_height
+        .to_pixels(font_size.into(), window.rem_size());
+    let y_offset = (line_height - font_box) / 2.0;
+    Some((prefix.width(), y_offset, font_box))
 }
 
 /// Caret as a plain element inside the row: `x`/`y` are row-local (the text
@@ -514,6 +653,8 @@ fn row_element(
     reveal: bool,
     caret: Option<usize>,
     selection: Option<Range<usize>>,
+    colored: RowColors,
+    image: Option<ImageSrc>,
     shell: &Entity<MekuShell>,
     views: &RowViews,
     window: &mut Window,
@@ -540,6 +681,18 @@ fn row_element(
             }
         });
 
+    // Standalone image rows draw their picture when hidden; the caret row and
+    // Edit mode show the raw text instead (unchanged flow below).
+    if !reveal && let Some(source) = image {
+        if let Some(slot) = views.borrow_mut().get_mut(ix) {
+            *slot = None;
+        }
+        let inset = px(20.0 * f32::from(row.list_depth.min(8)));
+        let mut el = row_div.pl(inset).py(px(4.));
+        el = el.child(image_row_element(source, ix, cx));
+        return el.into_any_element();
+    }
+
     if row.kind == RowKind::Blank {
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
@@ -547,9 +700,16 @@ fn row_element(
         let row_h = base_font * 1.1;
         let mut el = row_div.h(row_h);
         // Empty lines still need a caret: without one the cursor visibly
-        // vanishes whenever the user creates a new line.
+        // vanishes whenever the user creates a new line. Approximate the
+        // text rows' glyph centering: the glyph box (~1em) sits centered in
+        // the 1.1em row, so offset it by the slack.
         if caret.is_some() {
-            el = el.child(caret_element(px(0.), px(0.), row_h, cx.theme().foreground));
+            el = el.child(caret_element(
+                px(0.),
+                (row_h - base_font) / 2.0,
+                base_font,
+                cx.theme().foreground,
+            ));
         }
         return el.into_any_element();
     }
@@ -568,7 +728,13 @@ fn row_element(
     if matches!(row.kind, RowKind::Heading(_)) {
         base.font_weight = FontWeight::BOLD;
     }
-    let runs = text_runs(&display, &base, sel_disp, cx);
+    let runs = text_runs(
+        &display,
+        &base,
+        sel_disp,
+        colored.as_deref().map_or(&[], |c| c.as_slice()),
+        cx,
+    );
     let font_size = base_font * heading_scale(row.kind);
     // Shaped before `runs`/`display` move into the element and row view.
     let caret_geo =
@@ -607,19 +773,84 @@ fn row_element(
         text_x = indent;
     }
     if row.kind == RowKind::Code {
-        el = el.bg(cx.theme().sidebar).rounded_sm().px_2();
-        text_x = px(8.);
+        el = el.bg(cx.theme().sidebar).rounded_sm();
+        if colored.is_none() {
+            el = el.px_2();
+            text_x = px(8.);
+        }
     }
     el = el.child(styled);
-    if let Some((advance, cheight)) = caret_geo {
+    if let Some((advance, y_offset, cheight)) = caret_geo {
         el = el.child(caret_element(
             text_x + advance,
-            text_y,
+            text_y + y_offset,
             cheight,
             cx.theme().foreground,
         ));
     }
     el.into_any_element()
+}
+
+/// Placeholder box with the image (or its loading/fallback states) stretched
+/// inside a fixed frame, so the row height cannot jitter between load states.
+fn image_row_element(source: ImageSrc, ix: usize, cx: &App) -> AnyElement {
+    let frame = |inner: AnyElement| {
+        div()
+            .id(("image-row", ix))
+            .test_support()
+            .h(px(240.))
+            .w(px(480.))
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .overflow_hidden()
+            .child(inner)
+            .into_any_element()
+    };
+    let inner = match source {
+        ImageSrc::Path(path) => img(path)
+            .id("doc-image")
+            .size_full()
+            .max_h(px(240.))
+            .object_fit(ObjectFit::Contain)
+            .with_fallback(|| {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(Hsla::default())
+                    .child("Image unavailable")
+                    .into_any_element()
+            }),
+        ImageSrc::Url(url) => img(url)
+            .id("doc-image")
+            .size_full()
+            .max_h(px(240.))
+            .object_fit(ObjectFit::Contain)
+            .with_loading(|| {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .child("Loading…")
+                    .into_any_element()
+            })
+            .with_fallback(|| {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .child("Image unavailable")
+                    .into_any_element()
+            }),
+    };
+    frame(inner.into_any_element())
 }
 
 // -- text input ----------------------------------------------------------
@@ -713,7 +944,7 @@ impl EntityInputHandler for MekuShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.modal_open() {
+        if self.modal_open() || self.tab_mode() == Mode::Read {
             return;
         }
         let Some((rel, doc)) = self.doc_text(cx) else {
@@ -743,7 +974,7 @@ impl EntityInputHandler for MekuShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.modal_open() {
+        if self.modal_open() || self.tab_mode() == Mode::Read {
             return;
         }
         let Some((rel, doc)) = self.doc_text(cx) else {
