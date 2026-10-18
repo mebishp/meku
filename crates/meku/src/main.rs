@@ -1,15 +1,17 @@
+mod document;
 mod explorer;
-mod preview;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use explorer::Explorer;
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::status_bar::StatusBar;
@@ -18,10 +20,8 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 // InteractiveElement (div().on_click / overflow_y_scroll) is not in the globs.
 use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
-use meku_buffer::{BufferVersion, OpenBuffer};
-use meku_markdown::StyledDoc;
+use meku_buffer::OpenBuffer;
 use meku_vault::{OpenTab, Session, VaultEvent};
-use preview::render_styled_block;
 
 actions!(
     meku,
@@ -32,7 +32,28 @@ actions!(
         NextTab,
         OpenFolder,
         CancelOverlay,
-        Save
+        Save,
+        DocLeft,
+        DocRight,
+        DocUp,
+        DocDown,
+        DocHome,
+        DocEnd,
+        DocSelectLeft,
+        DocSelectRight,
+        DocSelectUp,
+        DocSelectDown,
+        DocSelectHome,
+        DocSelectEnd,
+        DocBackspace,
+        DocDelete,
+        DocEnter,
+        DocSelectAll,
+        DocUndo,
+        DocRedo,
+        DocCopy,
+        DocCut,
+        DocPaste
     ]
 );
 
@@ -40,15 +61,6 @@ actions!(
 struct EditorTab {
     rel: Option<PathBuf>,
     title: String,
-}
-
-/// The buffer byte range currently opened as a raw editor.
-/// Earlier blocks are immutable while this region is active, so `start`
-/// stays valid; `len` tracks the region's current length for splicing.
-#[derive(Debug, Clone, Copy)]
-struct ActiveBlock {
-    start: usize,
-    len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,15 +85,15 @@ pub struct MekuShell {
     active_tab: usize,
     explorer: Explorer,
     buffers: HashMap<PathBuf, Entity<OpenBuffer>>,
-    editors: HashMap<PathBuf, Entity<EditorState>>,
-    _editor_subs: HashMap<PathBuf, Subscription>,
     last_edit: HashMap<PathBuf, Instant>,
-    /// Parsed block model per open file (background-refreshed).
-    docs: HashMap<PathBuf, StyledDoc>,
-    /// Raw-editing region per open file.
-    active: HashMap<PathBuf, ActiveBlock>,
-    /// In-flight debounce + parse tasks; replacing one cancels it.
-    parse_tasks: HashMap<PathBuf, Task<()>>,
+    /// Parsed rows per open file, rebuilt when the buffer version changes.
+    doc_models: HashMap<PathBuf, document::DocModel>,
+    /// Row layouts from the last render, used for pointer and IME hit testing.
+    doc_views: document::RowViews,
+    /// Scroll and measurement state of the document list.
+    doc_list: ListState,
+    /// File the list state currently describes.
+    doc_list_rel: Option<PathBuf>,
     /// Rel path with unsaved edits that changed on disk underneath us.
     conflict: Option<PathBuf>,
     watcher: Option<notify::RecommendedWatcher>,
@@ -105,12 +117,11 @@ impl MekuShell {
             active_tab: 0,
             explorer: Explorer::new(),
             buffers: HashMap::new(),
-            editors: HashMap::new(),
-            _editor_subs: HashMap::new(),
             last_edit: HashMap::new(),
-            docs: HashMap::new(),
-            active: HashMap::new(),
-            parse_tasks: HashMap::new(),
+            doc_models: HashMap::new(),
+            doc_views: Rc::new(RefCell::new(Vec::new())),
+            doc_list: ListState::new(0, ListAlignment::Top, px(600.)),
+            doc_list_rel: None,
             conflict: None,
             watcher: None,
             watcher_rx: None,
@@ -181,7 +192,6 @@ impl MekuShell {
                 });
                 self.active_tab = self.tabs.len() - 1;
                 self.notice = None;
-                self.initial_parse(rel, cx);
             }
             Err(e) => {
                 self.notice = Some(format!("Cannot open {}: {e}", rel.display()));
@@ -189,31 +199,6 @@ impl MekuShell {
         }
         self.save_session();
         cx.notify();
-    }
-
-    /// First parse for a freshly opened file. Small files parse
-    /// synchronously (well under a frame for typical notes); large ones go
-    /// through the debounced background path with a placeholder meanwhile.
-    fn initial_parse(&mut self, rel: &Path, cx: &mut Context<Self>) {
-        let Some((version, text)) = self.buffer_snapshot(rel, cx) else {
-            return;
-        };
-        if text.len() <= 256 * 1024 {
-            let doc = meku_markdown::parse(&text, version);
-            if !doc.blocks.is_empty() {
-                let span = &doc.blocks[0].span;
-                self.active.insert(
-                    rel.to_path_buf(),
-                    ActiveBlock {
-                        start: span.start,
-                        len: span.end.saturating_sub(span.start),
-                    },
-                );
-            }
-            self.docs.insert(rel.to_path_buf(), doc);
-        } else {
-            self.schedule_reparse(rel, cx);
-        }
     }
 
     fn new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -268,12 +253,7 @@ impl MekuShell {
                 .is_none_or(|r| r != rel && !r.starts_with(rel))
         });
         self.buffers.retain(|r, _| r != rel && !r.starts_with(rel));
-        self.editors.retain(|r, _| r != rel && !r.starts_with(rel));
-        self._editor_subs
-            .retain(|r, _| r != rel && !r.starts_with(rel));
-        self.docs.retain(|r, _| r != rel && !r.starts_with(rel));
-        self.active.retain(|r, _| r != rel && !r.starts_with(rel));
-        self.parse_tasks
+        self.doc_models
             .retain(|r, _| r != rel && !r.starts_with(rel));
         self.last_edit
             .retain(|r, _| r != rel && !r.starts_with(rel));
@@ -331,12 +311,8 @@ impl MekuShell {
                 }
                 self.tabs.clear();
                 self.buffers.clear();
-                self.editors.clear();
-                self._editor_subs.clear();
                 self.last_edit.clear();
-                self.docs.clear();
-                self.active.clear();
-                self.parse_tasks.clear();
+                self.doc_models.clear();
                 self.conflict = None;
                 for tab in &session.open_tabs {
                     if root.join(&tab.path).is_file() {
@@ -466,200 +442,110 @@ impl MekuShell {
         cx.notify();
     }
 
-    /// Swap a buffer's text without touching dirty state, and drop its
-    /// editor, doc and active region: the next frame reparses and the user
-    /// clicks back into the fresh model. This only runs for explicit reload
-    /// decisions, never on keystrokes, so the cursor is never stolen.
+    /// Replace a buffer's text with the disk version. Used only for explicit
+    /// reload decisions (clean buffers, or "Load disk"), so the caret is kept
+    /// within bounds and the parsed rows are rebuilt on the next frame.
     fn replace_buffer_text(&mut self, rel: &Path, text: &str, cx: &mut Context<Self>) {
         if let Some(buffer) = self.buffers.get(rel) {
             let len = buffer.read_with(cx, |b, _| b.len_bytes());
             buffer.update(cx, |b, _| {
                 b.apply_edit(0..len, text);
                 b.dirty = false;
+                b.move_caret(0, false);
             });
         }
-        self.editors.remove(rel);
-        self.docs.remove(rel);
-        self.active.remove(rel);
+        self.doc_models.remove(rel);
         self.last_edit.remove(rel);
-    }
-
-    // -- editor ----------------------------------------------------------
-
-    /// Lazily create (or fetch) the editing state for the file's active
-    /// block. Called from render, where a Window is available; a freshly
-    /// created editor takes focus.
-    fn ensure_editor(
-        &mut self,
-        rel: &Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<EditorState>> {
-        if let Some(editor) = self.editors.get(rel) {
-            return Some(editor.clone());
-        }
-        let active = self.active.get(rel).cloned()?;
-        let snapshot = self
-            .buffers
-            .get(rel)
-            .map(|b| b.read_with(cx, |b, _| b.snapshot().1))?;
-        let end = active.start.saturating_add(active.len).min(snapshot.len());
-        let start = active.start.min(end);
-        let slice = snapshot.get(start..end).unwrap_or_default().to_string();
-        let editor = cx.new(|cx| EditorState::new(window, cx).default_value(slice));
-        // Resolve the path dynamically: renames move the entity to a new
-        // key, and a captured path would go stale and drop keystrokes.
-        let sub = cx.subscribe(
-            &editor,
-            move |this: &mut Self, editor: Entity<EditorState>, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change)
-                    && let Some(rel) = this
-                        .editors
-                        .iter()
-                        .find_map(|(r, e)| (*e == editor).then(|| r.clone()))
-                {
-                    this.on_editor_change(&rel, cx);
-                }
-            },
-        );
-        window.focus(&editor.read(cx).focus_handle(cx), cx);
-        self._editor_subs.insert(rel.to_path_buf(), sub);
-        self.editors.insert(rel.to_path_buf(), editor.clone());
-        Some(editor)
-    }
-
-    /// Splice the active block's editor text back into the buffer at the
-    /// block's current range, then reparse in the background.
-    fn on_editor_change(&mut self, rel: &Path, cx: &mut Context<Self>) {
-        let text = self
-            .editors
-            .get(rel)
-            .map(|e| e.read_with(cx, |e, _| e.value().to_string()));
-        let Some(text) = text else { return };
-        let Some(active) = self.active.get(rel).cloned() else {
-            return;
-        };
-        if let Some(buffer) = self.buffers.get(rel) {
-            let end = active.start + active.len;
-            buffer.update(cx, |b, _| {
-                b.apply_edit(active.start..end, &text);
-            });
-        }
-        if let Some(active) = self.active.get_mut(rel) {
-            active.len = text.len();
-        }
-        self.last_edit.insert(rel.to_path_buf(), Instant::now());
-        self.schedule_reparse(rel, cx);
-        cx.notify();
     }
 
     fn is_dirty(&self, rel: &Path, cx: &App) -> bool {
         self.buffers.get(rel).is_some_and(|b| b.read(cx).dirty)
     }
 
-    // -- live-preview parse pipeline ---------------------------------------
+    // -- document editing actions ----------------------------------------
 
-    fn buffer_snapshot(&self, rel: &Path, cx: &App) -> Option<(BufferVersion, String)> {
-        self.buffers
-            .get(rel)
-            .map(|b| b.read_with(cx, |b, _| b.snapshot()))
+    fn on_doc_left(&mut self, _: &DocLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Left, false, window, cx);
     }
-
-    /// Debounced background reparse: 120ms quiet period, parse off the main
-    /// thread, stale versions dropped on arrival. Replacing a pending task
-    /// cancels it.
-    fn schedule_reparse(&mut self, rel: &Path, cx: &mut Context<Self>) {
-        if !self.buffers.contains_key(rel) {
-            return;
-        }
-        let rel = rel.to_path_buf();
-        self.parse_tasks.insert(
-            rel.clone(),
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(120))
-                    .await;
-                let Some(view) = this.upgrade() else {
-                    return;
-                };
-                let snapshot: Option<(u64, String)> =
-                    cx.update(|cx| view.read_with(cx, |v, cx| v.buffer_snapshot(&rel, cx)));
-                let Some((version, text)) = snapshot else {
-                    return;
-                };
-                let doc = cx
-                    .background_executor()
-                    .spawn(async move { meku_markdown::parse(&text, version) })
-                    .await;
-                if let Some(view) = this.upgrade() {
-                    cx.update(|cx| {
-                        view.update(cx, |v, cx| v.on_parse_done(&rel, doc, cx));
-                    });
-                }
-            }),
-        );
+    fn on_doc_right(&mut self, _: &DocRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Right, false, window, cx);
     }
-
-    fn on_parse_done(&mut self, rel: &Path, doc: StyledDoc, cx: &mut Context<Self>) {
-        let current = self
-            .buffers
-            .get(rel)
-            .map(|b| b.read_with(cx, |b, _| b.version));
-        if current != Some(doc.version) {
-            return; // Stale: a newer edit already queued its own parse.
-        }
-        if !self.active.contains_key(rel) && !doc.blocks.is_empty() {
-            let span = &doc.blocks[0].span;
-            self.active.insert(
-                rel.to_path_buf(),
-                ActiveBlock {
-                    start: span.start,
-                    len: span.end.saturating_sub(span.start),
-                },
-            );
-        }
-        self.docs.insert(rel.to_path_buf(), doc);
-        cx.notify();
+    fn on_doc_up(&mut self, _: &DocUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Up, false, window, cx);
     }
-
-    /// Switch raw editing to another block. The previous block's text is
-    /// already in the buffer (synced per keystroke); its editor is dropped
-    /// and rebuilt on return. Cursor starts at the block start — a second
-    /// click positions natively inside the editor.
-    fn activate_block(&mut self, rel: &Path, index: usize, cx: &mut Context<Self>) {
-        let span = self
-            .docs
-            .get(rel)
-            .and_then(|doc| doc.blocks.get(index))
-            .map(|block| block.span);
-        let Some(span) = span else { return };
-        if self
-            .active
-            .get(rel)
-            .is_some_and(|active| active.start == span.start)
-        {
-            return;
-        }
-        self.editors.remove(rel);
-        self._editor_subs.remove(rel);
-        self.active.insert(
-            rel.to_path_buf(),
-            ActiveBlock {
-                start: span.start,
-                len: span.end.saturating_sub(span.start),
-            },
-        );
-        cx.notify();
+    fn on_doc_down(&mut self, _: &DocDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Down, false, window, cx);
     }
-
-    /// Index of the block containing the active region's start, if any.
-    fn active_index(&self, rel: &Path) -> Option<usize> {
-        let active = self.active.get(rel)?;
-        self.docs
-            .get(rel)?
-            .blocks
-            .iter()
-            .position(|block| block.span.start <= active.start && active.start < block.span.end)
+    fn on_doc_home(&mut self, _: &DocHome, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Home, false, window, cx);
+    }
+    fn on_doc_end(&mut self, _: &DocEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::End, false, window, cx);
+    }
+    fn on_doc_select_left(
+        &mut self,
+        _: &DocSelectLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::Left, true, window, cx);
+    }
+    fn on_doc_select_right(
+        &mut self,
+        _: &DocSelectRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::Right, true, window, cx);
+    }
+    fn on_doc_select_up(&mut self, _: &DocSelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Up, true, window, cx);
+    }
+    fn on_doc_select_down(
+        &mut self,
+        _: &DocSelectDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::Down, true, window, cx);
+    }
+    fn on_doc_select_home(
+        &mut self,
+        _: &DocSelectHome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::Home, true, window, cx);
+    }
+    fn on_doc_select_end(&mut self, _: &DocSelectEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::End, true, window, cx);
+    }
+    fn on_doc_backspace(&mut self, _: &DocBackspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Backspace, false, window, cx);
+    }
+    fn on_doc_delete(&mut self, _: &DocDelete, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Delete, false, window, cx);
+    }
+    fn on_doc_enter(&mut self, _: &DocEnter, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Enter, false, window, cx);
+    }
+    fn on_doc_select_all(&mut self, _: &DocSelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::SelectAll, false, window, cx);
+    }
+    fn on_doc_undo(&mut self, _: &DocUndo, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Undo, false, window, cx);
+    }
+    fn on_doc_redo(&mut self, _: &DocRedo, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Redo, false, window, cx);
+    }
+    fn on_doc_copy(&mut self, _: &DocCopy, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Copy, false, window, cx);
+    }
+    fn on_doc_cut(&mut self, _: &DocCut, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Cut, false, window, cx);
+    }
+    fn on_doc_paste(&mut self, _: &DocPaste, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Paste, false, window, cx);
     }
 
     // -- saving ----------------------------------------------------------
@@ -976,8 +862,8 @@ impl MekuShell {
                 tab.title = Self::tab_title(&tab.rel.clone().unwrap());
             }
         }
-        // Move cached buffers and editors along; directories move subtrees.
-        // Editor text is path-independent, so entities move as-is.
+        // Move cached buffers along; directories move subtrees. Editor text
+        // is path-independent, so the entities move as they are.
         let keys: Vec<PathBuf> = self.buffers.keys().cloned().collect();
         for key in keys {
             if (key == *old || key.starts_with(old))
@@ -987,21 +873,10 @@ impl MekuShell {
                 let moved = new.join(suffix);
                 entity.update(cx, |buffer, _| buffer.rel = moved.clone());
                 self.buffers.insert(moved.clone(), entity);
-                if let Some(editor) = self.editors.remove(&key) {
-                    self.editors.insert(moved.clone(), editor);
-                }
-                if let Some(sub) = self._editor_subs.remove(&key) {
-                    self._editor_subs.insert(moved.clone(), sub);
-                }
                 if let Some(at) = self.last_edit.remove(&key) {
                     self.last_edit.insert(moved.clone(), at);
                 }
-                if let Some(doc) = self.docs.remove(&key) {
-                    self.docs.insert(moved.clone(), doc);
-                }
-                if let Some(region) = self.active.remove(&key) {
-                    self.active.insert(moved, region);
-                }
+                self.doc_models.remove(&key);
             }
         }
         self.save_session();
@@ -1203,7 +1078,15 @@ impl MekuShell {
                 title: "Welcome".to_string(),
             });
         let body: AnyElement = match active.rel.clone() {
-            Some(rel) if self.buffers.contains_key(&rel) => self.render_doc(&rel, window, cx),
+            Some(rel) if self.buffers.contains_key(&rel) => {
+                let mut column = v_flex().size_full().min_h_0();
+                if self.conflict.as_deref() == Some(rel.as_path()) {
+                    column = column.child(self.render_conflict_banner(&rel, cx));
+                }
+                column
+                    .child(self.render_document(&rel, window, cx))
+                    .into_any_element()
+            }
             _ => self.render_empty_state(&active.title, cx),
         };
 
@@ -1232,133 +1115,6 @@ impl MekuShell {
             } else {
                 "Open a folder (Ctrl-O) or pass it on the command line."
             })
-            .into_any_element()
-    }
-
-    /// Render the open note as live preview: every block styled except the
-    /// active one, which is a raw editor. Blocks fully covered by the active
-    /// region (stale duplicates after a structural edit) are skipped.
-    fn render_doc(
-        &mut self,
-        rel: &Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if !self.docs.contains_key(rel) {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("Parsing…")
-                .into_any_element();
-        }
-        let snapshot = self
-            .buffers
-            .get(rel)
-            .map(|b| b.read_with(cx, |b, _| b.snapshot().1))
-            .unwrap_or_default();
-        // Clone the small inputs up front: rendering below needs &mut self.
-        let (blocks, active_idx, active_range) = {
-            let doc = self.docs.get(rel).unwrap();
-            let range = self.active.get(rel).map(|a| (a.start, a.start + a.len));
-            let idx = self.active_index(rel);
-            let blocks: Vec<_> = doc.blocks.to_vec();
-            (blocks, idx, range)
-        };
-        if blocks.is_empty() {
-            // Empty file: a single raw editor over the empty range so the
-            // note is immediately editable (this also covers brand-new notes).
-            if !self.active.contains_key(rel) {
-                self.active
-                    .insert(rel.to_path_buf(), ActiveBlock { start: 0, len: 0 });
-            }
-            let mut column = v_flex().size_full();
-            if self.conflict.as_deref() == Some(rel) {
-                column = column.child(self.render_conflict_banner(rel, cx));
-            }
-            return match self.ensure_editor(rel, window, cx) {
-                Some(editor) => column
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .id("md-scroll")
-                            .overflow_y_scroll()
-                            .p_4()
-                            .child(Editor::new(&editor).bordered(false).appearance(false)),
-                    )
-                    .into_any_element(),
-                None => column
-                    .child(
-                        div()
-                            .flex_1()
-                            .items_center()
-                            .justify_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Could not open this file.")
-                            .into_any_element(),
-                    )
-                    .into_any_element(),
-            };
-        }
-        let mut kids: Vec<AnyElement> = Vec::new();
-        if self.conflict.as_deref() == Some(rel) {
-            kids.push(self.render_conflict_banner(rel, cx));
-        }
-        let shell = cx.entity();
-        for (ix, block) in blocks.iter().enumerate() {
-            if Some(ix) == active_idx {
-                match self.ensure_editor(rel, window, cx) {
-                    Some(editor) => {
-                        kids.push(
-                            div()
-                                .w_full()
-                                .child(Editor::new(&editor).bordered(false).appearance(false))
-                                .into_any_element(),
-                        );
-                    }
-                    None => {
-                        kids.push(
-                            div()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("…")
-                                .into_any_element(),
-                        );
-                    }
-                }
-                continue;
-            }
-            if let Some((start, end)) = active_range {
-                // Stale twin of the active region: skip instead of doubling.
-                if block.span.start < end && start < block.span.end {
-                    continue;
-                }
-            }
-            let activate_shell = shell.clone();
-            let activate_rel = rel.to_path_buf();
-            kids.push(render_styled_block(
-                block,
-                &snapshot,
-                ix,
-                move |_, _, cx| {
-                    activate_shell
-                        .update(cx, |view, cx| view.activate_block(&activate_rel, ix, cx));
-                },
-                window,
-                cx,
-            ));
-        }
-        let column = v_flex().gap_1().children(kids);
-        div()
-            .flex_1()
-            .min_h_0()
-            .id("md-scroll")
-            .test_support()
-            .overflow_y_scroll()
-            .p_4()
-            .child(column)
             .into_any_element()
     }
 
@@ -1593,6 +1349,27 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_open_folder))
             .on_action(cx.listener(Self::on_cancel_overlay))
             .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_doc_left))
+            .on_action(cx.listener(Self::on_doc_right))
+            .on_action(cx.listener(Self::on_doc_up))
+            .on_action(cx.listener(Self::on_doc_down))
+            .on_action(cx.listener(Self::on_doc_home))
+            .on_action(cx.listener(Self::on_doc_end))
+            .on_action(cx.listener(Self::on_doc_select_left))
+            .on_action(cx.listener(Self::on_doc_select_right))
+            .on_action(cx.listener(Self::on_doc_select_up))
+            .on_action(cx.listener(Self::on_doc_select_down))
+            .on_action(cx.listener(Self::on_doc_select_home))
+            .on_action(cx.listener(Self::on_doc_select_end))
+            .on_action(cx.listener(Self::on_doc_backspace))
+            .on_action(cx.listener(Self::on_doc_delete))
+            .on_action(cx.listener(Self::on_doc_enter))
+            .on_action(cx.listener(Self::on_doc_select_all))
+            .on_action(cx.listener(Self::on_doc_undo))
+            .on_action(cx.listener(Self::on_doc_redo))
+            .on_action(cx.listener(Self::on_doc_copy))
+            .on_action(cx.listener(Self::on_doc_cut))
+            .on_action(cx.listener(Self::on_doc_paste))
             .child(TitleBar::new().child(title))
             .child(
                 v_flex().flex_1().min_h_0().overflow_hidden().child(
@@ -1634,6 +1411,28 @@ fn main() {
             KeyBinding::new("ctrl-o", OpenFolder, Some("Meku")),
             KeyBinding::new("ctrl-s", Save, Some("Meku")),
             KeyBinding::new("escape", CancelOverlay, None),
+            KeyBinding::new("left", DocLeft, Some("Meku")),
+            KeyBinding::new("right", DocRight, Some("Meku")),
+            KeyBinding::new("up", DocUp, Some("Meku")),
+            KeyBinding::new("down", DocDown, Some("Meku")),
+            KeyBinding::new("home", DocHome, Some("Meku")),
+            KeyBinding::new("end", DocEnd, Some("Meku")),
+            KeyBinding::new("shift-left", DocSelectLeft, Some("Meku")),
+            KeyBinding::new("shift-right", DocSelectRight, Some("Meku")),
+            KeyBinding::new("shift-up", DocSelectUp, Some("Meku")),
+            KeyBinding::new("shift-down", DocSelectDown, Some("Meku")),
+            KeyBinding::new("shift-home", DocSelectHome, Some("Meku")),
+            KeyBinding::new("shift-end", DocSelectEnd, Some("Meku")),
+            KeyBinding::new("backspace", DocBackspace, Some("Meku")),
+            KeyBinding::new("delete", DocDelete, Some("Meku")),
+            KeyBinding::new("enter", DocEnter, Some("Meku")),
+            KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
+            KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
+            KeyBinding::new("ctrl-y", DocRedo, Some("Meku")),
+            KeyBinding::new("ctrl-shift-z", DocRedo, Some("Meku")),
+            KeyBinding::new("ctrl-c", DocCopy, Some("Meku")),
+            KeyBinding::new("ctrl-x", DocCut, Some("Meku")),
+            KeyBinding::new("ctrl-v", DocPaste, Some("Meku")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
@@ -1666,12 +1465,14 @@ mod ui_tests {
     // would shadow the builtin `#[test]` and send the harness into macro
     // recursion. Import everything this module needs explicitly.
     use crate::{
-        CancelOverlay, CloseTab, MekuShell, NamingMode, NewTab, NextTab, OpenFolder, Save,
-        ToggleSidebar,
+        CancelOverlay, CloseTab, DocBackspace, DocCopy, DocCut, DocDelete, DocDown, DocEnd,
+        DocEnter, DocHome, DocLeft, DocPaste, DocRedo, DocRight, DocSelectAll, DocSelectDown,
+        DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectRight, DocSelectUp, DocUndo, DocUp,
+        MekuShell, NamingMode, NewTab, NextTab, OpenFolder, Save, ToggleSidebar,
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, Entity, Focusable, KeyBinding, TestAppContext, px, size};
+    use gpui_kit::{AppContext, Bounds, Entity, KeyBinding, Pixels, TestAppContext, px, size};
     use std::path::{Path, PathBuf};
 
     /// Manual equivalent of `#[gpui_kit::test]` (whose macro overflows
@@ -1719,6 +1520,28 @@ mod ui_tests {
                 KeyBinding::new("ctrl-o", OpenFolder, Some("Meku")),
                 KeyBinding::new("ctrl-s", Save, Some("Meku")),
                 KeyBinding::new("escape", CancelOverlay, None),
+                KeyBinding::new("left", DocLeft, Some("Meku")),
+                KeyBinding::new("right", DocRight, Some("Meku")),
+                KeyBinding::new("up", DocUp, Some("Meku")),
+                KeyBinding::new("down", DocDown, Some("Meku")),
+                KeyBinding::new("home", DocHome, Some("Meku")),
+                KeyBinding::new("end", DocEnd, Some("Meku")),
+                KeyBinding::new("shift-left", DocSelectLeft, Some("Meku")),
+                KeyBinding::new("shift-right", DocSelectRight, Some("Meku")),
+                KeyBinding::new("shift-up", DocSelectUp, Some("Meku")),
+                KeyBinding::new("shift-down", DocSelectDown, Some("Meku")),
+                KeyBinding::new("shift-home", DocSelectHome, Some("Meku")),
+                KeyBinding::new("shift-end", DocSelectEnd, Some("Meku")),
+                KeyBinding::new("backspace", DocBackspace, Some("Meku")),
+                KeyBinding::new("delete", DocDelete, Some("Meku")),
+                KeyBinding::new("enter", DocEnter, Some("Meku")),
+                KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
+                KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
+                KeyBinding::new("ctrl-y", DocRedo, Some("Meku")),
+                KeyBinding::new("ctrl-shift-z", DocRedo, Some("Meku")),
+                KeyBinding::new("ctrl-c", DocCopy, Some("Meku")),
+                KeyBinding::new("ctrl-x", DocCut, Some("Meku")),
+                KeyBinding::new("ctrl-v", DocPaste, Some("Meku")),
             ]);
         });
         let mut view = None;
@@ -1841,25 +1664,15 @@ mod ui_tests {
         assert!(notice.is_some());
     }
 
-    fn focus_editor_for(
+    fn focus_doc_for(
         cx: &mut TestAppContext,
         view: &Entity<MekuShell>,
         window: gpui_kit::AnyWindowHandle,
-        rel: &Path,
     ) {
-        let handle = cx.update(|cx| {
-            view.read_with(cx, |shell, cx| {
-                shell
-                    .editors
-                    .get(rel)
-                    .map(|e| e.read(cx).focus_handle(cx).clone())
-            })
-        });
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            if let Some(handle) = handle {
-                window.focus(&handle, cx);
-            }
+            let handle = view.read_with(cx, |shell, _| shell.focus_handle.clone());
+            window.focus(&handle, cx);
         })
         .unwrap();
     }
@@ -1892,7 +1705,7 @@ mod ui_tests {
         cx.update(|cx| {
             view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
         });
-        focus_editor_for(cx, &view, window, &rel);
+        focus_doc_for(cx, &view, window);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.input("Hello ", cx);
@@ -1928,7 +1741,7 @@ mod ui_tests {
         cx.update(|cx| {
             view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
         });
-        focus_editor_for(cx, &view, window, &rel);
+        focus_doc_for(cx, &view, window);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.input("saved!", cx);
@@ -1959,7 +1772,7 @@ mod ui_tests {
         cx.update(|cx| {
             view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
         });
-        focus_editor_for(cx, &view, window, &rel);
+        focus_doc_for(cx, &view, window);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.input("xyz", cx);
@@ -1991,7 +1804,7 @@ mod ui_tests {
         cx.update(|cx| {
             view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
         });
-        focus_editor_for(cx, &view, window, &rel);
+        focus_doc_for(cx, &view, window);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.input("mine ", cx);
@@ -2105,7 +1918,7 @@ mod ui_tests {
         assert!(conflict.is_none());
     }
 
-    fn preview_fixture(cx: &mut TestAppContext) -> (Entity<MekuShell>, tempfile::TempDir, PathBuf) {
+    fn doc_fixture(cx: &mut TestAppContext) -> (Entity<MekuShell>, tempfile::TempDir, PathBuf) {
         let (view, _window) = boot(cx);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("doc.md"), "# T\n\nbody **bold** here\n").unwrap();
@@ -2121,36 +1934,31 @@ mod ui_tests {
     }
 
     #[test]
-    fn styled_blocks_hide_markup() {
-        run_ui_test("styled_hide_markup", styled_hide_markup_body);
+    fn rows_hide_markup_except_caret_row() {
+        run_ui_test("rows_hide_markup", rows_hide_markup_body);
     }
 
-    fn styled_hide_markup_body(cx: &mut TestAppContext) {
-        let (view, _dir, rel) = preview_fixture(cx);
-        let rendered: Vec<String> = cx.update(|cx| {
-            view.read_with(cx, |shell, cx| {
-                let doc = shell.docs.get(&rel).unwrap();
-                let (_, snapshot) = shell.buffer_snapshot(&rel, cx).unwrap();
-                doc.blocks
-                    .iter()
-                    .map(|b| crate::preview::display_text(b, &snapshot))
-                    .collect()
+    fn rows_hide_markup_body(cx: &mut TestAppContext) {
+        let (view, _dir, rel) = doc_fixture(cx);
+        let (kinds, active_row) = cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                let model = shell.doc_model(&rel, cx).unwrap();
+                let caret = shell.buffers.get(&rel).unwrap().read(cx).caret();
+                let kinds = model.rows.iter().map(|r| r.kind).collect::<Vec<_>>();
+                (kinds, meku_markdown::live::row_at(&model.rows, caret))
             })
         });
-        assert_eq!(rendered.len(), 2);
-        assert_eq!(rendered[0], "T", "heading marker hidden");
-        assert_eq!(rendered[1], "body bold here", "emphasis markers hidden");
-        // Active region starts on the first block.
-        let active = cx.update(|cx| view.read_with(cx, |shell, _| shell.active.get(&rel).cloned()));
-        assert!(active.is_some());
+        // "# T", blank, "body **bold** here", trailing blank.
+        assert_eq!(kinds.len(), 4);
+        assert_eq!(active_row, 0, "caret starts on the first row");
     }
 
     #[test]
-    fn click_activates_block_without_touching_buffer() {
-        run_ui_test("click_activates", click_activates_body);
+    fn click_moves_caret_without_touching_text() {
+        run_ui_test("click_moves_caret", click_moves_caret_body);
     }
 
-    fn click_activates_body(cx: &mut TestAppContext) {
+    fn click_moves_caret_body(cx: &mut TestAppContext) {
         let (view, window) = boot(cx);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("doc.md"), "# T\n\nbody here\n").unwrap();
@@ -2166,31 +1974,31 @@ mod ui_tests {
         let before = buffer_text(cx, &view, &rel).0;
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click("md-block-1", cx);
+            window.click(("doc-row", 2usize), cx);
         })
         .unwrap();
 
-        let (active, after) = cx.update(|cx| {
-            view.read_with(cx, |shell, cx| {
+        let (caret_row, after) = cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                let caret = shell.buffers.get(&rel).unwrap().read(cx).caret();
+                let model = shell.doc_model(&rel, cx).unwrap();
                 (
-                    shell.active.get(&rel).cloned(),
-                    shell.buffer_snapshot(&rel, cx).map(|(_, text)| text),
+                    meku_markdown::live::row_at(&model.rows, caret),
+                    shell.buffers.get(&rel).unwrap().read(cx).text_string(),
                 )
             })
         });
-        // Second block (the paragraph) is now the raw region…
-        assert_eq!(active.map(|a| a.start), Some("# T\n\n".len()));
-        // …and merely activating changed nothing on disk-model level.
-        assert_eq!(after.as_deref(), Some(before.as_str()));
+        assert_eq!(caret_row, 2, "click lands the caret on the paragraph row");
+        assert_eq!(after, before, "merely moving the caret changes no text");
         let _ = dir;
     }
 
     #[test]
-    fn typing_in_second_block_splices_around_it() {
-        run_ui_test("splice_second_block", splice_second_block_body);
+    fn typing_inserts_at_caret_in_place() {
+        run_ui_test("typing_inserts", typing_inserts_body);
     }
 
-    fn splice_second_block_body(cx: &mut TestAppContext) {
+    fn typing_inserts_body(cx: &mut TestAppContext) {
         let (view, window) = boot(cx);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("doc.md"), "# T\n\nbody here\n").unwrap();
@@ -2202,13 +2010,21 @@ mod ui_tests {
         cx.update(|cx| {
             view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
         });
-        cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("md-block-1", cx);
-        })
-        .unwrap();
+        // Place the caret at the start of the paragraph row directly: a
+        // centre click lands at the end of short text, which is correct
+        // behaviour but not what this insertion asserts.
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                let dest = "# T\n\n".len();
+                if let Some(buffer) = shell.buffers.get(&rel).cloned() {
+                    buffer.update(cx, |b, _| {
+                        b.move_caret(dest, false);
+                    });
+                }
+            });
+        });
 
-        focus_editor_for(cx, &view, window, &rel);
+        focus_doc_for(cx, &view, window);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.input("! ", cx);
@@ -2219,6 +2035,150 @@ mod ui_tests {
         assert_eq!(text, "# T\n\n! body here\n");
         assert!(dirty);
         let _ = dir;
+    }
+
+    #[test]
+    fn document_has_left_margin() {
+        run_ui_test("doc_margin", doc_margin_body);
+    }
+
+    fn doc_margin_body(cx: &mut TestAppContext) {
+        let (_view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# T\n\nbody\n");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let scroll = window.find("md-scroll").bounds();
+            let row = window.find(("doc-row", 0usize)).bounds();
+            let margin = row.origin.x.as_f32() - scroll.origin.x.as_f32();
+            assert!(
+                margin >= 8.0,
+                "document needs a left margin so the caret never clips, got {margin}"
+            );
+        })
+        .unwrap();
+    }
+
+    fn caret_bounds(
+        cx: &mut TestAppContext,
+        window: gpui_kit::AnyWindowHandle,
+    ) -> (Bounds<Pixels>, Bounds<Pixels>) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.find("doc-caret").bounds(),
+                window.find(("doc-row", 2usize)).bounds(),
+            )
+        })
+        .unwrap()
+    }
+
+    fn move_doc_caret(cx: &mut TestAppContext, view: &Entity<MekuShell>, dest: usize) {
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                if let Some(rel) = shell.doc_rel()
+                    && let Some(buffer) = shell.buffers.get(&rel).cloned()
+                {
+                    buffer.update(cx, |b, _| b.move_caret(dest, false));
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn caret_follows_the_active_row() {
+        run_ui_test("caret_follows_row", caret_follows_row_body);
+    }
+
+    fn caret_follows_row_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# T\n\nbody here\n");
+        // Caret onto the paragraph row: the caret element must sit inside it.
+        move_doc_caret(cx, &view, "# T\n\n".len());
+        let (caret, row) = caret_bounds(cx, window);
+        assert!(
+            caret.origin.y.as_f32() >= row.origin.y.as_f32() - 1.0
+                && (caret.origin.y.as_f32() + caret.size.height.as_f32())
+                    <= (row.origin.y.as_f32() + row.size.height.as_f32() + 1.0),
+            "caret {caret:?} must be inside its row {row:?}"
+        );
+        // Back to the first row: the caret must move with it, not stick.
+        move_doc_caret(cx, &view, 0);
+        let top_row = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.find(("doc-row", 0usize)).bounds()
+            })
+            .unwrap();
+        let caret = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.find("doc-caret").bounds()
+            })
+            .unwrap();
+        assert!(
+            caret.origin.y.as_f32() >= top_row.origin.y.as_f32() - 1.0
+                && (caret.origin.y.as_f32() + caret.size.height.as_f32())
+                    <= (top_row.origin.y.as_f32() + top_row.size.height.as_f32() + 1.0),
+            "caret {caret:?} must follow the caret to the first row {top_row:?}"
+        );
+    }
+
+    #[test]
+    fn caret_advances_with_the_text() {
+        run_ui_test("caret_advances", caret_advances_body);
+    }
+
+    fn caret_advances_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# T\n\nbody here\n");
+        move_doc_caret(cx, &view, "# T\n\n".len());
+        let (left, _) = caret_bounds(cx, window);
+        move_doc_caret(cx, &view, "# T\n\nbody".len());
+        let (right, _) = caret_bounds(cx, window);
+        assert!(
+            right.origin.x.as_f32() > left.origin.x.as_f32() + 5.0,
+            "caret must advance with the text: {left:?} -> {right:?}"
+        );
+    }
+
+    #[test]
+    fn caret_matches_painted_glyphs() {
+        run_ui_test("caret_glyphs", caret_glyphs_body);
+    }
+
+    fn caret_glyphs_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# T\n\nbody here\n");
+        let dest = "# T\n\nbody here".len();
+        move_doc_caret(cx, &view, dest);
+        let (caret_b, row_b, glyph) = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let caret_b = window.find("doc-caret").bounds();
+                let row_b = window.find(("doc-row", 2usize)).bounds();
+                let glyph = view.read_with(cx, |shell, _| {
+                    shell
+                        .doc_views
+                        .borrow()
+                        .get(2)
+                        .and_then(|slot| slot.as_ref())
+                        .and_then(|rv| rv.layout.position_for_index(rv.display.to_disp(dest)))
+                        .unwrap()
+                });
+                (caret_b, row_b, glyph)
+            })
+            .unwrap();
+        // Caret div is row-local; the element reports window-space, so shift
+        // the glyph point into the row before comparing. The plain paragraph
+        // has no row padding, so the two must agree.
+        let got_x = caret_b.origin.x.as_f32() - row_b.origin.x.as_f32();
+        let got_y = caret_b.origin.y.as_f32() - row_b.origin.y.as_f32();
+        let want_x = glyph.x.as_f32() - row_b.origin.x.as_f32();
+        let want_y = glyph.y.as_f32() - row_b.origin.y.as_f32();
+        assert!(
+            (got_x - want_x).abs() <= 1.5,
+            "caret x {got_x} must match painted glyph x {want_x}"
+        );
+        assert!(
+            (got_y - want_y).abs() <= 1.5,
+            "caret y {got_y} must match painted glyph y {want_y}"
+        );
     }
 
     /// Open a note of `body` in a window of `width`×`height` and return the

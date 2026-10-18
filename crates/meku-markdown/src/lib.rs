@@ -83,6 +83,9 @@ pub struct StyledDoc {
     pub headings: Vec<Heading>,
 }
 
+/// Single-surface live-preview model (rows, roles, hidden/reveal projection).
+pub mod live;
+
 pub fn parser_options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
