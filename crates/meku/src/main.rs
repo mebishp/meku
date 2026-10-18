@@ -2424,7 +2424,7 @@ mod ui_tests {
         view: &Entity<MekuShell>,
         window: gpui_kit::AnyWindowHandle,
     ) {
-        focus_doc_for(cx, &view, window);
+        focus_doc_for(cx, view, window);
         cx.update_window(window, |_, window, cx| window.press("ctrl-e", cx))
             .unwrap();
     }
@@ -2533,7 +2533,7 @@ mod ui_tests {
     }
 
     fn image_rows_body(cx: &mut TestAppContext) {
-        let (view, window, _dir) = open_note_in(
+        let (_view, window, _dir) = open_note_in(
             cx,
             1200.0,
             800.0,
