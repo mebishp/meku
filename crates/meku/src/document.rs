@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::{ActiveTheme, Sizable as _, v_flex};
 use gpui_kit::*;
 use meku_markdown::InlineStyle;
 use meku_markdown::highlight::{Tok, highlight};
@@ -274,6 +275,7 @@ impl MekuShell {
         let hls = model.hl.clone();
         let views = self.doc_views.clone();
         let caret_on = self.caret_on;
+        let title_input = self.title_inputs.get(rel).cloned();
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
             // Edit reveals every row, Live only the caret's, Read none.
@@ -305,6 +307,16 @@ impl MekuShell {
             // and 45% of the window below the last so the end can rise to
             // the middle.
             let mut item = div().w_full().flex().justify_center().px(px(24.));
+            let el = match (ix, title_input.as_ref()) {
+                // The inline title sits above the first row, scrolls with the
+                // document and is not part of the markdown.
+                (0, Some(input)) => v_flex()
+                    .w_full()
+                    .child(title_element(input, base))
+                    .child(el)
+                    .into_any_element(),
+                _ => el,
+            };
             if ix == 0 {
                 item = item.pt(px(56.));
             }
@@ -842,6 +854,29 @@ fn selection_for(row: &Row, selection: &Range<usize>) -> Option<Range<usize>> {
     let start = selection.start.max(row.src.start);
     let end = selection.end.min(row.src.end);
     (start < end).then_some(start..end)
+}
+
+/// The note's inline title: large, bold, borderless, flush with the body
+/// text. Editing it renames the file (see `MekuShell::commit_title`).
+fn title_element(input: &Entity<InputState>, base: Pixels) -> AnyElement {
+    let size = base * 2.0;
+    div()
+        .id("doc-title")
+        .test_support()
+        .w_full()
+        .mb(base * 0.75)
+        .font_weight(FontWeight::BOLD)
+        // The input pads 8px on each side; pull it back so the title text
+        // lines up with the document column.
+        .ml(px(-8.))
+        .child(
+            Input::new(input)
+                .with_size(gpui_kit::component::Size::Size(size / 0.875))
+                .appearance(false)
+                .bordered(false)
+                .focus_bordered(false),
+        )
+        .into_any_element()
 }
 
 /// Reading column width in em of the body size: 68 characters at roughly

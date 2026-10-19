@@ -21,7 +21,7 @@ use gpui_kit::*;
 // InteractiveElement (div().on_click / overflow_y_scroll) is not in the globs.
 use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
 use meku_buffer::OpenBuffer;
-use meku_markdown::live::{first_h1, title_to_stem};
+use meku_markdown::live::title_to_stem;
 use meku_vault::{OpenTab, Session, VaultEvent};
 
 actions!(
@@ -169,10 +169,17 @@ pub struct MekuShell {
     /// for 600ms after input).
     caret_on: bool,
     caret_touch: Instant,
-    /// Notes whose file name tracks their first H1, with the heading the
-    /// name was last synced to. A note joins when its stem already matches
-    /// its heading on open (every note created from the app does).
-    title_link: HashMap<PathBuf, String>,
+    /// The inline title above each open note's body (not part of the
+    /// markdown): shows the file stem, and editing it renames the file.
+    title_inputs: HashMap<PathBuf, Entity<InputState>>,
+    title_subs: HashMap<PathBuf, Subscription>,
+    /// Note whose title was edited and when; committed after 800ms idle.
+    title_pending: Option<(PathBuf, Instant)>,
+    /// Titles to put back to the file stem on the next render (rejected or
+    /// emptied edits).
+    title_resync: Vec<PathBuf>,
+    /// Focus the title of this note (selecting it) on the next render.
+    focus_title: Option<PathBuf>,
     /// Move keyboard focus to the document on the next render.
     focus_doc: bool,
 }
@@ -205,7 +212,11 @@ impl MekuShell {
             notice: None,
             caret_on: true,
             caret_touch: Instant::now(),
-            title_link: HashMap::new(),
+            title_inputs: HashMap::new(),
+            title_subs: HashMap::new(),
+            title_pending: None,
+            title_resync: Vec::new(),
+            focus_title: None,
             focus_doc: false,
         };
         this.start_watcher_pump(cx);
@@ -258,7 +269,7 @@ impl MekuShell {
         .detach();
     }
 
-    // -- title <-> file name ---------------------------------------------
+    // -- inline title <-> file name ----------------------------------------
 
     fn stem_of(rel: &Path) -> String {
         rel.file_stem()
@@ -267,53 +278,106 @@ impl MekuShell {
             .to_string()
     }
 
-    /// Link the note's name to its first H1 when they already agree.
-    fn link_title_if_matching(&mut self, rel: &Path, text: &str) {
-        if let Some(title) = first_h1(text)
-            && title_to_stem(&title).as_deref() == Some(Self::stem_of(rel).as_str())
+    /// Create the title input of the active note when missing, and apply
+    /// queued resyncs/focus. Needs a window, so it runs from `render`.
+    fn ensure_title_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rel) = self.doc_rel() else {
+            return;
+        };
+        if !self.title_inputs.contains_key(&rel) {
+            let stem = Self::stem_of(&rel);
+            let input = cx.new(|cx| InputState::new(window, cx).default_value(stem));
+            // Look the note up by input entity: renames move the map key.
+            let sub = cx.subscribe(&input, |this, state, event: &InputEvent, cx| {
+                let owner = this
+                    .title_inputs
+                    .iter()
+                    .find(|(_, e)| **e == state)
+                    .map(|(k, _)| k.clone());
+                if let Some(rel) = owner {
+                    this.on_title_event(&rel, event, cx);
+                }
+            });
+            self.title_inputs.insert(rel.clone(), input);
+            self.title_subs.insert(rel.clone(), sub);
+        }
+        for r in std::mem::take(&mut self.title_resync) {
+            if let Some(input) = self.title_inputs.get(&r).cloned() {
+                let stem = Self::stem_of(&r);
+                input.update(cx, |state, cx| state.set_value(stem, window, cx));
+            }
+        }
+        if self.focus_title.as_deref() == Some(rel.as_path())
+            && let Some(input) = self.title_inputs.get(&rel).cloned()
         {
-            self.title_link.insert(rel.to_path_buf(), title);
+            self.focus_title = None;
+            window.focus(&input.read(cx).focus_handle(cx), cx);
+            input.update(cx, |state, cx| state.select_all(window, cx));
         }
     }
 
-    /// After a save: when a linked note's first H1 changed, rename the file
-    /// to match. Skips when the new name is unusable or already taken (the
-    /// link stays, so a later edit can still succeed).
-    fn sync_title_to_name(&mut self, rel: &Path, cx: &mut Context<Self>) {
-        let Some(prev) = self.title_link.get(rel).cloned() else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get(rel).cloned() else {
-            return;
-        };
-        let text = buffer.read(cx).text_string();
-        let Some(title) = first_h1(&text) else {
-            return;
-        };
-        if title == prev {
-            return;
+    fn on_title_event(&mut self, rel: &Path, event: &InputEvent, cx: &mut Context<Self>) {
+        match event {
+            InputEvent::Change => {
+                self.title_pending = Some((rel.to_path_buf(), Instant::now()));
+            }
+            InputEvent::PressEnter { .. } => {
+                self.commit_title(rel, true, cx);
+                self.focus_doc = true;
+                cx.notify();
+            }
+            InputEvent::Blur => self.commit_title(rel, true, cx),
+            InputEvent::Focus => {}
         }
-        let Some(stem) = title_to_stem(&title) else {
+    }
+
+    /// Rename the note to the title text. An empty or unusable title can't
+    /// remove the name: it snaps back (`force`) or waits for more typing.
+    /// A name already in use is refused with a notice and snaps back too.
+    fn commit_title(&mut self, rel: &Path, force: bool, cx: &mut Context<Self>) {
+        if self.title_pending.as_ref().is_some_and(|(r, _)| r == rel) {
+            self.title_pending = None;
+        }
+        let Some(input) = self.title_inputs.get(rel).cloned() else {
             return;
         };
-        if stem == Self::stem_of(rel) {
-            self.title_link.insert(rel.to_path_buf(), title);
+        let typed = input.read(cx).value().to_string();
+        let current = Self::stem_of(rel);
+        let Some(stem) = title_to_stem(&typed) else {
+            if force {
+                self.title_resync.push(rel.to_path_buf());
+                cx.notify();
+            }
+            return;
+        };
+        if stem == current {
+            if typed != stem {
+                self.title_resync.push(rel.to_path_buf());
+                cx.notify();
+            }
             return;
         }
         let ext = rel.extension().and_then(|e| e.to_str()).unwrap_or("md");
-        // A taken name is an Err: keep the old file name for now.
-        if let Ok(new_rel) = self.explorer.rename(rel, &format!("{stem}.{ext}")) {
-            self.title_link.remove(rel);
-            self.title_link.insert(new_rel.clone(), title);
-            self.retarget_tabs(rel, &new_rel, cx);
-            self.explorer.refresh();
-            self.explorer.reveal(&new_rel);
+        match self.explorer.rename(rel, &format!("{stem}.{ext}")) {
+            Ok(new_rel) => {
+                self.retarget_tabs(rel, &new_rel, cx);
+                self.explorer.refresh();
+                self.explorer.reveal(&new_rel);
+                self.notice = None;
+                if typed != stem {
+                    self.title_resync.push(new_rel);
+                }
+            }
+            Err(e) => {
+                self.notice = Some(e.to_string());
+                self.title_resync.push(rel.to_path_buf());
+            }
         }
         cx.notify();
     }
 
-    /// Create `Untitled.md` (or `Untitled 2.md`, ...) holding `# Untitled`,
-    /// open it, and select the heading text so typing names the note.
+    /// Create `Untitled.md` (`Untitled 2.md`, ...) — an empty note whose
+    /// title is focused and selected, ready to be typed over.
     fn new_untitled_note(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         let Some(root) = self.explorer.root().map(Path::to_path_buf) else {
             return;
@@ -327,15 +391,10 @@ impl MekuShell {
             .unwrap_or_else(|| "Untitled".to_string());
         match self.explorer.create_note(&dir, &name) {
             Ok(rel) => {
-                let _ = std::fs::write(root.join(&rel), format!("# {name}\n"));
                 self.explorer.refresh();
                 self.explorer.reveal(&rel);
                 self.open_file_inner(&rel, cx);
-                if let Some(buffer) = self.buffers.get(&rel).cloned() {
-                    buffer.update(cx, |b, _| b.select_range(2..2 + name.len()));
-                }
-                self.focus_doc = true;
-                self.touch_caret();
+                self.focus_title = Some(rel);
                 self.notice = None;
             }
             Err(e) => self.notice = Some(e.to_string()),
@@ -374,7 +433,6 @@ impl MekuShell {
         };
         match OpenBuffer::load(rel.to_path_buf(), &abs) {
             Ok(buffer) => {
-                self.link_title_if_matching(rel, &buffer.text_string());
                 self.buffers.insert(rel.to_path_buf(), cx.new(|_| buffer));
                 self.tabs.push(EditorTab {
                     rel: Some(rel.to_path_buf()),
@@ -967,7 +1025,6 @@ impl MekuShell {
     fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(rel) = self.tabs.get(self.active_tab).and_then(|t| t.rel.clone()) {
             self.save_buffer(&rel, cx);
-            self.sync_title_to_name(&rel, cx);
         }
     }
 
@@ -1018,7 +1075,14 @@ impl MekuShell {
             .collect();
         for rel in due {
             self.save_buffer(&rel, cx);
-            self.sync_title_to_name(&rel, cx);
+        }
+        let idle_title = self
+            .title_pending
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) > Duration::from_millis(800))
+            .map(|(rel, _)| rel.clone());
+        if let Some(rel) = idle_title {
+            self.commit_title(&rel, false, cx);
         }
     }
 
@@ -1295,8 +1359,11 @@ impl MekuShell {
                 let moved = new.join(suffix);
                 entity.update(cx, |buffer, _| buffer.rel = moved.clone());
                 self.buffers.insert(moved.clone(), entity);
-                if let Some(title) = self.title_link.remove(&key) {
-                    self.title_link.insert(moved.clone(), title);
+                if let Some(input) = self.title_inputs.remove(&key) {
+                    self.title_inputs.insert(moved.clone(), input);
+                }
+                if let Some(sub) = self.title_subs.remove(&key) {
+                    self.title_subs.insert(moved.clone(), sub);
                 }
                 if let Some(at) = self.last_edit.remove(&key) {
                     self.last_edit.insert(moved.clone(), at);
@@ -1861,6 +1928,7 @@ impl MekuShell {
 impl Render for MekuShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_naming_input(window, cx);
+        self.ensure_title_input(window, cx);
         let focus = self.focus_handle.clone();
         if std::mem::take(&mut self.focus_doc) && self.naming.is_none() {
             window.focus(&focus, cx);
@@ -2260,8 +2328,19 @@ mod ui_tests {
         assert_eq!(tabs, 1);
     }
 
+    fn title_value(cx: &mut TestAppContext, view: &Entity<MekuShell>, rel: &str) -> String {
+        cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                shell.title_inputs[&PathBuf::from(rel)]
+                    .read(cx)
+                    .value()
+                    .to_string()
+            })
+        })
+    }
+
     #[test]
-    fn new_note_is_created_untitled_with_selected_heading() {
+    fn new_note_is_untitled_and_its_inline_title_renames_the_file() {
         run_ui_test("new_untitled", new_untitled_body);
     }
 
@@ -2276,35 +2355,36 @@ mod ui_tests {
         });
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
+            window.render_frame(cx);
         })
         .unwrap();
 
-        // No dialog: the note exists, holds its own name as H1, and is open.
+        // No dialog and no markdown heading: the file is empty, the title is
+        // UI above the body showing the file name.
         let path = dir.path().join("Untitled.md");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Untitled\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         let (naming_open, tabs) = cx
             .update(|cx| view.read_with(cx, |shell, _| (shell.naming.is_some(), shell.tabs.len())));
         assert!(!naming_open, "creating a note shows no window");
         assert_eq!(tabs, 2); // Welcome + Untitled.md
-        let rel = PathBuf::from("Untitled.md");
-        let selected = cx
-            .update(|cx| view.read_with(cx, |shell, cx| shell.buffers[&rel].read(cx).selection()));
-        assert_eq!(
-            selected,
-            2..10,
-            "heading text is selected, ready to type over"
-        );
+        assert_eq!(title_value(cx, &view, "Untitled.md"), "Untitled");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("doc-title"); // the title element is on screen
+        })
+        .unwrap();
 
-        // Typing the new title and saving renames the file.
+        // The title is focused with its text selected: typing replaces it,
+        // Enter renames the file and hands focus to the body.
         cx.update_window(window, |_, window, cx| {
             window.input("Plan", cx);
-            window.press("ctrl-s", cx);
+            window.press("enter", cx);
         })
         .unwrap();
         assert!(!path.exists(), "old name is gone");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("Plan.md")).unwrap(),
-            "# Plan\n"
+            ""
         );
         let active = cx.update(|cx| view.read_with(cx, |shell, _| shell.doc_rel()));
         assert_eq!(
@@ -2312,16 +2392,59 @@ mod ui_tests {
             Some(PathBuf::from("Plan.md")),
             "tab follows the rename"
         );
+        assert_eq!(title_value(cx, &view, "Plan.md"), "Plan");
 
-        // A second new note does not collide.
+        // The title cannot be emptied: it snaps back to the file name.
+        cx.update_window(window, |_, window, cx| {
+            let rel = PathBuf::from("Plan.md");
+            let input = view.read_with(cx, |shell, _| shell.title_inputs[&rel].clone());
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            view.update(cx, |shell, cx| shell.commit_title(&rel, true, cx));
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        assert_eq!(title_value(cx, &view, "Plan.md"), "Plan");
+        assert!(dir.path().join("Plan.md").exists());
+    }
+
+    #[test]
+    fn title_edit_cannot_clobber_another_note() {
+        run_ui_test("title_clash", title_clash_body);
+    }
+
+    fn title_clash_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let dir = open_fixture(cx, &view);
+        std::fs::write(dir.path().join("Taken.md"), "keep").unwrap();
         cx.update(|cx| {
             view.update(cx, |shell, cx| {
                 shell.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx);
-                shell.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx);
             });
         });
-        assert!(dir.path().join("Untitled.md").exists());
-        assert!(dir.path().join("Untitled 2.md").exists());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.input("Taken", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("Taken.md")).unwrap(),
+            "keep"
+        );
+        assert!(dir.path().join("Untitled.md").exists(), "rename refused");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        assert_eq!(
+            title_value(cx, &view, "Untitled.md"),
+            "Untitled",
+            "snaps back"
+        );
     }
 
     #[test]

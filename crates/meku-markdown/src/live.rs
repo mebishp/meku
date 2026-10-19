@@ -287,20 +287,6 @@ pub fn heading_slug(title: &str) -> String {
         .collect()
 }
 
-/// Title of the first level-1 heading outside code fences, trimmed and
-/// without closing `#`s. `None` when the note has no H1 or it is empty.
-pub fn first_h1(text: &str) -> Option<String> {
-    build_rows(text).iter().find_map(|row| {
-        if row.kind != RowKind::Heading(1) {
-            return None;
-        }
-        let line = text[row.src.clone()].trim_start();
-        let title = line.trim_start_matches('#').trim();
-        let title = title.trim_end_matches('#').trim_end();
-        (!title.is_empty()).then(|| title.to_string())
-    })
-}
-
 /// A file stem for `title`: path separators and characters Windows/Linux
 /// tools dislike are dropped, edges trimmed, length capped. `None` when
 /// nothing usable is left.
@@ -945,20 +931,6 @@ mod tests {
     fn slugs_follow_github_rules() {
         assert_eq!(heading_slug("My Part: 2!"), "my-part-2");
         assert_eq!(heading_slug("  snake_case-ok "), "snake_case-ok");
-    }
-
-    #[test]
-    fn first_h1_skips_fences_and_lower_levels() {
-        assert_eq!(
-            first_h1("## Sub\n# Real ##\n# Later\n").as_deref(),
-            Some("Real")
-        );
-        assert_eq!(
-            first_h1("```\n# code\n```\n# After\n").as_deref(),
-            Some("After")
-        );
-        assert_eq!(first_h1("text only\n"), None);
-        assert_eq!(first_h1("# \n"), None);
     }
 
     #[test]
