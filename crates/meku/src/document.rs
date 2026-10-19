@@ -1732,8 +1732,8 @@ fn row_element(
     }
     if row.kind == RowKind::Rule && !reveal {
         return row_div
-            .py(base_font)
-            .child(div().h(px(1.)).w(px(40.)).mx_auto().bg(cx.theme().border))
+            .py(base_font * 0.9)
+            .child(div().h(px(1.)).w_full().bg(cx.theme().border))
             .into_any_element();
     }
 
@@ -1905,6 +1905,19 @@ fn row_element(
     if row.kind == RowKind::Code {
         el = el.bg(code_bg(cx)).px(px(14.));
         text_x = px(14.);
+        // One rounded container whatever is revealed: the block's first and
+        // last rows carry the corners (also while the fences show as source).
+        let opens = row.fence.as_ref().is_some_and(|f| f.open);
+        let closes = row.fence.as_ref().is_some_and(|f| !f.open)
+            || rows
+                .get(ix + 1)
+                .is_none_or(|next| next.kind != RowKind::Code);
+        if opens {
+            el = el.rounded_tl(px(8.)).rounded_tr(px(8.)).min_h(px(32.));
+        }
+        if closes {
+            el = el.rounded_bl(px(8.)).rounded_br(px(8.));
+        }
     }
     // A title-less callout shows its default title instead of empty text.
     let title_less = callout.is_some_and(|c| c.role == CalloutRole::Title) && display_empty;
