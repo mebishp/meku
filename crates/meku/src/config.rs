@@ -203,6 +203,18 @@ pub const DEFS: &[Def] = &[
         Dv::S("comfortable"),
     ),
     def(
+        "scroll_speed",
+        Section::Appearance,
+        "Scroll speed",
+        "How far one mouse-wheel notch scrolls.",
+        Kind::Number {
+            min: 0.5,
+            max: 3.0,
+            step: 0.1,
+        },
+        Dv::N(1.0),
+    ),
+    def(
         "reduce_motion",
         Section::Appearance,
         "Reduce motion",

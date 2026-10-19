@@ -17,8 +17,8 @@ use gpui_kit::*;
 /// Half of every notch is applied the moment it arrives, so the response
 /// is immediate and only the tail eases.
 const TAU_SECS: f32 = 0.03;
-/// Distance one wheel notch asks for, in line heights.
-const NOTCH_LINES: f32 = 3.0;
+/// Distance one wheel notch asks for at the default speed, in line heights.
+const NOTCH_LINES: f32 = 1.5;
 /// Never queue more than this many pixels of unscrolled distance.
 const MAX_PENDING: f32 = 600.0;
 /// Share of a notch applied instantly.
@@ -85,7 +85,10 @@ pub(crate) fn wheel(state: &GlideState, scroller: Scroller) -> impl IntoElement 
                 };
                 cx.stop_propagation();
                 // Whole pixels only: fractional offsets shimmer the text.
-                let notch = (f32::from(window.line_height()) * NOTCH_LINES).round();
+                let speed = crate::theme::cfg(cx).f64("scroll_speed") as f32;
+                let notch = (f32::from(window.line_height()) * NOTCH_LINES * speed)
+                    .round()
+                    .max(1.0);
                 let instant = {
                     let mut g = state.borrow_mut();
                     // Reversing direction cancels what is left of the old
