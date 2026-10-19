@@ -26,6 +26,7 @@ ICONS = [
     ("Warning", "warning-triangle"), ("Idea", "light-bulb"), ("Quote", "quote"),
     ("Table", "table-rows"), ("TaskList", "task-list"), ("Hash", "hashtag"),
     ("HelpCircle", "help-circle"), ("Bug", "bug"), ("Menu", "menu"), ("Refresh", "refresh"), ("Journal", "journal"),
+    ("Minus", "minus"),
 ]
 
 src = Path(sys.argv[1]) / "icons" / "regular"

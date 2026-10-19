@@ -153,6 +153,17 @@ pub(crate) struct DocModel {
     pub images: Rc<Vec<Option<Vec<ImageInfo>>>>,
     /// Word count of the note (status bar).
     pub words: usize,
+    /// Markdown rendering options the model was built with (see [`model_opts`]).
+    pub opts: u8,
+}
+
+/// Bit set of the settings that change how a note's rows are built, so a
+/// model is rebuilt when one flips: 1 tables, 2 callouts, 4 images.
+pub(crate) fn model_opts(cx: &App) -> u8 {
+    let c = crate::theme::cfg(cx);
+    u8::from(c.bool("render_tables"))
+        | u8::from(c.bool("render_callouts")) << 1
+        | u8::from(c.bool("render_images")) << 2
 }
 
 /// What a rendered row exposes for hit testing: its text layout and the
@@ -174,6 +185,7 @@ impl MekuShell {
             || self.pending_delete.is_some()
             || self.palette_open()
             || self.lightbox.is_some()
+            || self.settings.is_some()
     }
 
     /// Relative path of the note shown by the active tab, when it has a buffer.
@@ -188,13 +200,26 @@ impl MekuShell {
     pub(crate) fn doc_model(&mut self, rel: &Path, cx: &App) -> Option<DocModel> {
         let buffer = self.buffers.get(rel)?.clone();
         let version = buffer.read(cx).version;
+        let opts = model_opts(cx);
         if let Some(model) = self.doc_models.get(rel)
             && model.version == version
+            && model.opts == opts
         {
             return Some(model.clone());
         }
         let text: Rc<str> = Rc::from(buffer.read(cx).text_string());
-        let rows = Rc::new(build_rows(&text));
+        let mut built = build_rows(&text);
+        let c = crate::theme::cfg(cx);
+        for row in &mut built {
+            if !c.bool("render_tables") && row.table.take().is_some() && row.kind == RowKind::Table
+            {
+                row.kind = RowKind::Text;
+            }
+            if !c.bool("render_callouts") {
+                row.callout = None;
+            }
+        }
+        let rows = Rc::new(built);
         let hl = Self::colored_rows(&text, &rows);
         let root = self.explorer.root().map(Path::to_path_buf);
         let mut dim_cache = std::mem::take(&mut self.image_dims);
@@ -204,7 +229,7 @@ impl MekuShell {
             Rc::new(
                 rows.iter()
                     .map(|row| {
-                        root.as_deref().and_then(|root| {
+                        root.as_deref().filter(|_| opts & 4 != 0).and_then(|root| {
                             image_source_of(row, &text, root, rel, &mut dim_cache, &resolve)
                         })
                     })
@@ -220,6 +245,7 @@ impl MekuShell {
             hl,
             images,
             words,
+            opts,
         };
         self.doc_models.insert(rel.to_path_buf(), model.clone());
         Some(model)
@@ -333,10 +359,12 @@ impl MekuShell {
         let hover_link = self.hover_link;
         let find_all: Rc<Vec<(Range<usize>, bool)>> = Rc::new(self.find_highlights(rel));
         let title_input = self.title_inputs.get(rel).cloned();
+        let reveal_pref = Reveal::of(cx);
+        let column_em = column_em(cx);
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
             let is_caret_row = mode != Mode::Read && ix == active;
-            let reveal = row_is_revealed(mode, row, ix, active, &selection);
+            let reveal = row_is_revealed_with(reveal_pref, mode, row, ix, active, &selection);
             let base = window.text_style().font_size.to_pixels(window.rem_size());
             let el = row_element(
                 ix,
@@ -392,7 +420,7 @@ impl MekuShell {
             if ix + 1 == rows.len() {
                 item = item.pb(window.viewport_size().height * 0.45);
             }
-            item.child(div().w_full().max_w(base * COLUMN_EM).child(el))
+            item.child(div().w_full().max_w(base * column_em).child(el))
                 .into_any_element()
         })
         .size_full();
@@ -409,7 +437,7 @@ impl MekuShell {
                 // needs it to shape wrapped lines the same way they paint.
                 let base = window.text_style().font_size.to_pixels(window.rem_size());
                 let inner = bounds.size.width - px(2.0 * (16.0 + 24.0));
-                let width = inner.min(base * COLUMN_EM).max(px(0.));
+                let width = inner.min(base * column_em).max(px(0.));
                 if (wrap_cell.get() - width).abs() > px(0.5) {
                     wrap_cell.set(width);
                     window.refresh();
@@ -538,14 +566,16 @@ impl MekuShell {
             return None;
         }
         let selection = self.buffers.get(&rel)?.read(cx).selection();
-        let rendered = !row_is_revealed(
+        let rendered = !row_is_revealed_with(
+            Reveal::of(cx),
             self.tab_mode(),
             row,
             ix,
             row_at(&model.rows, caret),
             &selection,
         );
-        if !(ctrl || rendered) {
+        let plain_click = crate::theme::cfg(cx).str("link_click") == "click";
+        if !(ctrl || (rendered && plain_click)) {
             return None;
         }
         // The pointer must really be over the text, not the padding beside it.
@@ -694,8 +724,11 @@ impl MekuShell {
             (b.selection(), b.caret())
         };
         let cur_ix = row_at(&model.rows, caret_now);
-        let revealed_now = row_is_revealed(mode, &model.rows[cur_ix], cur_ix, cur_ix, &sel);
-        let revealed_when_caret = |t: usize| row_is_revealed(mode, &model.rows[t], t, t, &(0..0));
+        let pref = Reveal::of(cx);
+        let revealed_now =
+            row_is_revealed_with(pref, mode, &model.rows[cur_ix], cur_ix, cur_ix, &sel);
+        let revealed_when_caret =
+            |t: usize| row_is_revealed_with(pref, mode, &model.rows[t], t, t, &(0..0));
         let mutated = match key {
             DocKey::Left | DocKey::Right => {
                 let forward = key == DocKey::Right;
@@ -956,6 +989,8 @@ impl MekuShell {
                 let caret = buffer.read(cx).caret();
                 if fence_at(&model, caret).0 {
                     buffer.update(cx, |b, _| b.insert("\n"));
+                } else if !crate::theme::cfg(cx).bool("smart_lists") {
+                    buffer.update(cx, |b, _| b.insert("\n"));
                 } else {
                     buffer.update(cx, |b, _| b.smart_enter());
                 }
@@ -1166,7 +1201,11 @@ impl MekuShell {
         let Some(root) = self.explorer.root().map(Path::to_path_buf) else {
             return false;
         };
-        let dir = rel.parent().unwrap_or(Path::new("")).join("attachments");
+        let folder = crate::theme::cfg(cx)
+            .str("attachments_folder")
+            .trim_matches('/')
+            .to_string();
+        let dir = rel.parent().unwrap_or(Path::new("")).join(&folder);
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -1185,7 +1224,7 @@ impl MekuShell {
             return false;
         }
         Self::insert_embed(buffer, &name, cx);
-        self.notice = Some(format!("Saved attachments/{name}"));
+        self.notice = Some(format!("Saved {}", dir.join(&name).display()));
         true
     }
 
@@ -1344,6 +1383,16 @@ fn title_element(input: &Entity<InputState>, base: Pixels) -> AnyElement {
 
 /// Reading column width in em of the body size: 68 characters at roughly
 /// 0.55em per average character.
+/// Reading column width in em for the `column_width` setting.
+fn column_em(cx: &App) -> f32 {
+    match crate::theme::cfg(cx).str("column_width") {
+        "narrow" => 30.0,
+        "wide" => 48.0,
+        "full" => 400.0,
+        _ => COLUMN_EM,
+    }
+}
+
 const COLUMN_EM: f32 = 37.5;
 
 fn heading_scale(kind: RowKind) -> f32 {
@@ -1756,7 +1805,40 @@ impl Visible {
 /// bold, links) so typing feels like a word processor; raw source appears only
 /// where the user is working on the markup itself: lines touched by a
 /// selection, headings (their `#`s), table rows, rules, and fence lines.
+/// When Live view shows raw markdown (the `reveal_markdown` setting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reveal {
+    /// Only on selected text (and structural rows under the caret).
+    Selection,
+    /// The whole caret line too.
+    CaretLine,
+    /// Never for text; headings/tables/rules/fences still show under the caret.
+    Never,
+}
+
+impl Reveal {
+    pub(crate) fn of(cx: &App) -> Self {
+        match crate::theme::cfg(cx).str("reveal_markdown") {
+            "caret-line" => Reveal::CaretLine,
+            "never" => Reveal::Never,
+            _ => Reveal::Selection,
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn row_is_revealed(
+    mode: Mode,
+    row: &Row,
+    ix: usize,
+    caret_row: usize,
+    selection: &Range<usize>,
+) -> bool {
+    row_is_revealed_with(Reveal::Selection, mode, row, ix, caret_row, selection)
+}
+
+pub(crate) fn row_is_revealed_with(
+    reveal: Reveal,
     mode: Mode,
     row: &Row,
     ix: usize,
@@ -1775,7 +1857,8 @@ pub(crate) fn row_is_revealed(
                 row.kind,
                 RowKind::Heading(_) | RowKind::Table | RowKind::Rule
             ) || row.fence.is_some();
-            selected || (ix == caret_row && structural)
+            let selected = selected && reveal != Reveal::Never;
+            selected || (ix == caret_row && (structural || reveal == Reveal::CaretLine))
         }
     }
 }
@@ -2488,22 +2571,19 @@ fn row_element(
     el.into_any_element()
 }
 
-/// Largest height of an image row.
-const IMAGE_MAX_H: f32 = 460.0;
-
 /// Frame size for an image: its natural (or `|width`-hinted) size, never wider
-/// than the column, never taller than [`IMAGE_MAX_H`], aspect preserved. With
+/// than the column, never taller than `max_h`, aspect preserved. With
 /// no known size (remote images) a 16:9 box.
-pub(crate) fn image_frame_size(info: &ImageInfo, avail: Pixels) -> (Pixels, Pixels) {
+pub(crate) fn image_frame_size(info: &ImageInfo, avail: Pixels, max_h: f32) -> (Pixels, Pixels) {
     let avail = f32::from(avail).max(120.0);
     match info.dims {
         Some((w, h)) if w > 0 && h > 0 => {
             let natural = info.width.unwrap_or(w) as f32;
             let mut fw = natural.min(avail);
             let mut fh = fw * h as f32 / w as f32;
-            if fh > IMAGE_MAX_H {
-                fw *= IMAGE_MAX_H / fh;
-                fh = IMAGE_MAX_H;
+            if fh > max_h {
+                fw *= max_h / fh;
+                fh = max_h;
             }
             (px(fw), px(fh))
         }
@@ -2563,8 +2643,10 @@ fn image_row_element(
     let ring = crate::theme::accent_alpha(cx, 0.9);
     let hover_border = ring;
     let mut flow = h_flex().flex_wrap().gap(px(10.)).items_start();
+    let max_h = crate::theme::cfg(cx).f64("image_max_height") as f32;
+    let zoomable = crate::theme::cfg(cx).bool("image_click_zoom");
     for (k, info) in images.into_iter().enumerate() {
-        let (fw, fh) = image_frame_size(&info, avail);
+        let (fw, fh) = image_frame_size(&info, avail, max_h);
         let open = info.clone();
         let shell = shell.clone();
         let id: ElementId = if k == 0 {
@@ -2586,6 +2668,9 @@ fn image_row_element(
             // A press on the picture zooms it; it must not move the caret.
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 cx.stop_propagation();
+                if !zoomable {
+                    return;
+                }
                 let open = open.clone();
                 shell.update(cx, |view, cx| {
                     // Esc must reach the shell whatever had focus before.

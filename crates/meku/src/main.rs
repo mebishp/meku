@@ -1,10 +1,12 @@
 mod chrome;
+mod config;
 mod document;
 mod explorer;
 mod find;
 mod icons;
 mod lightbox;
 mod palette;
+mod settings_page;
 mod slash;
 mod theme;
 
@@ -124,6 +126,15 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// The `default_mode` setting's value.
+    fn from_setting(name: &str) -> Mode {
+        match name {
+            "edit" => Mode::Edit,
+            "read" => Mode::Read,
+            _ => Mode::Live,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Mode::Edit => "Edit",
@@ -242,6 +253,13 @@ pub struct MekuShell {
     focus_title: Option<PathBuf>,
     /// Move keyboard focus to the document on the next render.
     focus_doc: bool,
+    /// Settings generation last applied (see [`MekuShell::apply_settings`]).
+    config_gen: u64,
+    sidebar_setting: bool,
+    /// The settings page, when open.
+    settings: Option<settings_page::SettingsPage>,
+    /// Open the settings page on this tab at the next render (needs a window).
+    settings_request: Option<settings_page::Tab>,
 }
 
 impl MekuShell {
@@ -301,6 +319,10 @@ impl MekuShell {
             title_resync: Vec::new(),
             focus_title: None,
             focus_doc: false,
+            config_gen: u64::MAX,
+            sidebar_setting: true,
+            settings: None,
+            settings_request: None,
         };
         this.start_watcher_pump(cx);
         this.start_caret_blink(cx);
@@ -319,6 +341,10 @@ impl MekuShell {
                     break;
                 };
                 cx.update(|cx| {
+                    // Settings files edited by hand take effect live.
+                    if theme::state(cx).changed_on_disk() {
+                        theme::update_config(cx, |s| s.reload_if_changed());
+                    }
                     view.update(cx, |shell, cx| shell.poll_watcher(cx));
                 });
             }
@@ -362,9 +388,18 @@ impl MekuShell {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
         {
-            let mut settings = cx.global::<theme::Settings>().clone();
-            settings.zoom = z;
-            cx.set_global(settings);
+            theme::update_config(cx, |s| {
+                s.global.values.insert("zoom".into(), serde_json::json!(z));
+                s.rebuild();
+            });
+        }
+        if let Ok(name) = std::env::var("MEKU_SETTINGS") {
+            self.settings_request = settings_page::Tab::all()
+                .into_iter()
+                .find(|t| t.label().eq_ignore_ascii_case(&name))
+                .or(Some(settings_page::Tab::Section(
+                    config::Section::Appearance,
+                )));
         }
         if std::env::var("MEKU_FIND").is_ok() {
             self.open_find(std::env::var("MEKU_REPLACE").is_ok(), cx);
@@ -388,14 +423,22 @@ impl MekuShell {
     fn start_caret_blink(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
+                let interval = cx.update(|cx| theme::cfg(cx).f64("caret_blink_ms"));
                 cx.background_executor()
-                    .timer(Duration::from_millis(530))
+                    .timer(Duration::from_millis(interval as u64))
                     .await;
                 let Some(view) = this.upgrade() else {
                     break;
                 };
                 cx.update(|cx| {
                     view.update(cx, |shell, cx| {
+                        if !theme::cfg(cx).bool("caret_blink") {
+                            if !shell.caret_on {
+                                shell.caret_on = true;
+                                cx.notify();
+                            }
+                            return;
+                        }
                         if shell.doc_rel().is_none() || shell.tab_mode() == Mode::Read {
                             return;
                         }
@@ -534,6 +577,17 @@ impl MekuShell {
         let Some(root) = self.explorer.root().map(Path::to_path_buf) else {
             return;
         };
+        // New notes made from the top level go to the configured folder.
+        let dir = if dir.as_os_str().is_empty() {
+            let folder = theme::cfg(cx)
+                .str("new_note_folder")
+                .trim_matches('/')
+                .to_string();
+            let _ = std::fs::create_dir_all(root.join(&folder));
+            PathBuf::from(folder)
+        } else {
+            dir
+        };
         let name = (1..)
             .map(|n| match n {
                 1 => "Untitled".to_string(),
@@ -596,7 +650,7 @@ impl MekuShell {
                 self.tabs.push(EditorTab {
                     rel: Some(rel.to_path_buf()),
                     title: Self::tab_title(rel),
-                    mode: Mode::Live,
+                    mode: Mode::from_setting(theme::cfg(cx).str("default_mode")),
                 });
                 self.active_tab = self.tabs.len() - 1;
                 self.explorer.reveal(rel);
@@ -805,6 +859,7 @@ impl MekuShell {
         match self.explorer.open(dir) {
             Ok(session) => {
                 let root = self.explorer.root().unwrap().to_path_buf();
+                theme::update_config(cx, |s| s.set_mekuto(Some(&root)));
                 let (tx, rx) = mpsc::channel();
                 match meku_vault::start_watcher(&root, tx) {
                     Ok(watcher) => {
@@ -820,7 +875,8 @@ impl MekuShell {
                 self.last_edit.clear();
                 self.doc_models.clear();
                 self.conflict = None;
-                for tab in &session.open_tabs {
+                let restore = theme::cfg(cx).bool("restore_session");
+                for tab in session.open_tabs.iter().filter(|_| restore) {
                     if root.join(&tab.path).is_file() {
                         self.open_file_inner(&tab.path, cx);
                     }
@@ -1340,15 +1396,18 @@ impl MekuShell {
     /// Runs inside the watcher pump, a few times per second.
     fn autosave(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
+        let enabled = theme::cfg(cx).bool("autosave");
+        let delay = Duration::from_millis(theme::cfg(cx).f64("autosave_delay_ms") as u64);
         let due: Vec<PathBuf> = self
             .buffers
             .iter()
+            .filter(|_| enabled)
             .filter(|(rel, b)| {
                 b.read_with(cx, |b, _| b.dirty)
                     && self
                         .last_edit
                         .get(*rel)
-                        .is_none_or(|at| now.duration_since(*at) > Duration::from_millis(800))
+                        .is_none_or(|at| now.duration_since(*at) > delay)
             })
             .map(|(rel, _)| rel.clone())
             .collect();
@@ -1597,6 +1656,9 @@ impl MekuShell {
         self.naming_input = None;
         self._naming_sub = None;
         self.pending_delete = Some(rel);
+        if !theme::cfg(cx).bool("confirm_delete") {
+            self.commit_delete(cx);
+        }
         cx.notify();
     }
 
@@ -1634,6 +1696,7 @@ impl MekuShell {
             cx.notify();
         } else if self.palette_open() || self.naming.is_some() || self.pending_delete.is_some() {
             self.close_palette(true, cx);
+        } else if self.close_settings(cx) {
         } else {
             self.close_find(cx);
         }
@@ -1690,8 +1753,29 @@ impl MekuShell {
     /// Narrow windows give the editor the room: below ~820px the sidebar
     /// folds away, and returns when the window widens again — unless the user
     /// toggled it themselves in the meantime.
-    fn adapt_to_width(&mut self, window: &Window) {
-        let narrow = window.viewport_size().width < px(820.);
+    /// Take in changed settings: things the shell keeps state for (buffer
+    /// behaviour, the sidebar's initial visibility, wrapped-row layout).
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let c = theme::cfg(cx).clone();
+        let first = self.config_gen == u64::MAX;
+        self.config_gen = theme::state(cx).generation;
+        let sidebar = c.bool("sidebar_visible");
+        if first || self.sidebar_setting != sidebar {
+            self.show_sidebar = sidebar;
+            self.sidebar_auto_hidden = false;
+        }
+        self.sidebar_setting = sidebar;
+        apply_fonts(cx);
+        for buffer in self.buffers.values() {
+            buffer.update(cx, |b, _| b.auto_close = c.bool("auto_close_pairs"));
+        }
+        // Column width and rendering options change row heights.
+        self.doc_list_rel = None;
+        cx.notify();
+    }
+
+    fn adapt_to_width(&mut self, window: &Window, breakpoint: f32) {
+        let narrow = breakpoint > 0.0 && window.viewport_size().width < px(breakpoint);
         if narrow == self.narrow {
             return;
         }
@@ -1723,12 +1807,7 @@ impl MekuShell {
     }
 
     fn on_cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
-        let current = theme::active(cx).name;
-        let at = theme::PRESETS
-            .iter()
-            .position(|p| p.name == current)
-            .unwrap_or(0);
-        theme::choose(theme::PRESETS[(at + 1) % theme::PRESETS.len()].name, cx);
+        theme::cycle(cx);
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -1740,7 +1819,9 @@ impl MekuShell {
     // -- chrome ----------------------------------------------------------
 
     fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab_strip = self.render_tab_strip(cx);
+        let tab_strip = theme::cfg(cx)
+            .bool("tab_bar_visible")
+            .then(|| self.render_tab_strip(cx));
         let active = self
             .tabs
             .get(self.active_tab)
@@ -1769,7 +1850,7 @@ impl MekuShell {
             .size_full()
             .min_w_0()
             .overflow_hidden()
-            .child(tab_strip)
+            .children(tab_strip)
             .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
     }
 
@@ -1964,7 +2045,13 @@ impl Render for MekuShell {
         self.ensure_title_input(window, cx);
         self.ensure_palette(window, cx);
         self.ensure_find(window, cx);
-        self.adapt_to_width(window);
+        if let Some(tab) = self.settings_request.take() {
+            self.open_settings(Some(tab), window, cx);
+        }
+        if self.config_gen != theme::state(cx).generation {
+            self.apply_settings(cx);
+        }
+        self.adapt_to_width(window, theme::cfg(cx).f64("narrow_breakpoint") as f32);
         let focus = self.focus_handle.clone();
         if std::mem::take(&mut self.focus_doc) && self.naming.is_none() {
             window.focus(&focus, cx);
@@ -1975,6 +2062,7 @@ impl Render for MekuShell {
             .track_focus(&focus)
             .key_context("Meku")
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_cycle_theme))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.on_drop_paths(paths.paths(), cx);
@@ -2079,7 +2167,14 @@ impl Render for MekuShell {
                         .child(self.render_center(window, cx).into_any_element()),
                 ),
             )
-            .child(self.render_status(cx));
+            .children(
+                theme::cfg(cx)
+                    .bool("status_bar_visible")
+                    .then(|| self.render_status(cx)),
+            );
+        if let Some(page) = self.render_settings(window, cx) {
+            root = root.child(page);
+        }
         if let Some(modal) = self.render_naming_modal(cx) {
             root = root.child(theme::fade_in(
                 div().absolute().inset_0().child(modal),
@@ -2111,19 +2206,31 @@ impl Render for MekuShell {
 /// else keeps the theme default.
 fn apply_fonts(cx: &mut App) {
     let installed = cx.text_system().all_font_names();
-    let pick = |candidates: &[&str]| -> Option<SharedString> {
+    let has = |name: &str| installed.iter().any(|n| n.eq_ignore_ascii_case(name));
+    let pick = |wanted: &str, candidates: &[&str]| -> Option<SharedString> {
+        let wanted = wanted.trim();
+        if !wanted.is_empty() && has(wanted) {
+            return Some(SharedString::from(wanted.to_string()));
+        }
         candidates
             .iter()
             .find(|c| installed.iter().any(|n| n == **c))
             .map(|c| SharedString::from(c.to_string()))
     };
-    let sans = pick(&["Inter", "Adwaita Sans", "Cantarell", "Liberation Sans"]);
-    let mono = pick(&[
-        "JetBrains Mono",
-        "Adwaita Mono",
-        "DejaVu Sans Mono",
-        "Liberation Mono",
-    ]);
+    let c = theme::cfg(cx);
+    let sans = pick(
+        c.str("ui_font"),
+        &["Inter", "Adwaita Sans", "Cantarell", "Liberation Sans"],
+    );
+    let mono = pick(
+        c.str("code_font"),
+        &[
+            "JetBrains Mono",
+            "Adwaita Mono",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+        ],
+    );
     let theme = cx.global_mut::<Theme>();
     if let Some(sans) = sans {
         theme.font_family = sans;
@@ -2135,16 +2242,18 @@ fn apply_fonts(cx: &mut App) {
 
 fn main() {
     let initial_dir = std::env::args().nth(1);
+    let initial_root = initial_dir.as_ref().map(PathBuf::from);
     let app = gpui_kit::application().with_assets(icons::MekuAssets);
 
     app.run(move |cx| {
         // Required: initializes gpui-component theming/global state.
         gpui_kit::init(cx);
+        theme::init(initial_root.as_deref(), cx);
         apply_fonts(cx);
-        theme::init(cx);
 
         cx.bind_keys([
             KeyBinding::new("ctrl-\\", ToggleSidebar, Some("Meku")),
+            KeyBinding::new("ctrl-,", settings_page::OpenSettings, Some("Meku")),
             KeyBinding::new("ctrl-p", palette::OpenFileFinder, Some("Meku")),
             KeyBinding::new("ctrl-shift-p", palette::OpenCommandPalette, Some("Meku")),
             KeyBinding::new("ctrl-shift-f", palette::OpenVaultSearch, Some("Meku")),
@@ -2340,6 +2449,7 @@ mod ui_tests {
         cx.update(|cx| {
             cx.bind_keys([
                 KeyBinding::new("ctrl-\\", ToggleSidebar, Some("Meku")),
+                KeyBinding::new("ctrl-,", crate::settings_page::OpenSettings, Some("Meku")),
                 KeyBinding::new("alt-left", crate::NavBack, Some("Meku")),
                 KeyBinding::new("alt-right", crate::NavForward, Some("Meku")),
                 KeyBinding::new("ctrl-=", crate::ZoomIn, Some("Meku")),
@@ -5167,15 +5277,15 @@ mod ui_tests {
             !cx.update(|cx| crate::theme::motion(cx)),
             "no settings loaded (tests): motion off"
         );
-        cx.update(|cx| cx.set_global(crate::theme::Settings::default()));
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
         assert!(
             cx.update(|cx| crate::theme::motion(cx)),
             "default: motion on"
         );
         cx.update(|cx| {
-            let mut s = cx.global::<crate::theme::Settings>().clone();
-            s.reduce_motion = true;
-            cx.set_global(s);
+            let s = cx.global_mut::<crate::config::ConfigState>();
+            s.global.values.insert("reduce_motion".into(), true.into());
+            s.rebuild();
         });
         assert!(
             !cx.update(|cx| crate::theme::motion(cx)),
@@ -5300,7 +5410,7 @@ mod ui_tests {
             dims,
         };
         let f = |i: &ImageInfo, avail: f32| {
-            let (w, h) = image_frame_size(i, px(avail));
+            let (w, h) = image_frame_size(i, px(avail), 460.0);
             (f32::from(w), f32::from(h))
         };
         assert_eq!(
@@ -5757,7 +5867,7 @@ mod ui_tests {
 
     fn zoom_body(cx: &mut TestAppContext) {
         let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "text\n");
-        cx.update(|cx| cx.set_global(crate::theme::Settings::default()));
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
         focus_doc_for(cx, &view, window);
         assert_eq!(cx.update(|cx| crate::theme::zoom(cx)), 1.0);
         step(cx, window, |w, cx| w.press("ctrl-=", cx));
@@ -5840,5 +5950,202 @@ mod ui_tests {
         let text = buffer_text(cx, &view, &PathBuf::from("Elsewhere.md")).0;
         assert!(text.contains("![[shot.png]]"), "{text:?}");
         let _ = rel;
+    }
+
+    // -- settings page --------------------------------------------------
+
+    fn cfg_str(cx: &mut TestAppContext, key: &'static str) -> String {
+        cx.update(|cx| crate::theme::cfg(cx).str(key).to_string())
+    }
+
+    fn click_id(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle, id: &'static str) {
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.click(id, cx);
+        })
+        .unwrap();
+        // Let events from the click settle, then draw the result.
+        step(cx, window, |_, _| {});
+    }
+
+    fn has_id(
+        cx: &mut TestAppContext,
+        window: gpui_kit::AnyWindowHandle,
+        id: &'static str,
+    ) -> bool {
+        let mut found = false;
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            found = w.try_find(id).is_some();
+        })
+        .unwrap();
+        found
+    }
+
+    #[test]
+    fn settings_open_with_ctrl_comma_edit_and_close() {
+        run_ui_test("settings_basic", settings_basic_body);
+    }
+
+    fn settings_basic_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "text\n");
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
+        cx.update(|cx| {
+            let root = dir.path().to_path_buf();
+            crate::theme::update_config(cx, |s| s.set_mekuto(Some(&root)));
+        });
+        focus_doc_for(cx, &view, window);
+        assert!(!has_id(cx, window, "settings-page"));
+        step(cx, window, |w, cx| w.press("ctrl-,", cx));
+        assert!(has_id(cx, window, "settings-page"), "Ctrl+, opens the page");
+
+        // A choice in the Editor section writes the global layer.
+        click_id(cx, window, "settings-tab-editor");
+        assert_eq!(cfg_str(cx, "default_mode"), "live");
+        click_id(cx, window, "set-default_mode-read");
+        assert_eq!(cfg_str(cx, "default_mode"), "read");
+        assert!(
+            has_id(cx, window, "set-default_mode-dot"),
+            "a modified dot shows"
+        );
+        click_id(cx, window, "set-default_mode-reset");
+        assert_eq!(
+            cfg_str(cx, "default_mode"),
+            "live",
+            "reset returns to the default"
+        );
+
+        // The mekuto scope writes <mekuto>/.meku/settings.json.
+        click_id(cx, window, "settings-scope-mekuto");
+        click_id(cx, window, "set-default_mode-edit");
+        assert_eq!(cfg_str(cx, "default_mode"), "edit");
+        let file = dir.path().join(".meku/settings.json");
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(saved.contains("\"default_mode\": \"edit\""), "{saved}");
+
+        // Numbers step within their range.
+        click_id(cx, window, "settings-tab-layout");
+        click_id(cx, window, "set-narrow_breakpoint-up");
+        assert_eq!(
+            cx.update(|cx| crate::theme::cfg(cx).f64("narrow_breakpoint")),
+            840.0
+        );
+
+        // Esc closes it and hands the keyboard back to the note.
+        step(cx, window, |w, cx| w.press("escape", cx));
+        assert!(!has_id(cx, window, "settings-page"));
+    }
+
+    #[test]
+    fn settings_button_opens_and_search_filters() {
+        run_ui_test("settings_button", settings_button_body);
+    }
+
+    fn settings_button_body(cx: &mut TestAppContext) {
+        let (_view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "text\n");
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
+        click_id(cx, window, "footer-settings");
+        assert!(
+            has_id(cx, window, "settings-page"),
+            "the sidebar gear opens settings"
+        );
+        assert!(has_id(cx, window, "setting-zoom") && !has_id(cx, window, "setting-autosave"));
+        click_id(cx, window, "settings-tab-files");
+        assert!(has_id(cx, window, "setting-autosave"));
+        // The page covers the window: a click outside the panel closes it.
+        click_id(cx, window, "footer-settings");
+        assert!(
+            !has_id(cx, window, "settings-page"),
+            "clicking the backdrop closes it"
+        );
+    }
+
+    #[test]
+    fn broken_settings_json_shows_a_banner_and_is_never_overwritten() {
+        run_ui_test("settings_broken", settings_broken_body);
+    }
+
+    fn settings_broken_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "text\n");
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
+        let meku = dir.path().join(".meku");
+        std::fs::create_dir_all(&meku).unwrap();
+        let file = meku.join("settings.json");
+        std::fs::write(&file, "{ \"zoom\": 1.4, }").unwrap();
+        cx.update(|cx| {
+            let root = dir.path().to_path_buf();
+            crate::theme::update_config(cx, |s| s.set_mekuto(Some(&root)));
+        });
+        cx.update(|cx| view.update(cx, |_, cx| cx.notify()));
+        click_id(cx, window, "footer-settings");
+        assert!(
+            has_id(cx, window, "settings-banner-mekuto"),
+            "the broken file is called out"
+        );
+        assert!(!has_id(cx, window, "settings-banner-global"));
+        // The app still runs on defaults.
+        assert_eq!(cx.update(|cx| crate::theme::zoom(cx)), 1.0);
+
+        // Editing in that scope is refused; the file is untouched.
+        click_id(cx, window, "settings-scope-mekuto");
+        click_id(cx, window, "settings-tab-editor");
+        click_id(cx, window, "set-default_mode-read");
+        assert_eq!(cfg_str(cx, "default_mode"), "live");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "{ \"zoom\": 1.4, }"
+        );
+        assert!(
+            has_id(cx, window, "settings-note"),
+            "the refusal is explained"
+        );
+
+        // Backing up starts fresh and keeps the broken text.
+        click_id(cx, window, "banner-reset-mekuto");
+        assert!(!has_id(cx, window, "settings-banner-mekuto"));
+        let backups: Vec<_> = std::fs::read_dir(&meku)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(backups[0].path()).unwrap(),
+            "{ \"zoom\": 1.4, }"
+        );
+        click_id(cx, window, "set-default_mode-read");
+        assert_eq!(cfg_str(cx, "default_mode"), "read", "editing works again");
+    }
+
+    #[test]
+    fn settings_drive_the_chrome_and_custom_themes_appear() {
+        run_ui_test("settings_effects", settings_effects_body);
+    }
+
+    fn settings_effects_body(cx: &mut TestAppContext) {
+        let (_view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "text\n");
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
+        assert!(has_id(cx, window, "status-bar") && has_id(cx, window, "tabs-scroll"));
+        cx.update(|cx| {
+            crate::theme::set_setting("status_bar_visible", false.into(), cx).unwrap();
+            crate::theme::set_setting("tab_bar_visible", false.into(), cx).unwrap();
+        });
+        assert!(!has_id(cx, window, "status-bar"), "status bar hidden");
+        assert!(!has_id(cx, window, "tabs-scroll"), "tab bar hidden");
+
+        // A custom theme from settings joins the list and can be chosen.
+        cx.update(|cx| {
+            crate::theme::update_config(cx, |s| {
+                s.global.values = crate::config::parse_layer_text(
+                    r##"{"themes": [{"name": "Ink", "base": "Nord", "bg": "#101010"}]}"##,
+                )
+                .unwrap();
+                s.rebuild();
+            });
+            assert!(crate::theme::find("ink", cx).is_some());
+            crate::theme::choose("Ink", cx);
+            assert_eq!(crate::theme::active(cx).name, "Ink");
+            assert_eq!(crate::theme::active(cx).bg, 0x101010);
+        });
     }
 }

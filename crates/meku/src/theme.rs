@@ -5,12 +5,14 @@
 //! (so every kit component follows) and publishes it as the [`Active`] global
 //! (so the editor's own syntax colors follow too).
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 
+use crate::config::{Config, ConfigState, Scope, ThemeSpec};
 use gpui_kit::component::{Theme, ThemeConfig, ThemeRegistry};
 use gpui_kit::{App, Global, WindowAppearance};
-use serde::{Deserialize, Serialize};
 
 /// One complete preset. Colors are `0xRRGGBB`.
 #[derive(Debug, Clone, Copy)]
@@ -185,10 +187,6 @@ pub const PRESETS: [Palette; 7] = [
     DRACULA,
 ];
 
-pub fn preset(name: &str) -> Option<Palette> {
-    PRESETS.iter().copied().find(|p| p.name == name)
-}
-
 /// The palette currently in force; read by the editor for syntax colors.
 #[derive(Clone, Copy)]
 pub struct Active(pub Palette);
@@ -263,7 +261,7 @@ fn on(fill: u32) -> String {
 
 /// The kit `ThemeConfig` JSON for a palette: every surface the editor shell
 /// draws, derived from the handful of palette colors.
-fn config_json(p: &Palette) -> serde_json::Value {
+fn config_json(p: &Palette, reg_name: &str) -> serde_json::Value {
     let hover = mix(p.bg, p.fg, 0.06);
     let active_bg = mix(p.bg, p.accent, 0.16);
     let surface_hover = mix(p.surface, p.fg, 0.07);
@@ -340,7 +338,7 @@ fn config_json(p: &Palette) -> serde_json::Value {
         .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
         .collect();
     let mut theme = serde_json::Map::new();
-    theme.insert("name".into(), p.name.into());
+    theme.insert("name".into(), reg_name.into());
     theme.insert("mode".into(), if p.dark { "dark" } else { "light" }.into());
     theme.insert("colors".into(), colors.into());
     let mut set = serde_json::Map::new();
@@ -352,16 +350,29 @@ fn config_json(p: &Palette) -> serde_json::Value {
     serde_json::Value::Object(set)
 }
 
+/// The name a palette is registered under in the kit's theme registry. It
+/// includes a hash of the colours so an edited custom theme replaces the
+/// stale registration instead of being ignored.
+fn registry_name(p: &Palette) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (p.dark, p.bg, p.surface, p.border, p.fg, p.muted, p.accent).hash(&mut h);
+    (
+        p.keyword, p.string, p.number, p.func, p.ty, p.constant, p.prop, p.comment, p.code,
+    )
+        .hash(&mut h);
+    format!("{}:{:x}", p.name, h.finish())
+}
+
 /// Make `palette` the app's look. Safe to call repeatedly.
 pub fn apply(palette: Palette, cx: &mut App) {
-    let json = config_json(&palette).to_string();
+    let reg_name = registry_name(&palette);
     let registry = ThemeRegistry::global_mut(cx);
-    if registry.themes().get(palette.name).is_none() {
-        let _ = registry.load_themes_from_str(&json);
+    if registry.themes().get(reg_name.as_str()).is_none() {
+        let _ = registry.load_themes_from_str(&config_json(&palette, &reg_name).to_string());
     }
     let config: Option<Rc<ThemeConfig>> = ThemeRegistry::global(cx)
         .themes()
-        .get(palette.name)
+        .get(reg_name.as_str())
         .cloned();
     if let Some(config) = config {
         Theme::update(cx, |theme| theme.apply_config(&config));
@@ -376,8 +387,8 @@ pub fn apply(palette: Palette, cx: &mut App) {
 /// settings loaded (headless tests) motion is off, because animations only
 /// finish when real time passes.
 pub fn motion(cx: &App) -> bool {
-    cx.try_global::<Settings>()
-        .is_some_and(|s| !s.reduce_motion)
+    cx.try_global::<ConfigState>()
+        .is_some_and(|s| !s.effective.bool("reduce_motion"))
 }
 
 /// Fade `el` in over `ms` (ease-out) when it first appears, sliding it
@@ -430,148 +441,240 @@ const ZOOM_STEP: f32 = 0.1;
 
 /// Current document zoom (1.0 with no settings, e.g. in tests).
 pub fn zoom(cx: &App) -> f32 {
-    cx.try_global::<Settings>()
-        .map_or(1.0, |s| s.zoom.clamp(ZOOM_MIN, ZOOM_MAX))
+    (cfg(cx).f64("zoom") as f32).clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
 /// Step the zoom by `steps` tenths (negative = out), or reset with `None`.
 /// Saved immediately.
 pub fn set_zoom(change: Option<i32>, cx: &mut App) {
-    let mut settings = cx.try_global::<Settings>().cloned().unwrap_or_default();
-    settings.zoom = match change {
+    let next = match change {
         None => 1.0,
         Some(steps) => {
-            ((settings.zoom + steps as f32 * ZOOM_STEP) * 10.0)
+            ((zoom(cx) + steps as f32 * ZOOM_STEP) * 10.0)
                 .round()
                 .clamp(ZOOM_MIN * 10.0, ZOOM_MAX * 10.0)
                 / 10.0
         }
     };
-    settings.save();
-    cx.set_global(settings);
-    cx.refresh_windows();
+    let _ = set_setting("zoom", serde_json::json!(next), cx);
 }
 
-// -- settings -----------------------------------------------------------------
+// -- settings access ---------------------------------------------------------
 
-/// User preferences kept across runs in `~/.config/meku/settings.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct Settings {
-    /// Preset name; ignored while `follow_system` is on.
-    pub theme: String,
-    /// Pick Meku Light / Meku Dark from the OS appearance.
-    pub follow_system: bool,
-    /// Disable every non-essential animation.
-    pub reduce_motion: bool,
-    /// Document text scale (1.0 = 100%), 0.7 – 2.0.
-    pub zoom: f32,
+impl Global for ConfigState {}
+
+/// The loaded settings (defaults before anything is loaded: headless tests).
+pub fn state(cx: &App) -> &ConfigState {
+    static DEFAULT: OnceLock<ConfigState> = OnceLock::new();
+    cx.try_global::<ConfigState>()
+        .unwrap_or_else(|| DEFAULT.get_or_init(ConfigState::in_memory))
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            theme: MEKU_LIGHT.name.to_string(),
-            follow_system: true,
-            reduce_motion: false,
-            zoom: 1.0,
-        }
+/// The effective setting values.
+pub fn cfg(cx: &App) -> &Config {
+    &state(cx).effective
+}
+
+/// Change the settings, then re-resolve the theme and repaint. Never fails
+/// the caller: a refused write (broken file) is returned for the UI to show.
+pub fn update_config<R>(cx: &mut App, f: impl FnOnce(&mut ConfigState) -> R) -> R {
+    if cx.try_global::<ConfigState>().is_none() {
+        cx.set_global(ConfigState::in_memory());
+    }
+    let out = f(cx.global_mut::<ConfigState>());
+    reapply(cx);
+    out
+}
+
+/// The layer a quick change (zoom keys, theme picker) should write to: the
+/// mekuto's when it already overrides the key, else the global one.
+fn scope_for(state: &ConfigState, key: &str) -> Scope {
+    if state.is_set(Scope::Mekuto, key) {
+        Scope::Mekuto
+    } else {
+        Scope::Global
     }
 }
 
-impl Global for Settings {}
-
-fn settings_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("meku").join("settings.json"))
+/// Set one setting where it already lives (see [`scope_for`]) and save.
+pub fn set_setting(key: &str, value: serde_json::Value, cx: &mut App) -> Result<(), String> {
+    update_config(cx, |s| {
+        let scope = scope_for(s, key);
+        s.write(scope, key, value)
+    })
 }
 
-impl Settings {
-    /// Read the saved settings; a missing or unreadable file yields defaults
-    /// (never an error: a bad settings file must not stop the app starting).
-    pub fn load() -> Self {
-        settings_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
+// -- palettes ----------------------------------------------------------------
 
-    pub fn save(&self) {
-        // Tests must never overwrite the user's real settings.
-        if cfg!(test) {
-            return;
-        }
-        let Some(path) = settings_path() else {
-            return;
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
-        }
+/// Leak each distinct theme name once so a [`Palette`] can keep a
+/// `&'static str`; custom themes are few and names repeat across reloads.
+fn intern(name: &str) -> &'static str {
+    static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut set = NAMES.get_or_init(Default::default).lock().unwrap();
+    if let Some(found) = set.get(name) {
+        return found;
     }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
 
-    /// The palette these settings select under the given OS appearance.
-    pub fn resolve(&self, appearance: WindowAppearance) -> Palette {
-        if self.follow_system {
-            match appearance {
-                WindowAppearance::Dark | WindowAppearance::VibrantDark => MEKU_DARK,
-                WindowAppearance::Light | WindowAppearance::VibrantLight => MEKU_LIGHT,
-            }
+fn build_custom(spec: &ThemeSpec, known: &[Palette]) -> Palette {
+    let by_name = |n: &str| {
+        known
+            .iter()
+            .copied()
+            .find(|p| p.name.eq_ignore_ascii_case(n))
+    };
+    let base = spec
+        .base
+        .as_deref()
+        .and_then(by_name)
+        .unwrap_or(if spec.dark == Some(true) {
+            MEKU_DARK
         } else {
-            preset(&self.theme).unwrap_or(MEKU_LIGHT)
+            MEKU_LIGHT
+        });
+    let mut p = Palette {
+        name: intern(&spec.name),
+        dark: spec.dark.unwrap_or(base.dark),
+        ..base
+    };
+    for (key, c) in &spec.colors {
+        let c = *c;
+        match key.as_str() {
+            "bg" => p.bg = c,
+            "surface" => p.surface = c,
+            "border" => p.border = c,
+            "fg" => p.fg = c,
+            "muted" => p.muted = c,
+            "accent" => p.accent = c,
+            "keyword" => p.keyword = c,
+            "string" => p.string = c,
+            "number" => p.number = c,
+            "func" => p.func = c,
+            "ty" => p.ty = c,
+            "constant" => p.constant = c,
+            "prop" => p.prop = c,
+            "comment" => p.comment = c,
+            "code" => p.code = c,
+            _ => {}
         }
+    }
+    p
+}
+
+/// Built-in presets followed by the custom themes from settings. A custom
+/// theme named like a preset replaces it.
+pub fn palettes_of(state: &ConfigState) -> Vec<Palette> {
+    let mut all: Vec<Palette> = PRESETS.to_vec();
+    for spec in &state.themes {
+        let p = build_custom(spec, &all);
+        match all.iter().position(|e| e.name.eq_ignore_ascii_case(p.name)) {
+            Some(i) => all[i] = p,
+            None => all.push(p),
+        }
+    }
+    all
+}
+
+pub fn palettes(cx: &App) -> Vec<Palette> {
+    palettes_of(state(cx))
+}
+
+/// A palette by (case-insensitive) name, custom themes included.
+pub fn find(name: &str, cx: &App) -> Option<Palette> {
+    palettes(cx)
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+}
+
+/// The palette the settings select under the given OS appearance.
+pub fn resolve(state: &ConfigState, appearance: WindowAppearance) -> Palette {
+    let all = palettes_of(state);
+    let pick = |name: &str, fallback: Palette| {
+        all.iter()
+            .copied()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .unwrap_or(fallback)
+    };
+    let c = &state.effective;
+    if let Some(name) = &state.env_theme {
+        return pick(name, MEKU_LIGHT);
+    }
+    if c.bool("follow_system") {
+        match appearance {
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => {
+                pick(c.str("theme_dark"), MEKU_DARK)
+            }
+            WindowAppearance::Light | WindowAppearance::VibrantLight => {
+                pick(c.str("theme_light"), MEKU_LIGHT)
+            }
+        }
+    } else {
+        pick(c.str("theme"), MEKU_LIGHT)
     }
 }
 
-/// Apply the saved settings (with `MEKU_THEME` overriding, for screenshots).
-pub fn init(cx: &mut App) {
-    let mut settings = Settings::load();
-    if let Ok(name) = std::env::var("MEKU_THEME")
-        && let Some(p) = PRESETS.iter().find(|p| {
-            p.name.eq_ignore_ascii_case(&name)
-                || p.name.to_lowercase().replace(' ', "-") == name.to_lowercase()
-        })
-    {
-        settings.theme = p.name.to_string();
-        settings.follow_system = false;
-    }
-    let palette = settings.resolve(cx.window_appearance());
-    cx.set_global(settings);
+/// Re-resolve the palette from the current settings and apply it.
+pub fn reapply(cx: &mut App) {
+    let palette = resolve(state(cx), cx.window_appearance());
     apply(palette, cx);
 }
 
-/// Change preset from the UI and remember it.
-pub fn choose(name: &str, cx: &mut App) {
-    if let Some(palette) = preset(name) {
-        let mut settings = cx.global::<Settings>().clone();
-        settings.theme = palette.name.to_string();
-        settings.follow_system = false;
-        settings.save();
-        cx.set_global(settings);
-        apply(palette, cx);
+/// Load the settings (global file, plus the mekuto's when `root` is known),
+/// with `MEKU_THEME` overriding the theme for screenshots, and apply them.
+pub fn init(root: Option<&std::path::Path>, cx: &mut App) {
+    let mut state = ConfigState::load(root);
+    if let Ok(name) = std::env::var("MEKU_THEME") {
+        let slug = name.to_lowercase();
+        state.env_theme = palettes_of(&state)
+            .iter()
+            .find(|p| {
+                p.name.eq_ignore_ascii_case(&name)
+                    || p.name.to_lowercase().replace(' ', "-") == slug
+            })
+            .map(|p| p.name.to_string());
     }
+    cx.set_global(state);
+    reapply(cx);
+}
+
+/// Change theme from the UI and remember it.
+pub fn choose(name: &str, cx: &mut App) {
+    if let Some(palette) = find(name, cx) {
+        update_config(cx, |s| {
+            s.env_theme = None;
+            let scope = scope_for(s, "theme");
+            let _ = s.write(scope, "theme", palette.name.into());
+            let scope = scope_for(s, "follow_system");
+            let _ = s.write(scope, "follow_system", false.into());
+        });
+    }
+}
+
+/// Next theme in the list (presets, then custom), wrapping.
+pub fn cycle(cx: &mut App) {
+    let all = palettes(cx);
+    let current = active(cx).name;
+    let at = all.iter().position(|p| p.name == current).unwrap_or(0);
+    choose(all[(at + 1) % all.len()].name, cx);
 }
 
 /// Switch back to following the OS appearance.
 #[allow(dead_code)] // wired to the command palette
 pub fn follow_system(cx: &mut App) {
-    let mut settings = cx.global::<Settings>().clone();
-    settings.follow_system = true;
-    settings.save();
-    let palette = settings.resolve(cx.window_appearance());
-    cx.set_global(settings);
-    apply(palette, cx);
+    update_config(cx, |s| {
+        s.env_theme = None;
+        let scope = scope_for(s, "follow_system");
+        let _ = s.write(scope, "follow_system", true.into());
+    });
 }
 
 /// Re-resolve after the OS flipped between light and dark.
 pub fn on_system_appearance_changed(cx: &mut App) {
-    let settings = cx.global::<Settings>().clone();
-    if settings.follow_system {
-        apply(settings.resolve(cx.window_appearance()), cx);
+    if cfg(cx).bool("follow_system") {
+        reapply(cx);
     }
 }
 
@@ -626,28 +729,59 @@ mod tests {
     }
 
     #[test]
-    fn zoom_defaults_and_old_settings_files_still_load() {
-        assert_eq!(Settings::default().zoom, 1.0);
-        let old: Settings =
-            serde_json::from_str(r#"{"theme":"Nord","follow_system":false}"#).unwrap();
-        assert_eq!(old.zoom, 1.0, "settings saved before zoom existed");
+    fn custom_themes_inherit_from_a_base_and_replace_same_named_presets() {
+        let mut state = ConfigState::in_memory();
+        state.global.values = crate::config::parse_layer_text(
+            r##"{"themes": [
+                {"name": "Ink", "base": "nord", "bg": "#101010"},
+                {"name": "Paper", "dark": false, "accent": "#ff0000"},
+                {"name": "Dracula", "bg": "#000000"}
+            ]}"##,
+        )
+        .unwrap();
+        state.rebuild();
+        let all = palettes_of(&state);
+        assert_eq!(all.len(), PRESETS.len() + 2, "Dracula replaced, two added");
+        let ink = all.iter().find(|p| p.name == "Ink").unwrap();
+        assert_eq!(
+            (ink.bg, ink.fg, ink.dark),
+            (0x101010, NORD.fg, true),
+            "inherits the rest from Nord"
+        );
+        let paper = all.iter().find(|p| p.name == "Paper").unwrap();
+        assert_eq!((paper.accent, paper.bg), (0xff0000, MEKU_LIGHT.bg));
+        assert_eq!(
+            all.iter().find(|p| p.name == "Dracula").unwrap().bg,
+            0x000000
+        );
+        assert!(
+            std::ptr::eq(intern("Ink"), ink.name),
+            "names are interned once"
+        );
     }
 
     #[test]
-    fn settings_roundtrip_and_resolution() {
-        let mut s = Settings::default();
-        assert_eq!(s.resolve(WindowAppearance::Dark).name, "Meku Dark");
-        assert_eq!(s.resolve(WindowAppearance::Light).name, "Meku Light");
-        s.follow_system = false;
-        s.theme = "Nord".into();
-        assert_eq!(s.resolve(WindowAppearance::Light).name, "Nord");
-        let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+    fn resolution_follows_system_or_the_chosen_theme() {
+        let mut state = ConfigState::in_memory();
+        assert_eq!(resolve(&state, WindowAppearance::Dark).name, "Meku Dark");
+        assert_eq!(resolve(&state, WindowAppearance::Light).name, "Meku Light");
+        state.global.values = crate::config::parse_layer_text(
+            r#"{"follow_system": false, "theme": "Nord", "theme_dark": "Dracula"}"#,
+        )
+        .unwrap();
+        state.rebuild();
+        assert_eq!(resolve(&state, WindowAppearance::Light).name, "Nord");
+        state.global.values =
+            crate::config::parse_layer_text(r#"{"theme_dark": "Dracula"}"#).unwrap();
+        state.rebuild();
+        assert_eq!(resolve(&state, WindowAppearance::Dark).name, "Dracula");
+        state.global.values =
+            crate::config::parse_layer_text(r#"{"theme_dark": "Missing"}"#).unwrap();
+        state.rebuild();
         assert_eq!(
-            serde_json::from_str::<Settings>("{}").unwrap(),
-            Settings::default()
+            resolve(&state, WindowAppearance::Dark).name,
+            "Meku Dark",
+            "unknown name falls back"
         );
-        s.theme = "Nope".into();
-        assert_eq!(s.resolve(WindowAppearance::Dark).name, "Meku Light");
     }
 }

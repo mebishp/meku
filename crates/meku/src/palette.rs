@@ -70,6 +70,7 @@ pub(crate) enum Command {
     ZoomOut,
     ZoomReset,
     ShortcutsHelp,
+    OpenSettings,
 }
 
 /// `(command, title, shortcut)` in the order shown for an empty query.
@@ -94,6 +95,7 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::ZoomIn, "Zoom in", "Ctrl +"),
     (Command::ZoomOut, "Zoom out", "Ctrl -"),
     (Command::ZoomReset, "Reset zoom", "Ctrl Alt 0"),
+    (Command::OpenSettings, "Open settings", "Ctrl ,"),
     (Command::ShortcutsHelp, "Keyboard shortcuts", ""),
 ];
 
@@ -129,6 +131,7 @@ pub(crate) struct PaletteState {
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Open note", "Ctrl P"),
     ("Command palette", "Ctrl Shift P"),
+    ("Settings", "Ctrl ,"),
     ("Search all notes", "Ctrl Shift F"),
     ("Find / replace in note", "Ctrl F  ·  Ctrl H"),
     ("Go to line", "Ctrl G"),
@@ -265,7 +268,7 @@ impl MekuShell {
             }
             PaletteKind::Themes => {
                 let current = theme::active(cx).name;
-                theme::PRESETS
+                theme::palettes(cx)
                     .iter()
                     .filter(|p| meku_index::fuzzy_score(q, p.name).is_some())
                     .map(|p| Item {
@@ -371,7 +374,7 @@ impl MekuShell {
             target: Target::Theme(name),
             ..
         }) = p.items.get(p.selected)
-            && let Some(preset) = theme::preset(name)
+            && let Some(preset) = theme::find(name, cx)
         {
             theme::apply(preset, cx);
         }
@@ -496,22 +499,16 @@ impl MekuShell {
             Command::ThemePicker => self.open_palette(PaletteKind::Themes, cx),
             Command::ThemeFollowSystem => theme::follow_system(cx),
             Command::ThemeNext => {
-                let current = theme::active(cx).name;
-                let at = theme::PRESETS
-                    .iter()
-                    .position(|p| p.name == current)
-                    .unwrap_or(0);
-                theme::choose(theme::PRESETS[(at + 1) % theme::PRESETS.len()].name, cx);
+                theme::cycle(cx);
             }
             Command::ZoomIn => theme::set_zoom(Some(1), cx),
             Command::ZoomOut => theme::set_zoom(Some(-1), cx),
             Command::ZoomReset => theme::set_zoom(None, cx),
+            Command::OpenSettings => self.open_settings(None, window, cx),
             Command::ShortcutsHelp => self.open_palette(PaletteKind::Shortcuts, cx),
             Command::ToggleReduceMotion => {
-                let mut settings = cx.global::<theme::Settings>().clone();
-                settings.reduce_motion = !settings.reduce_motion;
-                settings.save();
-                cx.set_global(settings);
+                let on = !theme::cfg(cx).bool("reduce_motion");
+                let _ = theme::set_setting("reduce_motion", on.into(), cx);
                 cx.notify();
             }
         }

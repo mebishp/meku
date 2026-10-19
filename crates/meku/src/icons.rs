@@ -65,6 +65,7 @@ pub enum Ico {
     Menu,
     Refresh,
     Journal,
+    Minus,
 }
 
 impl Ico {
@@ -126,6 +127,7 @@ impl Ico {
             Ico::Menu => "icons/meku/menu.svg",
             Ico::Refresh => "icons/meku/refresh.svg",
             Ico::Journal => "icons/meku/journal.svg",
+            Ico::Minus => "icons/meku/minus.svg",
         }
     }
 }
@@ -199,6 +201,7 @@ fn embedded(path: &str) -> Option<&'static [u8]> {
         "icons/meku/menu.svg" => include_bytes!("../assets/icons/meku/menu.svg"),
         "icons/meku/refresh.svg" => include_bytes!("../assets/icons/meku/refresh.svg"),
         "icons/meku/journal.svg" => include_bytes!("../assets/icons/meku/journal.svg"),
+        "icons/meku/minus.svg" => include_bytes!("../assets/icons/meku/minus.svg"),
         _ => return None,
     })
 }

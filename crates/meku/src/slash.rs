@@ -63,6 +63,10 @@ pub(crate) fn matching(query: &str) -> Vec<usize> {
 impl MekuShell {
     /// Re-derive the menu from the buffer after any edit or caret move.
     pub(crate) fn update_slash(&mut self, in_code: bool, cx: &App) {
+        if !crate::theme::cfg(cx).bool("slash_menu") {
+            self.slash = None;
+            return;
+        }
         let trigger = self
             .doc_rel()
             .and_then(|rel| self.buffers.get(&rel))

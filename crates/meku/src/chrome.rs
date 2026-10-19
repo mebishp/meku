@@ -642,6 +642,7 @@ impl MekuShell {
         let footer_shell = cx.entity();
         let theme_shell = footer_shell.clone();
         let cmd_shell = footer_shell.clone();
+        let settings_shell = footer_shell.clone();
         let dark = theme::active(cx).dark;
         let footer = h_flex()
             .flex_none()
@@ -651,6 +652,16 @@ impl MekuShell {
             .items_center()
             .border_t_1()
             .border_color(border)
+            .child(icon_button(
+                "footer-settings",
+                Ico::Settings,
+                self.settings.is_some(),
+                "Settings (Ctrl ,)",
+                cx,
+                move |window, cx| {
+                    settings_shell.update(cx, |v, cx| v.open_settings(None, window, cx));
+                },
+            ))
             .child(icon_button(
                 "footer-theme",
                 if dark { Ico::Moon } else { Ico::Sun },
@@ -691,7 +702,11 @@ impl MekuShell {
                     .px_1()
                     .child(self.render_tree_rows(cx)),
             )
-            .child(self.render_outline_panel(cx))
+            .children(
+                theme::cfg(cx)
+                    .bool("outline_visible")
+                    .then(|| self.render_outline_panel(cx)),
+            )
             .child(footer)
             .into_any_element()
     }
