@@ -34,12 +34,21 @@ pub(crate) type RowColors = Option<meku_markdown::highlight::SharedSpans>;
 pub(crate) enum DocKey {
     Left,
     Right,
+    WordLeft,
+    WordRight,
     Up,
     Down,
     Home,
     End,
+    DocStart,
+    DocEnd,
+    PageUp,
+    PageDown,
     Backspace,
     Delete,
+    DeleteWordBack,
+    DeleteWordFwd,
+    DeleteToLineStart,
     Enter,
     SelectAll,
     Undo,
@@ -47,6 +56,24 @@ pub(crate) enum DocKey {
     Copy,
     Cut,
     Paste,
+}
+
+/// Smart `Home`: byte offset of the first non-whitespace char, unless the
+/// caret already sits there (or in the leading whitespace), in which case
+/// the row start. Measured in chars over the row slice.
+fn smart_home_dest(row: &Row, text: &str, caret: usize) -> usize {
+    let line = &text[row.src.clone()];
+    let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+    let column = text[row.src.start..caret.min(row.src.end)].chars().count();
+    let offset = if column <= indent {
+        0
+    } else {
+        line.char_indices()
+            .nth(indent)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len())
+    };
+    row.src.start + offset
 }
 
 /// Parsed rows for one buffer version.
@@ -304,7 +331,7 @@ impl MekuShell {
         &mut self,
         key: DocKey,
         extend: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.modal_open() || self.tab_mode() == Mode::Read {
@@ -326,6 +353,64 @@ impl MekuShell {
             }
             DocKey::Right => {
                 buffer.update(cx, |b, _| b.move_right(extend));
+                false
+            }
+            DocKey::WordLeft => {
+                buffer.update(cx, |b, _| {
+                    let to = b.word_left(b.caret());
+                    b.move_caret(to, extend);
+                });
+                false
+            }
+            DocKey::WordRight => {
+                buffer.update(cx, |b, _| {
+                    let to = b.word_right(b.caret());
+                    b.move_caret(to, extend);
+                });
+                false
+            }
+            DocKey::DocStart => {
+                buffer.update(cx, |b, _| b.move_caret(0, extend));
+                false
+            }
+            DocKey::DocEnd => {
+                buffer.update(cx, |b, _| {
+                    let end = b.len_bytes();
+                    b.move_caret(end, extend);
+                });
+                false
+            }
+            DocKey::PageUp | DocKey::PageDown => {
+                // One viewport of rows, keeping the column like Up/Down.
+                let base_font = window.text_style().font_size.to_pixels(window.rem_size());
+                let page = window.viewport_size().height.as_f32() / (base_font * 1.15).as_f32();
+                let page_rows = (page.max(1.0) as usize).max(1);
+                let caret = buffer.read(cx).caret();
+                let row = row_at(&model.rows, caret);
+                let last = model.rows.len() - 1;
+                let target = if key == DocKey::PageUp {
+                    row.saturating_sub(page_rows)
+                } else {
+                    (row + page_rows).min(last)
+                };
+                let dest = if target == row {
+                    if key == DocKey::PageUp {
+                        0
+                    } else {
+                        model.text.len()
+                    }
+                } else {
+                    let column = model.text[model.rows[row].src.start..caret].chars().count();
+                    let target_row = &model.rows[target];
+                    let line = &model.text[target_row.src.clone()];
+                    let offset = line
+                        .char_indices()
+                        .nth(column)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
+                    target_row.src.start + offset
+                };
+                buffer.update(cx, |b, _| b.move_caret(dest, extend));
                 false
             }
             DocKey::Up | DocKey::Down => {
@@ -357,16 +442,33 @@ impl MekuShell {
                 buffer.update(cx, |b, _| b.move_caret(dest, extend));
                 false
             }
-            DocKey::Home | DocKey::End => {
+            DocKey::Home => {
+                // Smart: first stop is first non-whitespace, second is
+                // column 0 (like editors do).
                 let caret = buffer.read(cx).caret();
                 let row = &model.rows[row_at(&model.rows, caret)];
-                let dest = if key == DocKey::Home {
-                    row.src.start
-                } else {
-                    row.src.end
-                };
+                let dest = smart_home_dest(row, &model.text, caret);
                 buffer.update(cx, |b, _| b.move_caret(dest, extend));
                 false
+            }
+            DocKey::End => {
+                let caret = buffer.read(cx).caret();
+                let row = &model.rows[row_at(&model.rows, caret)];
+                let dest = row.src.end;
+                buffer.update(cx, |b, _| b.move_caret(dest, extend));
+                false
+            }
+            DocKey::DeleteWordBack => {
+                buffer.update(cx, |b, _| b.delete_word_backward());
+                true
+            }
+            DocKey::DeleteWordFwd => {
+                buffer.update(cx, |b, _| b.delete_word_forward());
+                true
+            }
+            DocKey::DeleteToLineStart => {
+                buffer.update(cx, |b, _| b.delete_to_line_start());
+                true
             }
             DocKey::Backspace => {
                 buffer.update(cx, |b, _| b.delete_backward());

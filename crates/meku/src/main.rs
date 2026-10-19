@@ -36,18 +36,33 @@ actions!(
         CycleMode,
         DocLeft,
         DocRight,
+        DocWordLeft,
+        DocWordRight,
         DocUp,
         DocDown,
         DocHome,
         DocEnd,
+        DocDocStart,
+        DocDocEnd,
+        DocPageUp,
+        DocPageDown,
         DocSelectLeft,
         DocSelectRight,
+        DocSelectWordLeft,
+        DocSelectWordRight,
         DocSelectUp,
         DocSelectDown,
         DocSelectHome,
         DocSelectEnd,
+        DocSelectDocStart,
+        DocSelectDocEnd,
+        DocSelectPageUp,
+        DocSelectPageDown,
         DocBackspace,
         DocDelete,
+        DocDeleteWordBack,
+        DocDeleteWordFwd,
+        DocDeleteToLineStart,
         DocEnter,
         DocSelectAll,
         DocUndo,
@@ -532,6 +547,96 @@ impl MekuShell {
     }
     fn on_doc_right(&mut self, _: &DocRight, window: &mut Window, cx: &mut Context<Self>) {
         self.doc_key(document::DocKey::Right, false, window, cx);
+    }
+    fn on_doc_word_left(&mut self, _: &DocWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::WordLeft, false, window, cx);
+    }
+    fn on_doc_word_right(&mut self, _: &DocWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::WordRight, false, window, cx);
+    }
+    fn on_doc_doc_start(&mut self, _: &DocDocStart, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::DocStart, false, window, cx);
+    }
+    fn on_doc_doc_end(&mut self, _: &DocDocEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::DocEnd, false, window, cx);
+    }
+    fn on_doc_page_up(&mut self, _: &DocPageUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::PageUp, false, window, cx);
+    }
+    fn on_doc_page_down(&mut self, _: &DocPageDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::PageDown, false, window, cx);
+    }
+    fn on_doc_select_word_left(
+        &mut self,
+        _: &DocSelectWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::WordLeft, true, window, cx);
+    }
+    fn on_doc_select_word_right(
+        &mut self,
+        _: &DocSelectWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::WordRight, true, window, cx);
+    }
+    fn on_doc_select_doc_start(
+        &mut self,
+        _: &DocSelectDocStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::DocStart, true, window, cx);
+    }
+    fn on_doc_select_doc_end(
+        &mut self,
+        _: &DocSelectDocEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::DocEnd, true, window, cx);
+    }
+    fn on_doc_select_page_up(
+        &mut self,
+        _: &DocSelectPageUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::PageUp, true, window, cx);
+    }
+    fn on_doc_select_page_down(
+        &mut self,
+        _: &DocSelectPageDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::PageDown, true, window, cx);
+    }
+    fn on_doc_delete_word_back(
+        &mut self,
+        _: &DocDeleteWordBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::DeleteWordBack, false, window, cx);
+    }
+    fn on_doc_delete_word_fwd(
+        &mut self,
+        _: &DocDeleteWordFwd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::DeleteWordFwd, false, window, cx);
+    }
+    fn on_doc_delete_to_line_start(
+        &mut self,
+        _: &DocDeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::DeleteToLineStart, false, window, cx);
     }
     fn on_doc_up(&mut self, _: &DocUp, window: &mut Window, cx: &mut Context<Self>) {
         self.doc_key(document::DocKey::Up, false, window, cx);
@@ -1456,18 +1561,33 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_doc_left))
             .on_action(cx.listener(Self::on_doc_right))
+            .on_action(cx.listener(Self::on_doc_word_left))
+            .on_action(cx.listener(Self::on_doc_word_right))
+            .on_action(cx.listener(Self::on_doc_doc_start))
+            .on_action(cx.listener(Self::on_doc_doc_end))
+            .on_action(cx.listener(Self::on_doc_page_up))
+            .on_action(cx.listener(Self::on_doc_page_down))
             .on_action(cx.listener(Self::on_doc_up))
             .on_action(cx.listener(Self::on_doc_down))
             .on_action(cx.listener(Self::on_doc_home))
             .on_action(cx.listener(Self::on_doc_end))
             .on_action(cx.listener(Self::on_doc_select_left))
             .on_action(cx.listener(Self::on_doc_select_right))
+            .on_action(cx.listener(Self::on_doc_select_word_left))
+            .on_action(cx.listener(Self::on_doc_select_word_right))
+            .on_action(cx.listener(Self::on_doc_select_doc_start))
+            .on_action(cx.listener(Self::on_doc_select_doc_end))
+            .on_action(cx.listener(Self::on_doc_select_page_up))
+            .on_action(cx.listener(Self::on_doc_select_page_down))
             .on_action(cx.listener(Self::on_doc_select_up))
             .on_action(cx.listener(Self::on_doc_select_down))
             .on_action(cx.listener(Self::on_doc_select_home))
             .on_action(cx.listener(Self::on_doc_select_end))
             .on_action(cx.listener(Self::on_doc_backspace))
             .on_action(cx.listener(Self::on_doc_delete))
+            .on_action(cx.listener(Self::on_doc_delete_word_back))
+            .on_action(cx.listener(Self::on_doc_delete_word_fwd))
+            .on_action(cx.listener(Self::on_doc_delete_to_line_start))
             .on_action(cx.listener(Self::on_doc_enter))
             .on_action(cx.listener(Self::on_doc_select_all))
             .on_action(cx.listener(Self::on_doc_undo))
@@ -1519,18 +1639,33 @@ fn main() {
             KeyBinding::new("escape", CancelOverlay, None),
             KeyBinding::new("left", DocLeft, Some("Meku")),
             KeyBinding::new("right", DocRight, Some("Meku")),
+            KeyBinding::new("ctrl-left", DocWordLeft, Some("Meku")),
+            KeyBinding::new("ctrl-right", DocWordRight, Some("Meku")),
             KeyBinding::new("up", DocUp, Some("Meku")),
             KeyBinding::new("down", DocDown, Some("Meku")),
             KeyBinding::new("home", DocHome, Some("Meku")),
             KeyBinding::new("end", DocEnd, Some("Meku")),
+            KeyBinding::new("ctrl-home", DocDocStart, Some("Meku")),
+            KeyBinding::new("ctrl-end", DocDocEnd, Some("Meku")),
+            KeyBinding::new("pageup", DocPageUp, Some("Meku")),
+            KeyBinding::new("pagedown", DocPageDown, Some("Meku")),
             KeyBinding::new("shift-left", DocSelectLeft, Some("Meku")),
             KeyBinding::new("shift-right", DocSelectRight, Some("Meku")),
+            KeyBinding::new("ctrl-shift-left", DocSelectWordLeft, Some("Meku")),
+            KeyBinding::new("ctrl-shift-right", DocSelectWordRight, Some("Meku")),
             KeyBinding::new("shift-up", DocSelectUp, Some("Meku")),
             KeyBinding::new("shift-down", DocSelectDown, Some("Meku")),
             KeyBinding::new("shift-home", DocSelectHome, Some("Meku")),
             KeyBinding::new("shift-end", DocSelectEnd, Some("Meku")),
+            KeyBinding::new("ctrl-shift-home", DocSelectDocStart, Some("Meku")),
+            KeyBinding::new("ctrl-shift-end", DocSelectDocEnd, Some("Meku")),
+            KeyBinding::new("shift-pageup", DocSelectPageUp, Some("Meku")),
+            KeyBinding::new("shift-pagedown", DocSelectPageDown, Some("Meku")),
             KeyBinding::new("backspace", DocBackspace, Some("Meku")),
             KeyBinding::new("delete", DocDelete, Some("Meku")),
+            KeyBinding::new("ctrl-backspace", DocDeleteWordBack, Some("Meku")),
+            KeyBinding::new("ctrl-delete", DocDeleteWordFwd, Some("Meku")),
+            KeyBinding::new("ctrl-shift-backspace", DocDeleteToLineStart, Some("Meku")),
             KeyBinding::new("enter", DocEnter, Some("Meku")),
             KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
             KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
@@ -1571,11 +1706,13 @@ mod ui_tests {
     // would shadow the builtin `#[test]` and send the harness into macro
     // recursion. Import everything this module needs explicitly.
     use crate::{
-        CancelOverlay, CloseTab, CycleMode, DocBackspace, DocCopy, DocCut, DocDelete, DocDown,
-        DocEnd, DocEnter, DocHome, DocLeft, DocPaste, DocRedo, DocRight, DocSelectAll,
-        DocSelectDown, DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectRight, DocSelectUp,
-        DocUndo, DocUp, MekuShell, Mode, NamingMode, NewTab, NextTab, OpenFolder, Save,
-        ToggleSidebar,
+        CancelOverlay, CloseTab, CycleMode, DocBackspace, DocCopy, DocCut, DocDelete,
+        DocDeleteToLineStart, DocDeleteWordBack, DocDeleteWordFwd, DocDocEnd, DocDocStart, DocDown,
+        DocEnd, DocEnter, DocHome, DocLeft, DocPageDown, DocPageUp, DocPaste, DocRedo, DocRight,
+        DocSelectAll, DocSelectDocEnd, DocSelectDocStart, DocSelectDown, DocSelectEnd,
+        DocSelectHome, DocSelectLeft, DocSelectPageDown, DocSelectPageUp, DocSelectRight,
+        DocSelectUp, DocSelectWordLeft, DocSelectWordRight, DocUndo, DocUp, DocWordRight,
+        MekuShell, Mode, NamingMode, NewTab, NextTab, OpenFolder, Save, ToggleSidebar,
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
@@ -1634,14 +1771,28 @@ mod ui_tests {
                 KeyBinding::new("down", DocDown, Some("Meku")),
                 KeyBinding::new("home", DocHome, Some("Meku")),
                 KeyBinding::new("end", DocEnd, Some("Meku")),
+                KeyBinding::new("ctrl-right", DocWordRight, Some("Meku")),
+                KeyBinding::new("ctrl-home", DocDocStart, Some("Meku")),
+                KeyBinding::new("ctrl-end", DocDocEnd, Some("Meku")),
+                KeyBinding::new("pageup", DocPageUp, Some("Meku")),
+                KeyBinding::new("pagedown", DocPageDown, Some("Meku")),
                 KeyBinding::new("shift-left", DocSelectLeft, Some("Meku")),
                 KeyBinding::new("shift-right", DocSelectRight, Some("Meku")),
+                KeyBinding::new("ctrl-shift-left", DocSelectWordLeft, Some("Meku")),
+                KeyBinding::new("ctrl-shift-right", DocSelectWordRight, Some("Meku")),
                 KeyBinding::new("shift-up", DocSelectUp, Some("Meku")),
                 KeyBinding::new("shift-down", DocSelectDown, Some("Meku")),
                 KeyBinding::new("shift-home", DocSelectHome, Some("Meku")),
                 KeyBinding::new("shift-end", DocSelectEnd, Some("Meku")),
+                KeyBinding::new("ctrl-shift-home", DocSelectDocStart, Some("Meku")),
+                KeyBinding::new("ctrl-shift-end", DocSelectDocEnd, Some("Meku")),
+                KeyBinding::new("shift-pageup", DocSelectPageUp, Some("Meku")),
+                KeyBinding::new("shift-pagedown", DocSelectPageDown, Some("Meku")),
                 KeyBinding::new("backspace", DocBackspace, Some("Meku")),
                 KeyBinding::new("delete", DocDelete, Some("Meku")),
+                KeyBinding::new("ctrl-backspace", DocDeleteWordBack, Some("Meku")),
+                KeyBinding::new("ctrl-delete", DocDeleteWordFwd, Some("Meku")),
+                KeyBinding::new("ctrl-shift-backspace", DocDeleteToLineStart, Some("Meku")),
                 KeyBinding::new("enter", DocEnter, Some("Meku")),
                 KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
                 KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
@@ -2566,6 +2717,175 @@ mod ui_tests {
             );
         })
         .unwrap();
+    }
+
+    // -- word and line navigation ---------------------------------------------
+
+    fn doc_caret(cx: &mut TestAppContext, view: &Entity<MekuShell>, rel: &Path) -> usize {
+        cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                shell
+                    .buffers
+                    .get(rel)
+                    .unwrap()
+                    .read_with(cx, |b, _| b.caret())
+            })
+        })
+    }
+
+    fn doc_selection(
+        cx: &mut TestAppContext,
+        view: &Entity<MekuShell>,
+        rel: &Path,
+    ) -> (usize, usize) {
+        cx.update(|cx| {
+            view.read_with(cx, |shell, cx| {
+                shell.buffers.get(rel).unwrap().read_with(cx, |b, _| {
+                    (b.anchor().min(b.caret()), b.anchor().max(b.caret()))
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_the_previous_word() {
+        run_ui_test("delete_word_back", delete_word_back_body);
+    }
+
+    fn delete_word_back_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one two\n\nx\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 7); // after "two", before the newline
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-backspace", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one \n\nx\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 4, "caret follows the deletion");
+        assert!(buffer_text(cx, &view, &rel).1, "editor must be dirty");
+        // Undo returns the word whole.
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-z", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one two\n\nx\n");
+    }
+
+    #[test]
+    fn ctrl_right_jumps_by_word_and_shift_selects() {
+        run_ui_test("word_jump", word_jump_body);
+    }
+
+    fn word_jump_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# Title\n\ncamelCase end\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        // Caret on the plain row, before "camelCase" (byte offset 8).
+        move_doc_caret(cx, &view, "# Title\n\n".len());
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-right", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            14,
+            "stops at the camel hump before Case"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-shift-right", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            doc_selection(cx, &view, &rel),
+            (14, 18),
+            "Extend selects through the rest of the word"
+        );
+    }
+
+    #[test]
+    fn home_dances_from_indent_to_column_zero() {
+        run_ui_test("smart_home", smart_home_body);
+    }
+
+    fn smart_home_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "    indented body\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 14); // after "body"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("home", cx);
+        })
+        .unwrap();
+        assert_eq!(doc_caret(cx, &view, &rel), 4, "first stop: first non-blank");
+        cx.update_window(window, |_, window, cx| {
+            window.press("home", cx);
+        })
+        .unwrap();
+        assert_eq!(doc_caret(cx, &view, &rel), 0, "second stop: column zero");
+    }
+
+    #[test]
+    fn ctrl_end_jumps_to_the_document_tail() {
+        run_ui_test("doc_end", doc_end_body);
+    }
+
+    fn doc_end_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "a\n\nb\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-end", cx);
+        })
+        .unwrap();
+        let (text, _) = buffer_text(cx, &view, &rel);
+        assert_eq!(doc_caret(cx, &view, &rel), text.len());
+
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-home", cx);
+        })
+        .unwrap();
+        assert_eq!(doc_caret(cx, &view, &rel), 0);
+    }
+
+    #[test]
+    fn pagedown_pages_a_viewport_of_rows() {
+        run_ui_test("page_down", page_down_body);
+    }
+
+    fn page_down_body(cx: &mut TestAppContext) {
+        let body: String = (0..120).fold(String::new(), |mut s, i| {
+            use std::fmt::Write;
+            let _ = writeln!(s, "row {i}");
+            s
+        });
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, &body);
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("pagedown", cx);
+        })
+        .unwrap();
+        let caret = doc_caret(cx, &view, &rel);
+        let row = body[..caret].matches('\n').count();
+        assert!(
+            (20..70).contains(&row),
+            "one pagedown jumps ~a viewport of rows, got row {row}"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.press("pagedown", cx);
+        })
+        .unwrap();
+        let row2 = body[..doc_caret(cx, &view, &rel)].matches('\n').count();
+        assert!(
+            row2 > 70 && row2 < 120,
+            "second page advanced further: {row2}"
+        );
     }
 
     #[test]

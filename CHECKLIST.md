@@ -18,7 +18,7 @@ _Plan efficiently before writing app code. Research done by 4 subagents (feature
 - [x] Freeze GFM subset: headings, emphasis/strong/strike, lists, task lists, code fence/inline, tables, quote, hr, links/images, autolinks, raw-HTML passthrough (sanitized)
 - [x] Freeze explicit deferrals: `[[wikilinks]]`, embeds, backlinks, graph/canvas, tags pane, frontmatter UI, math, mermaid, vim, plugins/sync/publish, terminal/AI
 - [ ] Write MVP acceptance criteria into `docs/acceptance.md` (12 criteria: open mekuto <1s/100 files, file ops, live-preview round-trip, tabs+dirty, Ctrl-P <100ms/1k files, search, palette, outline ≤200ms, status bar, settings persist, crash recovery ≤2s loss, GFM fixture zero panics)
-- [x] Freeze keymap defaults (Linux): `Ctrl-P` finder · `Ctrl-Shift-P` palette · `Ctrl-B` explorer · `Ctrl-,` settings · `Ctrl-N/W/T` note/close/tab · `Ctrl-S` save · `Ctrl-F` find · `Ctrl-E` edit/live/read cycle (Build 5) 
+- [x] Freeze keymap defaults (Linux): `Ctrl-P` finder · `Ctrl-Shift-P` palette · `Ctrl-B` explorer · `Ctrl-,` settings · `Ctrl-N/W/T` note/close/tab · `Ctrl-S` save · `Ctrl-F` find · `Ctrl-E` edit/live/read cycle (Build 5) · `Ctrl+←/→` word jump · `Ctrl+Backspace/Delete` word delete · `Ctrl+Shift+Backspace` delete-line-start · `Ctrl+Home/End` doc ends · PageUp/Down · smart `Home` (Build 5.x) 
 - [ ] Freeze `session.json` schema v1 (`version`, `active_tab`, `open_tabs[{path,cursor,scroll,pinned}]`, `explorer{expanded,auto_reveal}`) + corrupt-file rule (backup to `session.corrupt-<ts>.json`, start empty, never crash)
 
 **Mekuto layout (frozen):**
@@ -129,7 +129,148 @@ Pipeline: `keystroke → OpenBuffer.apply_edit (<1ms) → debounce 80–120ms Ta
   - Tests guard: Read blocks typing + IME + no caret; mode cycle Edit→Live→Read→Edit via key AND buttons; scroll kept across Read/Edit; image drawn only when its row is hidden (Edit shows raw); rust fence keyword span from the model (`DocModel.hl`).
   - Caret is centered on the glyph box, not the line-box top: gpui paints glyphs with `padding_top = (line_height − ascent − descent)/2` (see `text_system/line.rs::paint_line`), so `caret_geometry` returns `(advance, padding_top, font_box)` and blank rows offset by `(row_h − font_size)/2`. Glyph-match test now asserts against the painted (padded) position via `line_layout_for_index` metrics.
 - [ ] **6. Search + palette + outline** — `Ctrl-P` finder, `Ctrl-Shift-P` palette, full-text (grep lib), heading tree + follow-cursor. → _commit_
+  - Landed with Build 5.x (from the live-markdown feature file §2, suggested-build-order step 2): word/line navigation — `Ctrl+←/→` word jump (camelCase humps, punctuation runs as one stop, whitespace skipped), `Ctrl+Shift+←/→` extend, `Ctrl+Backspace`/`Ctrl+Delete` word deletes, `Ctrl+Shift+Backspace` delete-to-line-start (joins lines at line start), smart `Home` (first non-blank ⇄ column 0), `Ctrl+Home/End` doc start/end, `PageUp/PageDown` + Shift variants (±1 viewport of rows, column kept) — buffer logic in `meku-buffer` (`word_left/word_right/delete_*`, unit-tested incl. rope-chunk-crossing long doc), bindings + handlers + 5 headless UI tests. `test(32+27+38)`+`check`+`fmt`+`clippy` green. → _commit_
 - [ ] **7. Perf + polish** — virtualized lists everywhere, 120ms debounce audit, lazy images/grammars, benches green, RSS <120MB, docs + Linux packaging. → _commit_
+
+## Section 4 — `live-markdown-editor-features.md` tracking
+
+_Reconciled from the feature file (`live-markdown-editor-features.md`, editor scope only). One commit after each subsection, same workflow as Section 3. Unchecked items stay unchecked; the GFM/v0.1 deferral rules still apply where noted. Suggested build order lives in the file (§Suggested Build Order 1–13)._
+
+### F1 Core Text Input (§1)
+- [x] Plain text typing with IME support (EntityInputHandler composition, Build 3/4)
+- [x] Undo/redo with typing-burst coalescing (`meku-buffer` coalescing, Build 3)
+- [x] Cut/copy/paste plain text (Build 3)
+- [x] Select all (Ctrl+A)
+- [x] Auto-save (800ms idle) + dirty dots (Build 3)
+- [ ] Multi-copy paste rich-to-markdown conversion
+- [ ] Select word / line / paragraph + expand selection
+- [ ] Multiple cursors (Ctrl+Alt+Up/Down, Ctrl+D)
+- [ ] Column/box selection (Alt+drag)
+- [ ] Soft wrap toggle
+- [ ] Line numbers toggle (optional, source mode)
+- [ ] Spellcheck with underline + right-click suggestions (defer v0.1 — Linux spelllib decision)
+
+### F2 Word and Line Navigation (§2) — **Build 5.x, landed**
+- [x] Ctrl+Left/Right jump by word (camelCase humps, punctuation runs are one stop, whitespace/cross-line skipping)
+- [x] Ctrl+Backspace deletes the previous word · Ctrl+Delete deletes the next word
+- [x] Ctrl+Shift+Backspace deletes to line start (joins lines when already at the start)
+- [x] Home: first non-whitespace, second press column 0
+- [x] End goes to end of line
+- [x] Ctrl+Home / Ctrl+End go to document start/end (+ Shift variants)
+- [x] PageUp / PageDown (+ Shift variants; viewport-sized, column kept)
+- [x] Shift+Arrow extends selection (existing, Build 4) + Ctrl+Shift+Left/Right extends by word
+- [ ] Word jump respects markdown syntax more granularly (link targets, fence strings)
+- [ ] Go to line (Ctrl+G)
+- [ ] Jump to heading from outline (builds with palette/outline)
+- [ ] Bookmarks / jump back (Alt+Left/Right)
+
+### F3 Line Editing Shortcuts (§3) — **next chunk**
+- [ ] Move line up/down (Alt+Up/Alt+Down)
+- [ ] Duplicate line/selection (Ctrl+Shift+D)
+- [ ] Delete line (Ctrl+Shift+K)
+- [ ] Insert line below/above (Ctrl+Enter / Ctrl+Shift+Enter)
+- [ ] Join lines (Ctrl+J)
+- [ ] Toggle comment in code (Ctrl+/)
+- [ ] Sort selected lines
+- [ ] Transform case (upper/lower/title/toggle)
+
+### F4 Enter and Smart Continuation (§4) — **next chunk**
+- [ ] Enter continues bullets / exits empty bullets, numbered lists increment + renumber, task items `[ ]`
+- [ ] Enter continues blockquotes/callouts, verts indentation, soft break (Shift+Enter)
+- [ ] Enter inside code blocks / tables; Enter after a heading starts a paragraph
+
+### F5 Indentation and Lists (§5) — **next chunk**
+- [ ] Tab/Shift+Tab indent/outdent (lines, selection, list children)
+- [ ] Backspace removes one indent level
+- [ ] Convert line to bullet/numbered/task; toggle checkbox (Ctrl+Enter or click)
+- [ ] Ordered-list renumbering; fold list items (defer folding to Build 7 polish)
+
+### F6 Auto-Pairing and Smart Typing (§6) — **later**
+- [ ] Auto-close `()[]{}""''\`\`` + markdown markers `** * == ~~`; skip-over closers; wrap selection
+- [ ] Backspace deletes an empty pair; `[[` wikilink autocomplete (with F9)
+- [ ] Settings toggles (auto-close off, smart quotes/dashes off by default)
+
+### F7 Live Preview Rendering (§7)
+- [x] Render while typing, single surface; syntax hidden unless on that line; reveal on caret entry (Build 4)
+- [x] Headings styled by level (H1–H6 scale), bold/italic/strike/code/links, HR, blockquote border, task checkboxes + clickable, images (Build 4/5)
+- [x] Code fences with syntax highlighting (5 langs; Build 5) — [ ] language label chips
+- [ ] Code block language selector · inline `==highlight==` spans
+- [ ] Inline math `$...$` / block `$$...$$` (defer — v0.1 deferral list)
+- [ ] Mermaid (optional, defer)
+- [ ] Tables as grids (Build 6/13)
+- [ ] Footnotes with click preview; comments `%%…%%` hidden; emoji shortcodes (defer)
+- [ ] Superscript/subscript
+- [ ] `![[embed]]` inspection — deferred (no wikilinks in v0.1)
+
+### F8 Source / Live / Reading modes (§8) — **Build 5, landed**
+- [x] Source/Edit mode: raw markdown (fences highlighted)
+- [x] Live preview mode as default
+- [x] Reading mode fully rendered + read-only
+- [x] Ctrl+E cycle + buttons; mode preserved per document session (needs session.json write check)
+- [x] Reading mode shares theme/typography
+
+### F9 Links / Wikilinks / Embeds (§9) — **defer v0.1** (no wikilinks/backlinks; `[[x]]` renders literally)
+- [ ] Full set per feature file (autocomplete, alias, anchors, block ids, follow, hover preview, broken-link highlighting)
+
+### F10 Tags / Properties / Frontmatter (§10) — **defer v0.1**
+- [ ] Tags autocomplete + highlight; YAML frontmatter parsed as properties + properties UI; aliases/titles
+
+### F11 Slash Commands and Command Palette (§11) — **Build 6**
+- [ ] Inline `/` command menu + commands set (headings, lists, task, quote, callout, code, table, divider, image, link, date/time)
+- [ ] Fuzzy search + keyboard navigation
+- [ ] Ctrl+P finder, Ctrl+Shift-P palette; every command bindable; recent commands ranked
+
+### F12 Formatting Shortcuts (§12) — **later**
+- [ ] Ctrl+B/I, strikethrough, Ctrl+K link, Ctrl+\` code, Ctrl+1..6 heading toggles, quote/callout toggle, current-word without selection, clear formatting
+
+### F13 Tables (§13) — later (Build 6/13)
+- [ ] Insert + picker, Tab/Shift+Tab cell nav + auto-add row, add/remove rows/cols, alignment toggle, sort, pipe auto-format, CSV/TSV paste
+
+### F14 Code Blocks (§14) — partially landed
+- [x] Fenced blocks + language identifier + highlighting (5 langs, Build 5)
+- [ ] ≥50 languages (add more grammar crates), selector + autocomplete, copy button
+- [ ] Tab-in-code setting, auto-indent on Enter, bracket matching, inline code double-backticks, line numbers/folding
+
+### F15 Headings / Outline / Structure (§15) — **Build 6**
+- [ ] Outline panel from headings + click to jump
+- [ ] Fold/unfold heading sections + all (Build 7 polish)
+- [ ] Heading anchors; sticky breadcrumb (optional); promote/demote level
+
+### F16 Find / Replace / Search (§16) — **Build 6**
+- [ ] Ctrl+F find + highlight all, Ctrl+H replace + replace-all, case/whole-word/regex toggles, match count + next/prev, group captures, search-in-selection
+- [ ] Highlights in both source and preview
+
+### F17 Images and Media (§17) — partially landed
+- [x] Standalone image rows render inline (Build 5)
+- [ ] Drag-and-drop / paste-to-insert into attachment folder; `![[img.png|300]]` sizes
+- [ ] Video/audio/PDF embeds (optional); alt-text captions polish
+
+### F18 Paste and Clipboard Handling (§18) — later
+- [ ] HTML→markdown paste, Ctrl+Shift+V plain, URL-over-selection link, list paste continuation, spreadsheet→table, copy as rendered
+
+### F19 Selection / Movement refinements (§19) — partially landed
+- [x] Shift+Arrow / Ctrl+Shift+word extend (Build 4 + 5.x)
+- [ ] Double-click selects word, triple-click selects line
+- [ ] Shift+click extends selection
+- [ ] Drag text to move; Escape clears selection/multi-cursors (Escape top priority when implemented)
+
+### F20 Visual and Theme (§20) — later
+- [x] Syntax Highlighting colors for markdown tokens (Build 5)
+- [ ] Light/dark + system follow, custom variables, adjustable font family/size/line height, width options/centered column, zoom Ctrl+=/-, focus mode, typewriter mode, distraction-free, show/hide frontmatter
+
+### F21 Status and Feedback (§21) — partially landed
+- [x] Save state indicator (dirty digits/status, Build 3)
+- [ ] Word/character count + reading time, selection counts, line:column indicator, non-blocking save failure
+
+### F22 Accessibility and Input Options (§22) — defer v0.1
+- [ ] Keyboard-completeness audit, screen-reader labels, focus indicators, reduced-motion, vim/emacs modes, keymap customization, RTL, spellcheck language
+
+### F23 Performance and Robustness (§23) — Build 7
+- [ ] 100k+ line docs, incremental re-render, off-main parsing, lazy images/languages, large-file guard, crash snapshots
+- [ ] Undo history survives tab switching (partially — buffer state persists in, verify), cursor/scroll restore (needs session.json write)
+
+### F24 Extensibility hooks (§24) — defer
+- [ ] Events, custom commands/hotkeys/renderers/slash/autocomplete providers, sandboxing
 
 _Deferred past v0.1: links/backlinks/graph, vim, plugins/sync, export PDF/HTML, minimap, >100k-line mmap paging, tantivy, settings UI beyond ~10 keys._
 
