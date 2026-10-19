@@ -11,3 +11,6 @@
 
 # Meku runtime sidecars (per-vault state, never committed)
 .meku/
+
+# Release packages (tools/package.sh)
+/dist/

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Meku
+GenericName=Markdown Editor
+Comment=GPU-accelerated markdown editor for folders of notes
+Exec=meku
+Icon=meku
+Terminal=false
+Categories=Office;TextEditor;Utility;
+Keywords=markdown;notes;editor;
+StartupWMClass=meku

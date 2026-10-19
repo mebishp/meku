@@ -387,3 +387,4 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] Tabs shrink to fit the strip (floor 40px, then it scrolls); the active tab keeps its width, inactive ones drop the icon and close button when crowded (middle-click or the context menu still close them), with a full-title tooltip.
 - [x] Scroll bars (kit `Scrollbar`) on the document, file tree, outline and settings page. Setting **Scroll bars**: always (default) / hover / auto-hide. Draggable thumb; wheel scrolling still goes through the smooth layer.
 - [x] Click anywhere in the editor focuses it: below the text (or in the room under the last row) puts the caret at the end of the last line of text; margins beside a row land on that row.
+- [x] Linux packaging: `tools/package.sh` builds deb, AppImage, Arch `pkg.tar.zst` and tar.gz into `dist/` from `packaging/` (desktop entry, icon, PKGBUILD). v0.1 release published with these.

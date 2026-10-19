@@ -1,0 +1,21 @@
+# Packages the prebuilt release binary; tools/package.sh stages the files
+# (meku-bin, meku.png, ...) beside this file and fills in pkgver.
+pkgname=meku
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='GPU-accelerated native markdown editor for folders of notes'
+arch=('x86_64')
+url='https://github.com/mebishp/meku'
+license=('custom')
+depends=('libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader' 'wayland' 'fontconfig')
+optdepends=('inter-font: preferred UI font' 'ttf-jetbrains-mono: preferred code font')
+options=('!strip' '!debug')
+source=('meku-bin' 'meku.desktop' 'meku.png' 'meku.svg')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 meku-bin "$pkgdir/usr/bin/meku"
+  install -Dm644 meku.desktop "$pkgdir/usr/share/applications/meku.desktop"
+  install -Dm644 meku.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/meku.png"
+  install -Dm644 meku.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/meku.svg"
+}
