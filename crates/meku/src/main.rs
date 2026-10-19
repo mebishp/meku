@@ -1,6 +1,8 @@
+mod chrome;
 mod document;
 mod explorer;
 mod find;
+mod icons;
 mod palette;
 mod slash;
 mod theme;
@@ -16,14 +18,10 @@ use explorer::Explorer;
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::*;
 use gpui_kit::*;
 // InteractiveElement (div().on_click / overflow_y_scroll) is not in the globs.
-use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
+use gpui_kit::InteractiveElement;
 use meku_buffer::OpenBuffer;
 use meku_markdown::live::title_to_stem;
 use meku_vault::{OpenTab, Session, VaultEvent};
@@ -195,6 +193,11 @@ pub struct MekuShell {
     caret_touch: Instant,
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
+    /// Scroll state of the tab strip, and the tab it was last scrolled to.
+    tabs_scroll: ScrollHandle,
+    tabs_scrolled_to: Option<usize>,
+    /// Outline section expanded in the sidebar.
+    outline_open: bool,
     palette: Option<palette::PaletteState>,
     slash: Option<slash::SlashState>,
     /// `/` offset whose menu was closed with Esc.
@@ -254,6 +257,9 @@ impl MekuShell {
             caret_on: true,
             caret_touch: Instant::now(),
             hover_link: None,
+            tabs_scroll: ScrollHandle::new(),
+            tabs_scrolled_to: None,
+            outline_open: true,
             palette: None,
             slash: None,
             slash_dismissed: None,
@@ -558,6 +564,10 @@ impl MekuShell {
     }
 
     fn new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab_action(cx);
+    }
+
+    pub(crate) fn new_tab_action(&mut self, cx: &mut Context<Self>) {
         if self.explorer.is_open() {
             self.new_untitled_note(PathBuf::new(), cx);
             return;
@@ -1292,94 +1302,6 @@ impl MekuShell {
 
     // -- file tree (plain rows; selection derives from the active tab) --
 
-    /// Plain file rows from [`Explorer::flat_rows`]: no virtualized tree
-    /// state to starve of height, selection derived from the active tab.
-    fn render_file_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let shell = cx.entity();
-        let active_rel = self.tabs.get(self.active_tab).and_then(|t| t.rel.clone());
-        let rows: Vec<AnyElement> = self
-            .explorer
-            .flat_rows()
-            .into_iter()
-            .map(|row| {
-                let open_shell = shell.clone();
-                let menu_shell = shell.clone();
-                let open_rel = row.rel.clone();
-                let menu_rel = row.rel.clone();
-                let row_id = format!("tree-row-{}", row.rel.display());
-                let chevron = if row.is_dir {
-                    if row.expanded { "▾ " } else { "▸ " }
-                } else {
-                    "  "
-                };
-                let selected = active_rel.as_ref() == Some(&row.rel);
-                ListItem::new(row_id)
-                    .selected(selected)
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .pl(px(row.depth as f32 * 12.0 + 4.0))
-                            .text_sm()
-                            .child(chevron)
-                            .child(row.label),
-                    )
-                    .on_click(move |_, _, cx| {
-                        open_shell.update(cx, |view, cx| view.open_file(&open_rel, cx));
-                    })
-                    .context_menu(move |menu, _window, cx| {
-                        let is_dir = menu_shell.read(cx).explorer.is_dir(&menu_rel);
-                        let mut menu = menu;
-                        if is_dir {
-                            for (label, mode) in [
-                                ("New note", NamingMode::NewNote),
-                                ("New folder", NamingMode::NewFolder),
-                            ] {
-                                let s = menu_shell.clone();
-                                let dir = menu_rel.clone();
-                                menu = menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_, _, cx| {
-                                        s.update(cx, |view, cx| {
-                                            view.begin_naming(mode, dir.clone(), None, cx)
-                                        });
-                                    },
-                                ));
-                            }
-                            menu = menu.item(PopupMenuItem::separator());
-                        }
-                        {
-                            let s = menu_shell.clone();
-                            let target = menu_rel.clone();
-                            menu = menu.item(PopupMenuItem::new("Rename").on_click(
-                                move |_, _, cx| {
-                                    s.update(cx, |view, cx| {
-                                        view.begin_naming(
-                                            NamingMode::Rename,
-                                            target.clone(),
-                                            Some(target.clone()),
-                                            cx,
-                                        )
-                                    });
-                                },
-                            ));
-                        }
-                        {
-                            let s = menu_shell.clone();
-                            let target = menu_rel.clone();
-                            menu = menu.item(PopupMenuItem::new("Delete").on_click(
-                                move |_, _, cx| {
-                                    s.update(cx, |view, cx| view.ask_delete(target.clone(), cx));
-                                },
-                            ));
-                        }
-                        menu
-                    })
-                    .into_any_element()
-            })
-            .collect();
-        v_flex().children(rows).into_any_element()
-    }
-
     // -- naming modal (new note / new folder / rename) --------------------
 
     fn naming_preset(mode: NamingMode, target: Option<&Path>) -> String {
@@ -1677,201 +1599,8 @@ impl MekuShell {
 
     // -- chrome ----------------------------------------------------------
 
-    /// Plain themed sidebar: header, file tree, footer. Deliberately plain
-    /// `div`s — the virtualized `Sidebar`/`Tree` components starve of
-    /// measured height in this layout and render nothing.
-    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let base = v_flex()
-            .size_full()
-            .bg(cx.theme().sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .border_color(cx.theme().sidebar_border);
-        if !self.explorer.is_open() {
-            return base
-                .child(
-                    div()
-                        .p_3()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("No mekuto open"),
-                )
-                .child(
-                    div()
-                        .px_3()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Open a folder (Ctrl-O) to begin."),
-                )
-                .into_any_element();
-        }
-        let shell = cx.entity();
-        let new_note = shell.clone();
-        let new_folder = shell.clone();
-        base.child(
-            h_flex()
-                .justify_between()
-                .items_center()
-                .px_3()
-                .py_2()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(self.explorer.root_name())
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new("new-note")
-                                .label("+ Note")
-                                .ghost()
-                                .xsmall()
-                                .on_click(move |_, _, cx| {
-                                    new_note.update(cx, |view, cx| {
-                                        view.begin_naming(
-                                            NamingMode::NewNote,
-                                            PathBuf::new(),
-                                            None,
-                                            cx,
-                                        )
-                                    });
-                                }),
-                        )
-                        .child(
-                            Button::new("new-folder")
-                                .label("+ Dir")
-                                .ghost()
-                                .xsmall()
-                                .on_click(move |_, _, cx| {
-                                    new_folder.update(cx, |view, cx| {
-                                        view.begin_naming(
-                                            NamingMode::NewFolder,
-                                            PathBuf::new(),
-                                            None,
-                                            cx,
-                                        )
-                                    });
-                                }),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .id("file-tree-scroll")
-                .test_support()
-                .overflow_y_scroll()
-                .child(self.render_file_tree(cx)),
-        )
-        .child(self.render_outline(cx))
-        .child(
-            div()
-                .px_3()
-                .py_2()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("Meku v0.1"),
-        )
-        .into_any_element()
-    }
-
-    /// Heading tree of the active note; the heading holding the caret is
-    /// highlighted (follow-cursor) and a click jumps there.
-    fn render_outline(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let outline = self.doc_outline(cx);
-        let caret = self
-            .doc_rel()
-            .and_then(|rel| self.buffers.get(&rel))
-            .map(|b| b.read(cx).caret())
-            .unwrap_or(0);
-        let active = outline.iter().rposition(|(_, _, at)| *at <= caret);
-        let shell = cx.entity();
-        let muted = cx.theme().muted_foreground;
-        let rows: Vec<AnyElement> = outline
-            .into_iter()
-            .enumerate()
-            .map(|(i, (level, title, at))| {
-                let shell = shell.clone();
-                ListItem::new(format!("outline-{i}"))
-                    .selected(active == Some(i))
-                    .child(
-                        div()
-                            .pl(px((level.saturating_sub(1)) as f32 * 12.0 + 4.0))
-                            .text_sm()
-                            .child(if title.is_empty() {
-                                "(untitled)".to_string()
-                            } else {
-                                title
-                            }),
-                    )
-                    .on_click(move |_, window, cx| {
-                        shell.update(cx, |view, cx| {
-                            view.doc_goto(at, cx);
-                            window.focus(&view.focus_handle, cx);
-                        });
-                    })
-                    .into_any_element()
-            })
-            .collect();
-        v_flex()
-            .flex_none()
-            .h(px(220.))
-            .border_t_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(muted)
-                    .child("Outline"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .id("outline-scroll")
-                    .overflow_y_scroll()
-                    .children(rows),
-            )
-            .into_any_element()
-    }
-
     fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        let bar_entity = entity.clone();
-        let tab_bar = TabBar::new("meku-tabs")
-            .selected_index(self.active_tab)
-            .on_click(move |index: &usize, _window, cx| {
-                let index = *index;
-                bar_entity.update(cx, |view, cx| {
-                    view.flush_title(cx);
-                    view.active_tab = index;
-                    view.save_session();
-                    cx.notify();
-                });
-            })
-            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
-                let entity = entity.clone();
-                let dirty = tab.rel.as_ref().is_some_and(|rel| self.is_dirty(rel, cx));
-                let label = if dirty {
-                    format!("• {}", tab.title)
-                } else {
-                    tab.title.clone()
-                };
-                Tab::new().label(label).suffix(
-                    Button::new(format!("close-tab-{index}"))
-                        .label("×")
-                        .ghost()
-                        .xsmall()
-                        .on_click(move |_, _, cx| {
-                            entity.update(cx, |view, cx| {
-                                view.close_tab(index, cx);
-                            });
-                        }),
-                )
-            }));
-
+        let tab_strip = self.render_tab_strip(cx);
         let active = self
             .tabs
             .get(self.active_tab)
@@ -1888,7 +1617,6 @@ impl MekuShell {
                     column = column.child(self.render_conflict_banner(&rel, cx));
                 }
                 column
-                    .child(self.render_mode_switch(active.mode, cx))
                     .child(self.render_document(&rel, window, cx))
                     .into_any_element()
             }
@@ -1901,51 +1629,8 @@ impl MekuShell {
             .size_full()
             .min_w_0()
             .overflow_hidden()
-            .child(
-                div()
-                    .id("tabs-scroll")
-                    .flex_none()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .child(tab_bar),
-            )
+            .child(tab_strip)
             .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
-    }
-
-    /// Edit / Live / Read buttons, right-aligned above the document. Only
-    /// shown while a note is open; the active one is filled.
-    fn render_mode_switch(&mut self, mode: Mode, cx: &mut Context<Self>) -> AnyElement {
-        let shell = cx.entity();
-        let buttons: Vec<AnyElement> = [Mode::Edit, Mode::Live, Mode::Read]
-            .into_iter()
-            .map(|m| {
-                let click_shell = shell.clone();
-                let mut button = Button::new(format!("mode-{:?}", m).to_lowercase())
-                    .label(m.label())
-                    .xsmall();
-                button = if m == mode {
-                    button.primary()
-                } else {
-                    button.ghost()
-                };
-                button
-                    .on_click(move |_, _, cx| {
-                        click_shell.update(cx, |view, cx| view.set_tab_mode(m, cx));
-                    })
-                    .into_any_element()
-            })
-            .collect();
-        h_flex()
-            .flex_none()
-            .justify_end()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .children(buttons)
-            .into_any_element()
     }
 
     fn render_empty_state(&mut self, title: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -2017,35 +1702,6 @@ impl MekuShell {
                     ),
             )
             .into_any_element()
-    }
-
-    fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_dirty = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|t| t.rel.as_deref())
-            .is_some_and(|rel| self.is_dirty(rel, cx));
-        let left = if let Some(notice) = &self.notice {
-            notice.clone()
-        } else if self.explorer.is_open() {
-            let dot = if active_dirty { "●" } else { "○" };
-            format!("{dot} {}", self.explorer.root_name())
-        } else {
-            "○ No mekuto open".to_string()
-        };
-        // gpui-kit's StatusBar draws the strip itself; the wrapper pins it as
-        // the last child of the root column (flex_none keeps it from shrinking)
-        // and carries the test id, since StatusBar is not interactive.
-        div().id("status-bar").test_support().flex_none().child(
-            StatusBar::new()
-                .left(left)
-                .right("Markdown")
-                .right(if self.doc_rel().is_some() {
-                    self.tab_mode().label()
-                } else {
-                    "Ln 1, Col 1"
-                }),
-        )
     }
 
     fn render_naming_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2194,11 +1850,6 @@ impl Render for MekuShell {
         if std::mem::take(&mut self.focus_doc) && self.naming.is_none() {
             window.focus(&focus, cx);
         }
-        let title = match (self.explorer.is_open(), self.tabs.get(self.active_tab)) {
-            (true, Some(tab)) => format!("Meku — {} — {}", self.explorer.root_name(), tab.title),
-            (true, None) => format!("Meku — {}", self.explorer.root_name()),
-            (false, _) => "Meku — no mekuto open".to_string(),
-        };
         let mut root = v_flex()
             .size_full()
             .relative()
@@ -2287,7 +1938,7 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_doc_copy))
             .on_action(cx.listener(Self::on_doc_cut))
             .on_action(cx.listener(Self::on_doc_paste))
-            .child(TitleBar::new().child(title))
+            .child(TitleBar::new().child(self.render_title_content(cx)))
             .child(
                 v_flex().flex_1().min_h_0().overflow_hidden().child(
                     h_resizable("meku-shell")
@@ -2296,12 +1947,12 @@ impl Render for MekuShell {
                                 .visible(self.show_sidebar)
                                 .size(px(240.))
                                 .size_range(px(200.)..px(400.))
-                                .child(self.render_sidebar(cx)),
+                                .child(self.render_sidebar_panel(cx)),
                         )
                         .child(self.render_center(window, cx).into_any_element()),
                 ),
             )
-            .child(self.render_status_bar(cx));
+            .child(self.render_status(cx));
         if let Some(modal) = self.render_naming_modal(cx) {
             root = root.child(theme::fade_in(
                 div().absolute().inset_0().child(modal),
@@ -2354,7 +2005,7 @@ fn apply_fonts(cx: &mut App) {
 
 fn main() {
     let initial_dir = std::env::args().nth(1);
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(icons::MekuAssets);
 
     app.run(move |cx| {
         // Required: initializes gpui-component theming/global state.
@@ -5384,6 +5035,103 @@ mod ui_tests {
         assert!(
             !cx.update(|cx| crate::theme::motion(cx)),
             "reduce motion turns it off"
+        );
+    }
+
+    // -- chrome ---------------------------------------------------------
+
+    #[test]
+    fn tab_strip_selects_closes_and_adds() {
+        run_ui_test("tab_strip", tab_strip_body);
+    }
+
+    fn tab_strip_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "first\n");
+        std::fs::write(dir.path().join("second.md"), "second\n").unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.explorer.refresh();
+                s.open_file_inner(Path::new("second.md"), cx);
+            })
+        });
+        let active = |cx: &mut TestAppContext| view.read_with(&*cx, |s, _| s.doc_rel());
+        assert_eq!(active(cx), Some(PathBuf::from("second.md")));
+        step(cx, window, |w, cx| w.click(("tab", 0usize), cx));
+        assert_eq!(
+            active(cx),
+            Some(PathBuf::from("doc.md")),
+            "clicking a tab selects it"
+        );
+        step(cx, window, |w, cx| w.click("close-tab-0", cx));
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.tabs.len()),
+            1,
+            "close icon closes the tab"
+        );
+        assert_eq!(active(cx), Some(PathBuf::from("second.md")));
+        step(cx, window, |w, cx| w.click("new-tab", cx));
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.tabs.len()),
+            2,
+            "+ creates a note"
+        );
+    }
+
+    #[test]
+    fn title_bar_mode_switch_and_status_counts() {
+        run_ui_test("title_modes", title_modes_body);
+    }
+
+    fn title_modes_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one two three\nfour\n");
+        step(cx, window, |w, cx| w.click("mode-read", cx));
+        assert_eq!(view.read_with(&*cx, |s, _| s.tab_mode()), Mode::Read);
+        step(cx, window, |w, cx| w.click("mode-edit", cx));
+        assert_eq!(view.read_with(&*cx, |s, _| s.tab_mode()), Mode::Edit);
+        // The status bar counts words and reports the caret position.
+        let (words, lc) = cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                let rel = s.doc_rel().unwrap();
+                (
+                    s.doc_model(&rel, cx).map(|m| m.words),
+                    s.buffers[&rel].read(cx).line_col(15),
+                )
+            })
+        });
+        assert_eq!(words, Some(4));
+        assert_eq!(lc, (2, 2));
+        step(cx, window, |w, cx| w.click("title-search", cx));
+        step(cx, window, |_, _| {});
+        assert!(
+            view.read_with(&*cx, |s, _| s.palette.is_some()),
+            "title search opens the finder"
+        );
+    }
+
+    #[test]
+    fn sidebar_search_and_outline_toggle() {
+        run_ui_test("sidebar_chrome", sidebar_chrome_body);
+    }
+
+    fn sidebar_chrome_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# Head\nbody\n");
+        step(cx, window, |w, cx| w.click("sidebar-search", cx));
+        step(cx, window, |_, _| {});
+        assert!(
+            view.read_with(&*cx, |s, _| s.palette.is_some()),
+            "search field opens the finder"
+        );
+        step(cx, window, |w, cx| w.press("escape", cx));
+        assert!(view.read_with(&*cx, |s, _| s.outline_open));
+        step(cx, window, |w, cx| w.click("section-Outline", cx));
+        assert!(
+            !view.read_with(&*cx, |s, _| s.outline_open),
+            "outline header collapses it"
+        );
+        step(cx, window, |w, cx| w.click("sidebar-toggle", cx));
+        assert!(
+            !view.read_with(&*cx, |s, _| s.show_sidebar),
+            "title bar toggles the sidebar"
         );
     }
 }

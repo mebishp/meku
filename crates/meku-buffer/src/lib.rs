@@ -320,6 +320,15 @@ impl OpenBuffer {
         self.text.len()
     }
 
+    /// 1-based `(line, column)` of byte `offset`; the column counts chars.
+    pub fn line_col(&self, offset: usize) -> (usize, usize) {
+        let at = offset.min(self.text.len());
+        let line = self.text.byte_to_line_idx(at, LineType::LF);
+        let start = self.text.line_to_byte_idx(line, LineType::LF);
+        let col = self.text.slice(start..at).to_string().chars().count();
+        (line + 1, col + 1)
+    }
+
     /// Byte offset where line `idx` (0-based) starts; lines past the end
     /// clamp to the last line.
     pub fn line_start(&self, idx: usize) -> usize {
@@ -2427,6 +2436,15 @@ mod tests {
         b.apply_edit(0..0, "y");
         b.mark_saved(UNIX_EPOCH);
         assert_eq!(b.disk_hash, Some(hash_text("yx\n")));
+    }
+
+    #[test]
+    fn line_col_is_one_based_and_counts_chars() {
+        let b = buf("ab\néa\n");
+        assert_eq!(b.line_col(0), (1, 1));
+        assert_eq!(b.line_col(2), (1, 3));
+        assert_eq!(b.line_col(3), (2, 1));
+        assert_eq!(b.line_col(6), (2, 3), "after 'éa' (é is 2 bytes)");
     }
 
     #[test]

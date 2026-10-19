@@ -151,6 +151,8 @@ pub(crate) struct DocModel {
     pub hl: Rc<RowSpans>,
     /// Standalone-image source per row (computed once per version).
     pub images: Rc<Vec<Option<ImageSrc>>>,
+    /// Word count of the note (status bar).
+    pub words: usize,
 }
 
 /// What a rendered row exposes for hit testing: its text layout and the
@@ -200,12 +202,14 @@ impl MekuShell {
                 })
                 .collect(),
         );
+        let words = text.split_whitespace().count();
         let model = DocModel {
             version,
             text,
             rows,
             hl,
             images,
+            words,
         };
         self.doc_models.insert(rel.to_path_buf(), model.clone());
         Some(model)
