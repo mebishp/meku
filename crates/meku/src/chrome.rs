@@ -88,9 +88,7 @@ impl MekuShell {
         let shell = cx.entity();
         let sidebar_shell = shell.clone();
         let palette_shell = shell.clone();
-        let theme_shell = shell.clone();
         let search_shell = shell.clone();
-        let dark = theme::active(cx).dark;
 
         // Breadcrumb: vault › folders › note.
         let theme_colors = cx.theme();
@@ -216,18 +214,6 @@ impl MekuShell {
                 move |_, cx| {
                     palette_shell.update(cx, |v, cx| {
                         v.open_palette(crate::palette::PaletteKind::Commands, cx)
-                    });
-                },
-            ))
-            .child(icon_button(
-                "title-theme",
-                if dark { Ico::Moon } else { Ico::Sun },
-                false,
-                "Choose theme",
-                cx,
-                move |_, cx| {
-                    theme_shell.update(cx, |v, cx| {
-                        v.open_palette(crate::palette::PaletteKind::Themes, cx)
                     });
                 },
             ));
@@ -640,10 +626,8 @@ impl MekuShell {
         );
 
         let footer_shell = cx.entity();
-        let theme_shell = footer_shell.clone();
         let cmd_shell = footer_shell.clone();
         let settings_shell = footer_shell.clone();
-        let dark = theme::active(cx).dark;
         let footer = h_flex()
             .flex_none()
             .px_2()
@@ -660,18 +644,6 @@ impl MekuShell {
                 cx,
                 move |window, cx| {
                     settings_shell.update(cx, |v, cx| v.open_settings(None, window, cx));
-                },
-            ))
-            .child(icon_button(
-                "footer-theme",
-                if dark { Ico::Moon } else { Ico::Sun },
-                false,
-                "Choose theme",
-                cx,
-                move |_, cx| {
-                    theme_shell.update(cx, |v, cx| {
-                        v.open_palette(crate::palette::PaletteKind::Themes, cx)
-                    });
                 },
             ))
             .child(icon_button(

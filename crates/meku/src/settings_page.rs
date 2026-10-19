@@ -25,14 +25,12 @@ actions!(meku_settings, [OpenSettings]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
     Section(Section),
-    Themes,
 }
 
 impl Tab {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Tab::Section(s) => s.label(),
-            Tab::Themes => "Themes",
         }
     }
 
@@ -43,14 +41,11 @@ impl Tab {
             Tab::Section(Section::Editor) => Ico::Live,
             Tab::Section(Section::Markdown) => Ico::Notes,
             Tab::Section(Section::Files) => Ico::Folder,
-            Tab::Themes => Ico::Moon,
         }
     }
 
     pub(crate) fn all() -> Vec<Tab> {
-        let mut v: Vec<Tab> = Section::ALL.iter().map(|s| Tab::Section(*s)).collect();
-        v.push(Tab::Themes);
-        v
+        Section::ALL.iter().map(|s| Tab::Section(*s)).collect()
     }
 }
 
@@ -460,16 +455,23 @@ impl MekuShell {
             for def in hits {
                 body = body.child(self.setting_row(def, scope, &state, cx));
             }
-        } else if tab == Tab::Themes {
-            body = body.child(self.themes_page(scope, &state, cx));
-        } else if let Tab::Section(section) = tab {
+        } else {
+            let Tab::Section(section) = tab;
             body = body.child(
                 div()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(section.label()),
             );
-            for def in DEFS.iter().filter(|d| d.section == section) {
+            if section == Section::Appearance {
+                // Themes live here: pickers, gallery, custom themes.
+                body = body.child(self.themes_page(scope, &state, cx));
+            }
+            let themed = ["follow_system", "theme_light", "theme_dark", "theme"];
+            for def in DEFS
+                .iter()
+                .filter(|d| d.section == section && !themed.contains(&d.key))
+            {
                 body = body.child(self.setting_row(def, scope, &state, cx));
             }
         }
@@ -883,12 +885,7 @@ impl MekuShell {
         let colors = cx.theme();
         let (border, muted) = (colors.border, colors.muted_foreground);
         let active = theme::active(cx).name;
-        let mut page = v_flex().gap_3().child(
-            div()
-                .text_lg()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("Themes"),
-        );
+        let mut page = v_flex().gap_3();
         for key in ["follow_system", "theme_light", "theme_dark", "theme"] {
             if let Some(def) = crate::config::def_for(key) {
                 page = page.child(self.setting_row(def, scope, state, cx));
