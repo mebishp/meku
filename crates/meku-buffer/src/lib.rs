@@ -243,6 +243,8 @@ pub struct OpenBuffer {
     redo: Vec<Snapshot>,
     /// True while consecutive single-character typing may merge into one undo step.
     coalescing: bool,
+    /// Auto-pairing of brackets/quotes/markers while typing (settings toggle).
+    pub auto_close: bool,
 }
 
 impl OpenBuffer {
@@ -271,6 +273,7 @@ impl OpenBuffer {
             undo: Vec::new(),
             redo: Vec::new(),
             coalescing: false,
+            auto_close: true,
         }
     }
 
@@ -1276,12 +1279,163 @@ impl OpenBuffer {
         }
     }
 
+    // -- auto-pairing (F6) ---------------------------------------------------
+
+    fn ch_before(&self, at: usize) -> Option<char> {
+        (at > 0).then(|| {
+            let p = self.prev_boundary(at);
+            self.text
+                .slice(p..at)
+                .to_string()
+                .chars()
+                .next()
+                .unwrap_or(' ')
+        })
+    }
+
+    fn ch_after(&self, at: usize) -> Option<char> {
+        (at < self.text.len()).then(|| {
+            let n = self.next_boundary(at);
+            self.text
+                .slice(at..n)
+                .to_string()
+                .chars()
+                .next()
+                .unwrap_or(' ')
+        })
+    }
+
+    /// Insert `open + close` at the caret with the caret between them.
+    fn insert_pair(&mut self, open: &str, close: &str) {
+        let at = self.caret;
+        let text = format!("{open}{close}");
+        self.edit_region(at..at, &text, at + open.len(), at + open.len());
+    }
+
+    /// Smart typing for one character (IME-free input). Returns `true` when
+    /// the character was fully handled — pair inserted, closer skipped over,
+    /// or selection wrapped — and `false` when the caller should insert it
+    /// as plain text. `code` is true inside a fenced block, where markdown
+    /// markers (`* = ~`) never pair.
+    pub fn type_char(&mut self, c: char, code: bool) -> bool {
+        if !self.auto_close || self.marked.is_some() {
+            return false;
+        }
+        let md_marker = matches!(c, '*' | '_' | '=' | '~') && !code;
+        let sel = self.selection();
+        if sel.start != sel.end {
+            let close = match c {
+                '[' => ']',
+                '(' => ')',
+                '{' => '}',
+                '"' | '`' => c,
+                '*' | '_' if md_marker => c,
+                _ => return false,
+            };
+            let inner = self.text.slice(sel.clone()).to_string();
+            let insert = format!("{c}{inner}{close}");
+            let start = sel.start + c.len_utf8();
+            let end = start + inner.len();
+            self.edit_region(sel, &insert, end, start);
+            return true;
+        }
+        let prev = self.ch_before(self.caret);
+        let next = self.ch_after(self.caret);
+        let alnum = |o: Option<char>| o.is_some_and(char::is_alphanumeric);
+        match c {
+            ')' | ']' | '}' if next == Some(c) => {
+                self.move_right(false);
+                true
+            }
+            '(' | '[' | '{' if !alnum(next) => {
+                let close = match c {
+                    '(' => ")",
+                    '[' => "]",
+                    _ => "}",
+                };
+                self.insert_pair(&c.to_string(), close);
+                true
+            }
+            '"' | '\'' | '`' => {
+                if next == Some(c) && (c != '\'' || !alnum(prev)) {
+                    self.move_right(false);
+                    true
+                } else if prev != Some(c) && !alnum(prev) && !alnum(next) && !(c == '\'' && code) {
+                    self.insert_pair(&c.to_string(), &c.to_string());
+                    true
+                } else {
+                    false
+                }
+            }
+            '*' if md_marker => {
+                if next == Some('*') {
+                    // `*|*` (empty pair) grows to `**|**`; after text the
+                    // star in front is a closer, so this one skips over.
+                    let before_prev = self.ch_before(self.prev_boundary(self.caret));
+                    if prev == Some('*') && !alnum(before_prev) {
+                        self.insert_pair("*", "*");
+                    } else {
+                        self.move_right(false);
+                    }
+                    return true;
+                }
+                let (line_start, body) = self.line_body();
+                let at_line_start = body[..self.caret - line_start]
+                    .chars()
+                    .all(char::is_whitespace);
+                if !at_line_start && !alnum(prev) && prev != Some('*') && !alnum(next) {
+                    self.insert_pair("*", "*");
+                    true
+                } else {
+                    false
+                }
+            }
+            '=' | '~' if md_marker => {
+                if next == Some(c) {
+                    self.move_right(false);
+                    true
+                } else if prev == Some(c)
+                    && !alnum(next)
+                    && self.ch_before(self.prev_boundary(self.caret)) != Some(c)
+                {
+                    // The first marker char is already in the text.
+                    let one = c.to_string();
+                    self.insert_pair(&one, &format!("{one}{one}"));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// True when the caret sits between the halves of an empty auto pair.
+    fn inside_empty_pair(&self) -> bool {
+        matches!(
+            (self.ch_before(self.caret), self.ch_after(self.caret)),
+            (Some('('), Some(')'))
+                | (Some('['), Some(']'))
+                | (Some('{'), Some('}'))
+                | (Some('"'), Some('"'))
+                | (Some('\''), Some('\''))
+                | (Some('`'), Some('`'))
+                | (Some('*'), Some('*'))
+                | (Some('='), Some('='))
+                | (Some('~'), Some('~'))
+        )
+    }
+
     /// `Backspace` with indent awareness: a collapsed caret sitting in a
     /// line's leading whitespace removes back to the previous 2-space stop
     /// (or one tab) instead of a single space. Everything else is a normal
     /// backward delete.
     pub fn backspace(&mut self) {
         if self.selection().start == self.selection().end && self.caret > 0 {
+            if self.auto_close && self.inside_empty_pair() {
+                self.replace(self.caret - 1..self.caret + 1, "", false);
+                return;
+            }
             let (line_start, body) = self.line_body();
             let col = self.caret - line_start;
             let lead = &body[..col.min(body.len())];
@@ -2394,5 +2548,139 @@ mod tests {
         b.move_caret(0, false);
         b.renumber_ordered_at_caret();
         assert_eq!(b.text_string(), "1. a\n   - n\n2. c\n");
+    }
+
+    // -- F6: auto-pairing -----------------------------------------------------
+
+    fn typed(start: &str, caret: usize, chars: &str) -> OpenBuffer {
+        let mut b = buf(start);
+        b.move_caret(caret, false);
+        for c in chars.chars() {
+            if !b.type_char(c, false) {
+                b.insert(&c.to_string());
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn brackets_pair_and_skip_over() {
+        let b = typed("", 0, "(a)");
+        assert_eq!(b.text_string(), "(a)");
+        assert_eq!(b.caret(), 3, "typing the closer skips the auto one");
+        let b = typed("", 0, "[[");
+        assert_eq!(b.text_string(), "[[]]", "wikilink brackets come free");
+        assert_eq!(b.caret(), 2);
+        let b = typed("word", 0, "(");
+        assert_eq!(b.text_string(), "(word", "no pair in front of a word");
+    }
+
+    #[test]
+    fn quotes_respect_apostrophes_and_words() {
+        let b = typed("", 0, "\"hi\"");
+        assert_eq!(b.text_string(), "\"hi\"");
+        assert_eq!(b.caret(), 4);
+        let b = typed("", 0, "don't");
+        assert_eq!(
+            b.text_string(),
+            "don't",
+            "apostrophe after a letter stays single"
+        );
+    }
+
+    #[test]
+    fn markdown_markers_pair_in_prose() {
+        let b = typed("a ", 2, "*");
+        assert_eq!(b.text_string(), "a **");
+        assert_eq!(b.caret(), 3);
+        let b = typed("a ", 2, "**bold**");
+        assert_eq!(b.text_string(), "a **bold**");
+        assert_eq!(b.caret(), 10, "second star expands, closers skip");
+        let b = typed("", 0, "*");
+        assert_eq!(
+            b.text_string(),
+            "*",
+            "line-start star is a bullet, not a pair"
+        );
+        let b = typed("2", 1, "*");
+        assert_eq!(b.text_string(), "2*", "no pair after an alphanumeric");
+        let b = typed("a ", 2, "==hi==");
+        assert_eq!(b.text_string(), "a ==hi==");
+        assert_eq!(b.caret(), 8);
+        let b = typed("a ", 2, "~~x~~");
+        assert_eq!(b.text_string(), "a ~~x~~");
+    }
+
+    #[test]
+    fn backticks_make_fences_not_noise() {
+        let b = typed("", 0, "`code`");
+        assert_eq!(b.text_string(), "`code`");
+        assert_eq!(b.caret(), 6);
+        let b = typed("", 0, "```");
+        assert_eq!(b.text_string(), "```", "three ticks is a fence opener");
+    }
+
+    #[test]
+    fn selection_wraps_instead_of_replacing() {
+        let mut b = buf("make bold\n");
+        b.move_caret(5, false);
+        b.move_caret(9, true);
+        assert!(b.type_char('*', false));
+        assert_eq!(b.text_string(), "make *bold*\n");
+        assert_eq!(
+            b.selected_text(),
+            "bold",
+            "selection stays on the inner text"
+        );
+        assert!(b.type_char('(', false));
+        assert_eq!(b.text_string(), "make *(bold)*\n");
+        b.undo();
+        assert_eq!(
+            b.text_string(),
+            "make *bold*\n",
+            "each wrap is one undo step"
+        );
+        let mut b = buf("x\n");
+        b.select_all();
+        assert!(!b.type_char('a', false), "letters replace as usual");
+    }
+
+    #[test]
+    fn code_fences_skip_markdown_markers() {
+        let mut b = buf("a ");
+        b.move_caret(2, false);
+        assert!(!b.type_char('*', true));
+        assert!(b.type_char('(', true));
+    }
+
+    #[test]
+    fn backspace_deletes_an_empty_pair() {
+        let mut b = typed("", 0, "(");
+        b.backspace();
+        assert_eq!(b.text_string(), "");
+        let mut b = typed("a ", 2, "**");
+        assert_eq!(b.text_string(), "a ****");
+        b.backspace();
+        assert_eq!(
+            b.text_string(),
+            "a **",
+            "one pair of stars goes, one remains"
+        );
+        let mut b = typed("", 0, "(x");
+        b.backspace();
+        assert_eq!(b.text_string(), "()", "non-empty pair: normal delete");
+    }
+
+    #[test]
+    fn auto_close_can_be_turned_off() {
+        let mut b = buf("");
+        b.auto_close = false;
+        assert!(!b.type_char('(', false));
+        b.insert("(");
+        b.insert(")");
+        assert_eq!(b.text_string(), "()");
+        b.move_caret(1, false);
+        b.backspace();
+        assert_eq!(b.text_string(), ")", "plain backspace when disabled");
     }
 }

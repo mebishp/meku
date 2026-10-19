@@ -3510,4 +3510,61 @@ mod ui_tests {
             "tasks swap to plain bullets"
         );
     }
+
+    // -- F6: auto-pairing ---------------------------------------------
+
+    #[test]
+    fn typing_pairs_skips_and_wraps() {
+        run_ui_test("auto_pair", auto_pair_body);
+    }
+
+    fn auto_pair_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "word\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 4);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input(" (", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "word ()\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 6);
+        cx.update_window(window, |_, window, cx| {
+            window.input("[", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "word ([])\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 7);
+        cx.update_window(window, |_, window, cx| {
+            window.input("]", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "word ([])\n",
+            "closer skipped"
+        );
+        assert_eq!(doc_caret(cx, &view, &rel), 8);
+        select_doc_range(cx, &view, 0, 4);
+        cx.update_window(window, |_, window, cx| {
+            window.input("*", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "*word* ([])\n",
+            "selection wrapped"
+        );
+        move_doc_caret(cx, &view, 9); // between "[" and "]"
+        cx.update_window(window, |_, window, cx| {
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "*word* ()\n",
+            "empty pair removed"
+        );
+    }
 }

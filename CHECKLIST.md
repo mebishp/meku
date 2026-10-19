@@ -189,10 +189,12 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [ ] Click a rendered checkbox to toggle (not wired yet — no click target exists in `document.rs`) · fold list items (defer to Build 7 polish)
 - Buffer unit tests (10) + 4 headless UI tests drive the real keystrokes; `test(48+75)` + fmt/clippy green (2026-10-19). Also restored `crates/meku-index` (had been moved under `meku-markdown/`, breaking the workspace manifest).
 
-### F6 Auto-Pairing and Smart Typing (§6) — **later**
-- [ ] Auto-close `()[]{}""''\`\`` + markdown markers `** * == ~~`; skip-over closers; wrap selection
-- [ ] Backspace deletes an empty pair; `[[` wikilink autocomplete (with F9)
-- [ ] Settings toggles (auto-close off, smart quotes/dashes off by default)
+### F6 Auto-Pairing and Smart Typing (§6) — **landed 2026-10-19**
+- [x] Auto-close `()[]{}` `""` `''` `` ` `` and markdown markers `**` `*` `==` `~~`; typing a closer over its twin skips it; selection wraps on `* _ \` [ ( { "` — `OpenBuffer::type_char` (single-char plain typing only; IME composition, ranged input and paste never pair). Guards: no pair before a word/after an alphanumeric (`don't`, `2*3`), line-start `*` stays a bullet, ``` ``` ``` types a fence opener, markers never pair inside code fences, `[[` yields `[[|]]`
+- [x] Backspace in an empty pair deletes both characters
+- [x] Auto-close can be turned off (`OpenBuffer::auto_close`; user-facing toggle lands with the settings UI)
+- [ ] `[[` wikilink autocomplete (with F9) · smart quotes / smart dashes (off by default, not built)
+- Buffer unit tests (8) + 1 headless UI test; `test(49+83)` + fmt/clippy green (2026-10-19).
 
 ### F7 Live Preview Rendering (§7)
 - [x] Render while typing, single surface; syntax hidden unless on that line; reveal on caret entry (Build 4)

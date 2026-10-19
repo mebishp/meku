@@ -1186,6 +1186,7 @@ impl EntityInputHandler for MekuShell {
         let Some(buffer) = self.buffers.get(&rel).cloned() else {
             return;
         };
+        let plain = range.is_none();
         let target = {
             let b = buffer.read(cx);
             match range {
@@ -1193,6 +1194,18 @@ impl EntityInputHandler for MekuShell {
                 None => b.marked().unwrap_or_else(|| b.selection()),
             }
         };
+        // Plain typing (no explicit range, no composition) gets auto-pairing.
+        let mut chars = text.chars();
+        if let (true, Some(ch), None) = (plain, chars.next(), chars.next())
+            && let Some(model) = self.doc_model(&rel, cx)
+        {
+            let code = fence_at(&model, buffer.read(cx).caret()).0;
+            if buffer.update(cx, |b, _| b.type_char(ch, code)) {
+                self.doc_note_edit(&rel);
+                cx.notify();
+                return;
+            }
+        }
         let typing = text.chars().count() == 1 && text != "\n";
         buffer.update(cx, |b, _| b.replace(target, text, typing));
         self.doc_note_edit(&rel);
