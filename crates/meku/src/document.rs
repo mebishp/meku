@@ -298,7 +298,10 @@ impl MekuShell {
         let hls = model.hl.clone();
         let views = self.doc_views.clone();
         let caret_on = self.caret_on;
+        let wrap_cell = self.doc_wrap.clone();
+        let col_width = wrap_cell.get();
         let hover_link = self.hover_link;
+        let find_all: Rc<Vec<(Range<usize>, bool)>> = Rc::new(self.find_highlights(rel));
         let title_input = self.title_inputs.get(rel).cloned();
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
@@ -323,6 +326,12 @@ impl MekuShell {
                 hls[ix].clone(),
                 images[ix].clone(),
                 hover_link == Some(ix),
+                {
+                    let lo = find_all.partition_point(|(r, _)| r.end <= row.src.start);
+                    let hi = lo + find_all[lo..].partition_point(|(r, _)| r.start < row.src.end);
+                    &find_all[lo..hi]
+                },
+                col_width,
                 &shell,
                 &views,
                 window,
@@ -360,6 +369,16 @@ impl MekuShell {
             |_, _, _| {},
             move |bounds, _, window, cx| {
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
+                // Width rows wrap at: the scroll area minus the margins around
+                // the reading column, capped at the column width. The caret
+                // needs it to shape wrapped lines the same way they paint.
+                let base = window.text_style().font_size.to_pixels(window.rem_size());
+                let inner = bounds.size.width - px(2.0 * (16.0 + 24.0));
+                let width = inner.min(base * COLUMN_EM).max(px(0.));
+                if (wrap_cell.get() - width).abs() > px(0.5) {
+                    wrap_cell.set(width);
+                    window.refresh();
+                }
             },
         )
         .absolute()
@@ -374,6 +393,7 @@ impl MekuShell {
             .px_4()
             .child(input_bridge)
             .child(list_body)
+            .children(self.render_find_bar(cx))
             .into_any_element()
     }
     /// Source byte offset for a point hit on row `ix`. Rows without a text
@@ -585,7 +605,11 @@ impl MekuShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.modal_open() || self.tab_mode() == Mode::Read || self.title_focused(window, cx) {
+        if self.modal_open()
+            || self.tab_mode() == Mode::Read
+            || self.title_focused(window, cx)
+            || self.find_focused(window, cx)
+        {
             return;
         }
         self.touch_caret();
@@ -927,6 +951,18 @@ impl MekuShell {
         cx.notify();
     }
 
+    /// Scroll the row holding `offset` into view without moving the caret.
+    pub(crate) fn scroll_to_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let Some(rel) = self.doc_rel() else {
+            return;
+        };
+        if let Some(model) = self.doc_model(&rel, cx) {
+            self.doc_list
+                .scroll_to_reveal_item(row_at(&model.rows, offset));
+        }
+        cx.notify();
+    }
+
     /// Text and utf16 helpers for the input handler: the active note's text.
     fn doc_text(&self, cx: &App) -> Option<(PathBuf, Rc<str>)> {
         let rel = self.doc_rel()?;
@@ -1070,6 +1106,7 @@ fn text_runs(
     selection: Option<(usize, usize)>,
     colored: &[(Range<usize>, Tok)],
     code_row: bool,
+    find: &[(usize, usize, bool)],
     cx: &App,
 ) -> Vec<TextRun> {
     let len = display.text.len();
@@ -1088,6 +1125,10 @@ fn text_runs(
     if let Some((a, b)) = selection {
         cuts.push(a.min(len));
         cuts.push(b.min(len));
+    }
+    for (a, b, _) in find {
+        cuts.push((*a).min(len));
+        cuts.push((*b).min(len));
     }
     cuts.sort_unstable();
     cuts.dedup();
@@ -1122,6 +1163,12 @@ fn text_runs(
                 }
             }
         }
+        if let Some((_, _, current)) = find.iter().find(|(s, e, _)| *s <= a && a < *e) {
+            style.background_color = Some(crate::theme::accent_alpha(
+                cx,
+                if *current { 0.55 } else { 0.28 },
+            ));
+        }
         if selection.is_some_and(|(s, e)| s <= a && a < e) {
             style.background_color = Some(cx.theme().selection);
         }
@@ -1146,22 +1193,27 @@ fn caret_geometry(
     runs: &[TextRun],
     font_size: Pixels,
     index: usize,
+    wrap_width: Option<Pixels>,
 ) -> Option<(Pixels, Pixels, Pixels)> {
     let mut ix = index.min(text.len());
     while ix > 0 && !text.is_char_boundary(ix) {
         ix -= 1;
     }
-    let shaped = window
-        .text_system()
-        .shape_line(text.to_string().into(), font_size, runs, None);
-    let (prefix, _) = shaped.split_at(ix);
-    let font_box = shaped.ascent + shaped.descent;
     let line_height = window
         .text_style()
         .line_height
         .to_pixels(font_size.into(), window.rem_size());
-    let y_offset = (line_height - font_box) / 2.0;
-    Some((prefix.width(), y_offset, font_box))
+    // Shape with the width the row actually wraps at, so the caret lands on
+    // the right visual line of a long, soft-wrapped paragraph.
+    let lines = window
+        .text_system()
+        .shape_text(text.to_string().into(), font_size, runs, wrap_width, None)
+        .ok()?;
+    let line = lines.first()?;
+    let at = line.position_for_index(ix, line_height)?;
+    let font_box = line.ascent() + line.descent();
+    let y_offset = at.y + (line_height - font_box) / 2.0;
+    Some((at.x, y_offset, font_box))
 }
 
 /// Caret as a plain element inside the row: `x`/`y` are row-local (the text
@@ -1200,6 +1252,8 @@ fn row_element(
     colored: RowColors,
     image: Option<ImageSrc>,
     pointer: bool,
+    find_hits: &[(Range<usize>, bool)],
+    col_width: Pixels,
     shell: &Entity<MekuShell>,
     views: &RowViews,
     window: &mut Window,
@@ -1289,18 +1343,29 @@ fn row_element(
     if row.kind == RowKind::Code {
         base.font_family = cx.theme().mono_font_family.clone();
     }
+    // Find matches on this row, in display coordinates.
+    let find_disp: Vec<(usize, usize, bool)> = find_hits
+        .iter()
+        .map(|(r, cur)| {
+            (
+                display.to_disp(r.start.max(row.src.start)),
+                display.to_disp(r.end.min(row.src.end)),
+                *cur,
+            )
+        })
+        .collect();
     let runs = text_runs(
         &display,
         &base,
         sel_disp,
         colored.as_deref().map_or(&[], |c| c.as_slice()),
         row.kind == RowKind::Code,
+        &find_disp,
         cx,
     );
     let font_size = base_font * heading_scale(row.kind);
-    // Shaped before `runs`/`display` move into the element and row view.
-    let caret_geo =
-        caret_disp.and_then(|index| caret_geometry(window, &display.text, &runs, font_size, index));
+    // Kept for caret shaping below, once this row's padding is known.
+    let caret_shape = caret_disp.map(|index| (display.text.clone(), runs.clone(), index));
     let styled = StyledText::new(display.text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     if let Some(slot) = views.borrow_mut().get_mut(ix) {
@@ -1389,6 +1454,15 @@ fn row_element(
         }
     }
     el = el.child(styled);
+    let right_pad = if row.kind == RowKind::Code && colored.is_none() {
+        px(8.)
+    } else {
+        px(0.)
+    };
+    let wrap = (col_width > px(0.)).then(|| (col_width - text_x - right_pad).max(px(40.)));
+    let caret_geo = caret_shape.and_then(|(text, runs, index)| {
+        caret_geometry(window, &text, &runs, font_size, index, wrap)
+    });
     if let Some((advance, y_offset, cheight)) = caret_geo {
         el = el.child(caret_element(
             text_x + advance,

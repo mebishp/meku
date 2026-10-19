@@ -1,5 +1,6 @@
 mod document;
 mod explorer;
+mod find;
 mod palette;
 mod theme;
 
@@ -155,6 +156,8 @@ pub struct MekuShell {
     doc_models: HashMap<PathBuf, document::DocModel>,
     /// Row layouts from the last render, used for pointer and IME hit testing.
     doc_views: document::RowViews,
+    /// Width document rows wrap at (set while painting; used by the caret).
+    doc_wrap: Rc<std::cell::Cell<Pixels>>,
     /// Scroll and measurement state of the document list.
     doc_list: ListState,
     /// File the list state currently describes.
@@ -175,6 +178,9 @@ pub struct MekuShell {
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
     palette: Option<palette::PaletteState>,
+    find: Option<find::FindState>,
+    /// Open the find bar on the next render (`true` = with replace).
+    find_request: Option<bool>,
     palette_request: Option<palette::PaletteKind>,
     /// Command chosen in the palette, run on the next render (needs a window).
     run_after: Option<palette::Command>,
@@ -211,6 +217,7 @@ impl MekuShell {
             last_edit: HashMap::new(),
             doc_models: HashMap::new(),
             doc_views: Rc::new(RefCell::new(Vec::new())),
+            doc_wrap: Rc::new(std::cell::Cell::new(px(0.))),
             doc_list: ListState::new(0, ListAlignment::Top, px(600.)),
             doc_list_rel: None,
             conflict: None,
@@ -225,6 +232,8 @@ impl MekuShell {
             caret_touch: Instant::now(),
             hover_link: None,
             palette: None,
+            find: None,
+            find_request: None,
             palette_request: None,
             run_after: None,
             pending_scroll: None,
@@ -282,6 +291,9 @@ impl MekuShell {
             .ok()
             .and_then(|v| v.parse().ok())
             .map(|row| (row, 3));
+        if std::env::var("MEKU_FIND").is_ok() {
+            self.open_find(std::env::var("MEKU_REPLACE").is_ok(), cx);
+        }
         match std::env::var("MEKU_PALETTE").as_deref() {
             Ok("files") => self.open_palette(palette::PaletteKind::Files, cx),
             Ok("commands") => self.open_palette(palette::PaletteKind::Commands, cx),
@@ -1515,7 +1527,11 @@ impl MekuShell {
     }
 
     fn on_cancel_overlay(&mut self, _: &CancelOverlay, _: &mut Window, cx: &mut Context<Self>) {
-        self.close_palette(true, cx);
+        if self.palette_open() || self.naming.is_some() || self.pending_delete.is_some() {
+            self.close_palette(true, cx);
+        } else {
+            self.close_find(cx);
+        }
         self.cancel_naming(cx);
         self.cancel_delete(cx);
     }
@@ -1551,6 +1567,19 @@ impl MekuShell {
         cx: &mut Context<Self>,
     ) {
         self.open_palette(palette::PaletteKind::GotoLine, cx);
+    }
+
+    fn on_open_find(&mut self, _: &find::OpenFind, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_find(false, cx);
+    }
+    fn on_open_replace(&mut self, _: &find::OpenReplace, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_find(true, cx);
+    }
+    fn on_find_next(&mut self, _: &find::FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.find_step(1, cx);
+    }
+    fn on_find_prev(&mut self, _: &find::FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.find_step(-1, cx);
     }
 
     fn on_cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
@@ -2081,6 +2110,7 @@ impl Render for MekuShell {
         self.ensure_naming_input(window, cx);
         self.ensure_title_input(window, cx);
         self.ensure_palette(window, cx);
+        self.ensure_find(window, cx);
         let focus = self.focus_handle.clone();
         if std::mem::take(&mut self.focus_doc) && self.naming.is_none() {
             window.focus(&focus, cx);
@@ -2097,6 +2127,10 @@ impl Render for MekuShell {
             .key_context("Meku")
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::on_cycle_theme))
+            .on_action(cx.listener(Self::on_open_find))
+            .on_action(cx.listener(Self::on_open_replace))
+            .on_action(cx.listener(Self::on_find_next))
+            .on_action(cx.listener(Self::on_find_prev))
             .on_action(cx.listener(Self::on_open_file_finder))
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_open_vault_search))
@@ -2229,6 +2263,10 @@ fn main() {
             KeyBinding::new("ctrl-shift-p", palette::OpenCommandPalette, Some("Meku")),
             KeyBinding::new("ctrl-shift-f", palette::OpenVaultSearch, Some("Meku")),
             KeyBinding::new("ctrl-g", palette::OpenGoToLine, Some("Meku")),
+            KeyBinding::new("ctrl-f", find::OpenFind, Some("Meku")),
+            KeyBinding::new("ctrl-h", find::OpenReplace, Some("Meku")),
+            KeyBinding::new("f3", find::FindNext, Some("Meku")),
+            KeyBinding::new("shift-f3", find::FindPrev, Some("Meku")),
             KeyBinding::new("up", palette::PaletteUp, Some("Palette")),
             KeyBinding::new("down", palette::PaletteDown, Some("Palette")),
             KeyBinding::new("ctrl-alt-t", CycleTheme, Some("Meku")),
@@ -2348,6 +2386,7 @@ mod ui_tests {
         DocSoftBreak, DocToggleComment, DocToggleTask, DocUndo, DocUp, DocWordRight, MekuShell,
         Mode, NamingMode, NewTab, NextTab, OpenFolder, Save, ToggleSidebar,
     };
+    use gpui_kit::Focusable as _;
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, Bounds, Entity, KeyBinding, Pixels, TestAppContext, px, size};
@@ -2404,6 +2443,10 @@ mod ui_tests {
                     Some("Meku"),
                 ),
                 KeyBinding::new("ctrl-g", crate::palette::OpenGoToLine, Some("Meku")),
+                KeyBinding::new("ctrl-f", crate::find::OpenFind, Some("Meku")),
+                KeyBinding::new("ctrl-h", crate::find::OpenReplace, Some("Meku")),
+                KeyBinding::new("f3", crate::find::FindNext, Some("Meku")),
+                KeyBinding::new("shift-f3", crate::find::FindPrev, Some("Meku")),
                 KeyBinding::new("up", crate::palette::PaletteUp, Some("Palette")),
                 KeyBinding::new("down", crate::palette::PaletteDown, Some("Palette")),
                 KeyBinding::new("ctrl-t", NewTab, Some("Meku")),
@@ -4773,6 +4816,129 @@ mod ui_tests {
             doc_caret(cx, &view, &rel),
             14,
             "search hit jumps to its line"
+        );
+    }
+
+    // -- find & replace -----------------------------------------------
+
+    fn find_state(
+        cx: &mut TestAppContext,
+        view: &Entity<MekuShell>,
+    ) -> Option<(usize, Option<usize>)> {
+        cx.update(|cx| {
+            view.read_with(cx, |s, _| {
+                s.find.as_ref().map(|f| (f.matches.len(), f.current))
+            })
+        })
+    }
+
+    #[test]
+    fn find_bar_counts_steps_and_closes() {
+        run_ui_test("find_steps", find_steps_body);
+    }
+
+    fn find_steps_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one Two three\ntwo and TWO\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        step(cx, window, |w, cx| w.press("ctrl-f", cx));
+        step(cx, window, |_, _| {});
+        assert!(Self_find_open(cx, &view), "Ctrl+F opens the bar");
+        step(cx, window, |w, cx| w.input("two", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            find_state(cx, &view),
+            Some((3, Some(0))),
+            "case-insensitive: three hits"
+        );
+        assert_eq!(
+            cx.update(|cx| view.read_with(cx, |s, cx| s.buffers[&rel].read(cx).selected_text())),
+            "Two",
+            "the current match is selected in the note"
+        );
+        step(cx, window, |w, cx| w.press("enter", cx));
+        assert_eq!(
+            find_state(cx, &view),
+            Some((3, Some(1))),
+            "Enter goes to the next"
+        );
+        step(cx, window, |w, cx| w.press("shift-enter", cx));
+        assert_eq!(
+            find_state(cx, &view),
+            Some((3, Some(0))),
+            "Shift+Enter goes back"
+        );
+        step(cx, window, |w, cx| w.press("f3", cx));
+        assert_eq!(find_state(cx, &view), Some((3, Some(1))), "F3 also steps");
+        // Typing keeps going to the find field, never the note.
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "one Two three\ntwo and TWO\n"
+        );
+        step(cx, window, |w, cx| w.press("escape", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(find_state(cx, &view), None, "Esc closes the bar");
+    }
+
+    #[allow(non_snake_case)]
+    fn Self_find_open(cx: &mut TestAppContext, view: &Entity<MekuShell>) -> bool {
+        find_state(cx, view).is_some()
+    }
+
+    #[test]
+    fn replace_one_and_all_with_undo() {
+        run_ui_test("find_replace", find_replace_body);
+    }
+
+    fn find_replace_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "cat cat\ncat\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        step(cx, window, |w, cx| w.press("ctrl-h", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.input("cat", cx));
+        step(cx, window, |_, _| {});
+        // Move focus to the replace field and type the replacement.
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.find
+                    .as_ref()
+                    .unwrap()
+                    .replace
+                    .update(cx, |_, cx| cx.notify());
+            })
+        });
+        cx.update_window(window, |_, window, cx| {
+            let input = view.read_with(cx, |s, _| s.find.as_ref().unwrap().replace.clone());
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        })
+        .unwrap();
+        step(cx, window, |w, cx| w.input("dog", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.click("replace-one", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "dog cat\ncat\n",
+            "replaces the current hit"
+        );
+        step(cx, window, |w, cx| w.click("replace-all", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "dog dog\ndog\n",
+            "replace all"
+        );
+        assert_eq!(find_state(cx, &view).map(|s| s.0), Some(0), "no cat left");
+        step(cx, window, |w, cx| w.press("escape", cx));
+        step(cx, window, |_, _| {});
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |w, cx| w.press("ctrl-z", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "dog cat\ncat\n",
+            "replace all is one undo step"
         );
     }
 }

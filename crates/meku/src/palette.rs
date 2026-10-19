@@ -55,6 +55,8 @@ pub(crate) enum Command {
     CloseTab,
     ToggleSidebar,
     CycleMode,
+    FindInNote,
+    ReplaceInNote,
     SearchVault,
     GoToLine,
     ThemePicker,
@@ -73,6 +75,8 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::CloseTab, "Close tab", "Ctrl+W"),
     (Command::ToggleSidebar, "Toggle sidebar", "Ctrl+B"),
     (Command::CycleMode, "Cycle Edit / Live / Read", "Ctrl+E"),
+    (Command::FindInNote, "Find in note", "Ctrl+F"),
+    (Command::ReplaceInNote, "Find and replace in note", "Ctrl+H"),
     (Command::SearchVault, "Search in all notes", "Ctrl+Shift+F"),
     (Command::GoToLine, "Go to line…", "Ctrl+G"),
     (Command::ThemePicker, "Theme: choose…", ""),
@@ -397,6 +401,8 @@ impl MekuShell {
                     cx.notify();
                 }
             }
+            Command::FindInNote => self.open_find(false, cx),
+            Command::ReplaceInNote => self.open_find(true, cx),
             Command::SearchVault => self.open_palette(PaletteKind::Search, cx),
             Command::GoToLine => self.open_palette(PaletteKind::GotoLine, cx),
             Command::ThemePicker => self.open_palette(PaletteKind::Themes, cx),

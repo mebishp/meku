@@ -1664,6 +1664,42 @@ impl OpenBuffer {
         self.renumber_ordered_from(idx);
     }
 
+    /// Apply several replacements as one undo step (find & replace all).
+    /// `edits` are `(range, text)` in ascending, non-overlapping order; the
+    /// caret and anchor shift with the text before them.
+    pub fn replace_ranges(&mut self, edits: &[(Range<usize>, String)]) {
+        if edits.is_empty() {
+            return;
+        }
+        self.push_undo();
+        self.redo.clear();
+        let shift = |pos: usize| -> usize {
+            let mut p = pos as isize;
+            for (range, text) in edits {
+                if range.end <= pos {
+                    p += text.len() as isize - (range.end - range.start) as isize;
+                } else if range.start < pos {
+                    p = range.start as isize
+                        + edits
+                            .iter()
+                            .take_while(|(r, _)| r.start < range.start)
+                            .map(|(r, t)| t.len() as isize - (r.end - r.start) as isize)
+                            .sum::<isize>();
+                    break;
+                }
+            }
+            p.max(0) as usize
+        };
+        let (caret, anchor) = (shift(self.caret), shift(self.anchor));
+        for (range, text) in edits.iter().rev() {
+            self.apply_edit(range.clone(), text);
+        }
+        self.caret = caret.min(self.text.len());
+        self.anchor = anchor.min(self.text.len());
+        self.marked = None;
+        self.coalescing = false;
+    }
+
     /// Flip the task box whose `[ ] ` / `[x] ` starts at byte `at` (a
     /// checkbox click). Caret and selection stay where they are; one undo
     /// step. No-op when the bytes there are not a task box.
@@ -2982,5 +3018,23 @@ mod tests {
         assert_eq!(b.text_string(), "- [x] a\n- [ ] b\n");
         b.undo();
         assert_eq!(b.text_string(), "- [x] a\n- [x] b\n", "one undo step");
+    }
+
+    #[test]
+    fn replace_ranges_is_one_undo_step_and_keeps_the_caret_place() {
+        let mut b = buf("aa bb aa cc aa\n");
+        b.move_caret(9, false); // before "cc"
+        b.replace_ranges(&[
+            (0..2, "X".into()),
+            (6..8, "YYY".into()),
+            (12..14, "".into()),
+        ]);
+        assert_eq!(b.text_string(), "X bb YYY cc \n");
+        assert_eq!(b.caret(), 9 - 1 + 1, "shifted by the earlier edits only");
+        assert!(b.dirty);
+        b.undo();
+        assert_eq!(b.text_string(), "aa bb aa cc aa\n", "one undo step");
+        b.replace_ranges(&[]);
+        assert_eq!(b.text_string(), "aa bb aa cc aa\n");
     }
 }

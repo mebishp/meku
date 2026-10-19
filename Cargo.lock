@@ -3895,6 +3895,7 @@ dependencies = [
  "meku-markdown",
  "meku-vault",
  "notify",
+ "regex",
  "rfd",
  "serde",
  "serde_json",

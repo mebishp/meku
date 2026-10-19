@@ -207,6 +207,13 @@ pub fn scrim(cx: &App) -> gpui_kit::Hsla {
     gpui_kit::hsla(0.0, 0.0, 0.0, if active(cx).dark { 0.5 } else { 0.3 })
 }
 
+/// The active accent color at the given opacity (find highlights etc.).
+pub fn accent_alpha(cx: &App, alpha: f32) -> gpui_kit::Hsla {
+    let mut c: gpui_kit::Hsla = gpui_kit::rgb(active(cx).accent).into();
+    c.a = alpha;
+    c
+}
+
 // -- color math -------------------------------------------------------------
 
 fn channels(hex: u32) -> [f32; 3] {
