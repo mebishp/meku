@@ -6697,4 +6697,61 @@ mod ui_tests {
             "the end of the bar is the end of the note: row {end}"
         );
     }
+
+    #[test]
+    fn clicking_below_or_beside_the_text_places_the_caret_at_the_last_word() {
+        run_ui_test("click_below", click_below_body);
+    }
+
+    fn click_below_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let body = "First line\n\nlast words here\n\n\n";
+        let (view, window, _dir) = open_note_in(cx, 1100.0, 700.0, body);
+        for _ in 0..2 {
+            step(cx, window, |_, _| {});
+        }
+        let caret = |cx: &mut TestAppContext| {
+            view.read_with(&*cx, |s, cx| {
+                s.buffers[&s.doc_rel().unwrap()].read(cx).caret()
+            })
+        };
+        move_doc_caret(cx, &view, 0);
+        step(cx, window, |_, _| {});
+        // Press far below every row, in the empty area of the editor.
+        cx.update_window(window, |_, w, cx| {
+            let area = w.find("md-scroll").bounds();
+            let at = gpui_kit::point(area.size.width / 2.0, area.size.height - gpui_kit::px(20.0));
+            w.click_at("md-scroll", at, cx);
+        })
+        .unwrap();
+        step(cx, window, |_, _| {});
+        let end_of_text = body.find("here").unwrap() + "here".len();
+        assert_eq!(caret(cx), end_of_text, "caret lands after the last word");
+        // And the editor has focus: typing goes into the note.
+        step(cx, window, |w, cx| w.input("!", cx));
+        let text = view.read_with(&*cx, |s, cx| {
+            s.buffers[&s.doc_rel().unwrap()].read(cx).text_string()
+        });
+        assert!(text.contains("here!"), "typing reaches the note: {text:?}");
+        // A press in the margin beside a row lands on that row.
+        move_doc_caret(cx, &view, 0);
+        step(cx, window, |_, _| {});
+        cx.update_window(window, |_, w, cx| {
+            let area = w.find("md-scroll").bounds();
+            let row = w.find(("doc-row", 2usize)).bounds();
+            let at = gpui_kit::point(
+                gpui_kit::px(30.0),
+                row.origin.y - area.origin.y + row.size.height / 2.0,
+            );
+            w.click_at("md-scroll", at, cx);
+        })
+        .unwrap();
+        step(cx, window, |_, _| {});
+        let start = body.find("last").unwrap();
+        let c = caret(cx);
+        assert!(
+            (start..=start + "last words here!".len()).contains(&c),
+            "the margin press lands on the row: {c}"
+        );
+    }
 }

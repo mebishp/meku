@@ -452,6 +452,30 @@ impl MekuShell {
             if ix + 1 == rows.len() {
                 item = item.pb(window.viewport_size().height * 0.45);
             }
+            // A press in the margins beside a row (or in the room under the
+            // last one) still places the caret: on the nearest text, or at the
+            // end of the note when it is below all of it.
+            let margin_shell = shell.clone();
+            let last = ix + 1 == rows.len();
+            item = item.on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                margin_shell.update(cx, |view, cx| {
+                    let focus = view.focus_handle.clone();
+                    window.focus(&focus, cx);
+                    let below = last
+                        && view
+                            .doc_views
+                            .borrow()
+                            .get(ix)
+                            .and_then(|v| v.as_ref())
+                            .is_none_or(|v| ev.position.y > v.layout.bounds().bottom());
+                    if below {
+                        view.doc_click_below(cx);
+                    } else {
+                        view.doc_pointer(ix, ev.position, ev.modifiers.shift, ev.click_count, cx);
+                    }
+                });
+            });
             item.child(div().w_full().max_w(base * column_em).child(el))
                 .into_any_element()
         })
@@ -489,6 +513,16 @@ impl MekuShell {
             // Zoom scales the document only (chrome keeps its size): every row
             // measure derives from this container's text size.
             .text_size(cx.theme().font_size * crate::theme::zoom(cx))
+            .on_mouse_down(MouseButton::Left, {
+                let shell = cx.entity();
+                move |_, window, cx| {
+                    shell.update(cx, |view, cx| {
+                        let focus = view.focus_handle.clone();
+                        window.focus(&focus, cx);
+                        view.doc_click_below(cx);
+                    });
+                }
+            })
             .child(input_bridge)
             .child(list_body)
             .child(self.row_estimates(hint))
@@ -551,6 +585,31 @@ impl MekuShell {
                 view.display.to_src(idx)
             })
         })
+    }
+
+    /// A press below all the text: focus the note and put the caret at the end
+    /// of its last line of text (not on a trailing blank line).
+    pub(crate) fn doc_click_below(&mut self, cx: &mut Context<Self>) {
+        if self.modal_open() {
+            return;
+        }
+        let Some(rel) = self.doc_rel() else { return };
+        let Some(end) = self.doc_models.get(&rel).map(|m| {
+            m.rows
+                .iter()
+                .rev()
+                .find(|r| r.kind != RowKind::Blank)
+                .map_or(m.text.len(), |r| r.src.end)
+        }) else {
+            return;
+        };
+        self.touch_caret();
+        self.flush_title(cx);
+        if let Some(buffer) = self.buffers.get(&rel).cloned() {
+            buffer.update(cx, |b, _| b.move_caret(end, false));
+        }
+        self.update_slash(false, cx);
+        cx.notify();
     }
 
     /// Pointer press on row `ix`: place the caret (or extend the selection).
@@ -1435,6 +1494,8 @@ fn title_element(input: &Entity<InputState>, base: Pixels) -> AnyElement {
     div()
         .id("doc-title")
         .test_support()
+        // The title field owns its presses; they are not the note's margin.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .w_full()
         .mb(base * 0.5)
         // The input pads 8px on each side; pull it back so the title text
@@ -2333,6 +2394,9 @@ fn row_element(
         .relative()
         .w_full()
         .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
+            // The row owns the press; the margins and the empty space around
+            // the text handle their own.
+            cx.stop_propagation();
             down_shell.update(cx, |view, cx| {
                 let focus = view.focus_handle.clone();
                 window.focus(&focus, cx);

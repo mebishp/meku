@@ -392,6 +392,7 @@ impl MekuShell {
         let mut bar = v_flex()
             .id("find-bar")
             .test_support()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .absolute()
             .top(px(8.))
             .right(px(16.))
