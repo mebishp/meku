@@ -287,6 +287,36 @@ pub fn heading_slug(title: &str) -> String {
         .collect()
 }
 
+/// Title of the first level-1 heading outside code fences, trimmed and
+/// without closing `#`s. `None` when the note has no H1 or it is empty.
+pub fn first_h1(text: &str) -> Option<String> {
+    build_rows(text).iter().find_map(|row| {
+        if row.kind != RowKind::Heading(1) {
+            return None;
+        }
+        let line = text[row.src.clone()].trim_start();
+        let title = line.trim_start_matches('#').trim();
+        let title = title.trim_end_matches('#').trim_end();
+        (!title.is_empty()).then(|| title.to_string())
+    })
+}
+
+/// A file stem for `title`: path separators and characters Windows/Linux
+/// tools dislike are dropped, edges trimmed, length capped. `None` when
+/// nothing usable is left.
+pub fn title_to_stem(title: &str) -> Option<String> {
+    let cleaned: String = title
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned: String = cleaned.chars().take(100).collect();
+    let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
 /// Build one row per `\n`-separated line. An empty text yields one blank row.
 pub fn build_rows(text: &str) -> Vec<Row> {
     let spans = content_spans(text);
@@ -915,5 +945,27 @@ mod tests {
     fn slugs_follow_github_rules() {
         assert_eq!(heading_slug("My Part: 2!"), "my-part-2");
         assert_eq!(heading_slug("  snake_case-ok "), "snake_case-ok");
+    }
+
+    #[test]
+    fn first_h1_skips_fences_and_lower_levels() {
+        assert_eq!(
+            first_h1("## Sub\n# Real ##\n# Later\n").as_deref(),
+            Some("Real")
+        );
+        assert_eq!(
+            first_h1("```\n# code\n```\n# After\n").as_deref(),
+            Some("After")
+        );
+        assert_eq!(first_h1("text only\n"), None);
+        assert_eq!(first_h1("# \n"), None);
+    }
+
+    #[test]
+    fn titles_become_safe_stems() {
+        assert_eq!(title_to_stem("Plan: Q1/Q2?").as_deref(), Some("Plan Q1Q2"));
+        assert_eq!(title_to_stem("  a   b  ").as_deref(), Some("a b"));
+        assert_eq!(title_to_stem("..hidden.").as_deref(), Some("hidden"));
+        assert_eq!(title_to_stem("///"), None);
     }
 }

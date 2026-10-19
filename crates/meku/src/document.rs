@@ -901,6 +901,7 @@ fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
         });
     }
     if bits.contains(InlineStyle::CODE) {
+        style.font_family = cx.theme().mono_font_family.clone();
         style.color = cx.theme().accent;
     }
     if bits.contains(InlineStyle::LINK) {
@@ -1141,6 +1142,9 @@ fn row_element(
     let mut base = window.text_style().clone();
     if matches!(row.kind, RowKind::Heading(_)) {
         base.font_weight = FontWeight::BOLD;
+    }
+    if row.kind == RowKind::Code {
+        base.font_family = cx.theme().mono_font_family.clone();
     }
     let runs = text_runs(
         &display,

@@ -295,3 +295,11 @@ _Fonts and colors are **excluded** by decision; only spacing, margins, layout, c
 - [x] Window default 1100×760, minimum 640×420; "Outline" label in sentence case (no tracked-out all-caps); file-changed banner uses guideline copy (`Reload` / `Keep my version`)
 - [ ] Skipped on purpose: 1.7 line height (caret geometry depends on text metrics) · caret glide / marker fade (needs reserved marker slots) · drawn 5px bullets · per-line rounded code corners (seams) · slash menu, find bar, scrollbars, toasts, typewriter mode, overwrite caret (belong to their own builds)
 - Tests: column width/centering, 56px top offset, 40px narrow-window padding, caret width; `test(55+…)` + fmt/clippy green (2026-10-19). Not verified visually — needs a graphical session.
+
+## Section 6 — New note flow + fonts (2026-10-19)
+
+- [x] **New note = no dialog.** `+ Note`, the context menu and `Ctrl+T` (when a mekuto is open) create `Untitled.md` (`Untitled 2.md`, … on collision) containing `# Untitled`, open it focused, and select the heading text so typing names it. Folder create and rename keep their dialog.
+- [x] **Heading ⇄ file name.** A note is *linked* when its file stem already equals its first H1 (always true for app-created notes; also any existing note that matches). After a save (Ctrl+S or the 800ms autosave) a changed first H1 renames the file (`title_to_stem`: strips `/ \ : * ? " < > |`, controls, edge dots/spaces, 100 chars). Tabs/buffers follow; a taken name or an empty/unusable heading leaves the file alone.
+- [x] Fonts: body/UI prefers **Inter** → Adwaita Sans → Cantarell → Liberation Sans; code and inline code use **JetBrains Mono** → Adwaita Mono → DejaVu Sans Mono → Liberation Mono (first installed wins; applied in the app entry only so tests keep default metrics). Headings are **bold** at every level.
+- Tests: `first_h1`/`title_to_stem` (2), UI test for untitled → typed title → renamed file + tab; full suite + fmt/clippy green.
+

@@ -21,6 +21,7 @@ use gpui_kit::*;
 // InteractiveElement (div().on_click / overflow_y_scroll) is not in the globs.
 use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
 use meku_buffer::OpenBuffer;
+use meku_markdown::live::{first_h1, title_to_stem};
 use meku_vault::{OpenTab, Session, VaultEvent};
 
 actions!(
@@ -168,6 +169,12 @@ pub struct MekuShell {
     /// for 600ms after input).
     caret_on: bool,
     caret_touch: Instant,
+    /// Notes whose file name tracks their first H1, with the heading the
+    /// name was last synced to. A note joins when its stem already matches
+    /// its heading on open (every note created from the app does).
+    title_link: HashMap<PathBuf, String>,
+    /// Move keyboard focus to the document on the next render.
+    focus_doc: bool,
 }
 
 impl MekuShell {
@@ -198,6 +205,8 @@ impl MekuShell {
             notice: None,
             caret_on: true,
             caret_touch: Instant::now(),
+            title_link: HashMap::new(),
+            focus_doc: false,
         };
         this.start_watcher_pump(cx);
         this.start_caret_blink(cx);
@@ -249,6 +258,91 @@ impl MekuShell {
         .detach();
     }
 
+    // -- title <-> file name ---------------------------------------------
+
+    fn stem_of(rel: &Path) -> String {
+        rel.file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Link the note's name to its first H1 when they already agree.
+    fn link_title_if_matching(&mut self, rel: &Path, text: &str) {
+        if let Some(title) = first_h1(text)
+            && title_to_stem(&title).as_deref() == Some(Self::stem_of(rel).as_str())
+        {
+            self.title_link.insert(rel.to_path_buf(), title);
+        }
+    }
+
+    /// After a save: when a linked note's first H1 changed, rename the file
+    /// to match. Skips when the new name is unusable or already taken (the
+    /// link stays, so a later edit can still succeed).
+    fn sync_title_to_name(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        let Some(prev) = self.title_link.get(rel).cloned() else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get(rel).cloned() else {
+            return;
+        };
+        let text = buffer.read(cx).text_string();
+        let Some(title) = first_h1(&text) else {
+            return;
+        };
+        if title == prev {
+            return;
+        }
+        let Some(stem) = title_to_stem(&title) else {
+            return;
+        };
+        if stem == Self::stem_of(rel) {
+            self.title_link.insert(rel.to_path_buf(), title);
+            return;
+        }
+        let ext = rel.extension().and_then(|e| e.to_str()).unwrap_or("md");
+        // A taken name is an Err: keep the old file name for now.
+        if let Ok(new_rel) = self.explorer.rename(rel, &format!("{stem}.{ext}")) {
+            self.title_link.remove(rel);
+            self.title_link.insert(new_rel.clone(), title);
+            self.retarget_tabs(rel, &new_rel, cx);
+            self.explorer.refresh();
+            self.explorer.reveal(&new_rel);
+        }
+        cx.notify();
+    }
+
+    /// Create `Untitled.md` (or `Untitled 2.md`, ...) holding `# Untitled`,
+    /// open it, and select the heading text so typing names the note.
+    fn new_untitled_note(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let Some(root) = self.explorer.root().map(Path::to_path_buf) else {
+            return;
+        };
+        let name = (1..)
+            .map(|n| match n {
+                1 => "Untitled".to_string(),
+                n => format!("Untitled {n}"),
+            })
+            .find(|name| !root.join(&dir).join(format!("{name}.md")).exists())
+            .unwrap_or_else(|| "Untitled".to_string());
+        match self.explorer.create_note(&dir, &name) {
+            Ok(rel) => {
+                let _ = std::fs::write(root.join(&rel), format!("# {name}\n"));
+                self.explorer.refresh();
+                self.explorer.reveal(&rel);
+                self.open_file_inner(&rel, cx);
+                if let Some(buffer) = self.buffers.get(&rel).cloned() {
+                    buffer.update(cx, |b, _| b.select_range(2..2 + name.len()));
+                }
+                self.focus_doc = true;
+                self.touch_caret();
+                self.notice = None;
+            }
+            Err(e) => self.notice = Some(e.to_string()),
+        }
+        cx.notify();
+    }
+
     // -- tabs ----------------------------------------------------------
 
     fn tab_title(rel: &Path) -> String {
@@ -280,6 +374,7 @@ impl MekuShell {
         };
         match OpenBuffer::load(rel.to_path_buf(), &abs) {
             Ok(buffer) => {
+                self.link_title_if_matching(rel, &buffer.text_string());
                 self.buffers.insert(rel.to_path_buf(), cx.new(|_| buffer));
                 self.tabs.push(EditorTab {
                     rel: Some(rel.to_path_buf()),
@@ -298,6 +393,10 @@ impl MekuShell {
     }
 
     fn new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer.is_open() {
+            self.new_untitled_note(PathBuf::new(), cx);
+            return;
+        }
         let n = self.tabs.len() + 1;
         self.tabs.push(EditorTab {
             rel: None,
@@ -868,6 +967,7 @@ impl MekuShell {
     fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(rel) = self.tabs.get(self.active_tab).and_then(|t| t.rel.clone()) {
             self.save_buffer(&rel, cx);
+            self.sync_title_to_name(&rel, cx);
         }
     }
 
@@ -918,6 +1018,7 @@ impl MekuShell {
             .collect();
         for rel in due {
             self.save_buffer(&rel, cx);
+            self.sync_title_to_name(&rel, cx);
         }
     }
 
@@ -1071,6 +1172,12 @@ impl MekuShell {
         cx: &mut Context<Self>,
     ) {
         self.pending_delete = None;
+        if mode == NamingMode::NewNote {
+            // No dialog: the note appears as `Untitled` with its heading
+            // selected, and renaming happens by editing that heading.
+            self.new_untitled_note(dir, cx);
+            return;
+        }
         self.naming = Some(Naming {
             mode,
             dir,
@@ -1188,6 +1295,9 @@ impl MekuShell {
                 let moved = new.join(suffix);
                 entity.update(cx, |buffer, _| buffer.rel = moved.clone());
                 self.buffers.insert(moved.clone(), entity);
+                if let Some(title) = self.title_link.remove(&key) {
+                    self.title_link.insert(moved.clone(), title);
+                }
                 if let Some(at) = self.last_edit.remove(&key) {
                     self.last_edit.insert(moved.clone(), at);
                 }
@@ -1752,6 +1862,9 @@ impl Render for MekuShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_naming_input(window, cx);
         let focus = self.focus_handle.clone();
+        if std::mem::take(&mut self.focus_doc) && self.naming.is_none() {
+            window.focus(&focus, cx);
+        }
         let title = match (self.explorer.is_open(), self.tabs.get(self.active_tab)) {
             (true, Some(tab)) => format!("Meku — {} — {}", self.explorer.root_name(), tab.title),
             (true, None) => format!("Meku — {}", self.explorer.root_name()),
@@ -1847,6 +1960,33 @@ impl Render for MekuShell {
     }
 }
 
+/// Prefer a clean humanist sans for the interface/document and a coding
+/// mono for code, using whichever of the candidates is installed; anything
+/// else keeps the theme default.
+fn apply_fonts(cx: &mut App) {
+    let installed = cx.text_system().all_font_names();
+    let pick = |candidates: &[&str]| -> Option<SharedString> {
+        candidates
+            .iter()
+            .find(|c| installed.iter().any(|n| n == **c))
+            .map(|c| SharedString::from(c.to_string()))
+    };
+    let sans = pick(&["Inter", "Adwaita Sans", "Cantarell", "Liberation Sans"]);
+    let mono = pick(&[
+        "JetBrains Mono",
+        "Adwaita Mono",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+    ]);
+    let theme = cx.global_mut::<Theme>();
+    if let Some(sans) = sans {
+        theme.font_family = sans;
+    }
+    if let Some(mono) = mono {
+        theme.mono_font_family = mono;
+    }
+}
+
 fn main() {
     let initial_dir = std::env::args().nth(1);
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
@@ -1854,6 +1994,7 @@ fn main() {
     app.run(move |cx| {
         // Required: initializes gpui-component theming/global state.
         gpui_kit::init(cx);
+        apply_fonts(cx);
 
         cx.bind_keys([
             KeyBinding::new("ctrl-b", ToggleSidebar, Some("Meku")),
@@ -2120,11 +2261,11 @@ mod ui_tests {
     }
 
     #[test]
-    fn enter_commits_naming_and_opens_note() {
-        run_ui_test("enter_commits", enter_commits_body);
+    fn new_note_is_created_untitled_with_selected_heading() {
+        run_ui_test("new_untitled", new_untitled_body);
     }
 
-    fn enter_commits_body(cx: &mut TestAppContext) {
+    fn new_untitled_body(cx: &mut TestAppContext) {
         let (view, window) = boot(cx);
         let dir = open_fixture(cx, &view);
 
@@ -2135,17 +2276,52 @@ mod ui_tests {
         });
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click("naming-input", cx);
-            // Accept the "Untitled.md" preset as-is.
-            window.press("enter", cx);
         })
         .unwrap();
 
-        assert!(dir.path().join("Untitled.md").exists());
+        // No dialog: the note exists, holds its own name as H1, and is open.
+        let path = dir.path().join("Untitled.md");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Untitled\n");
         let (naming_open, tabs) = cx
             .update(|cx| view.read_with(cx, |shell, _| (shell.naming.is_some(), shell.tabs.len())));
-        assert!(!naming_open);
+        assert!(!naming_open, "creating a note shows no window");
         assert_eq!(tabs, 2); // Welcome + Untitled.md
+        let rel = PathBuf::from("Untitled.md");
+        let selected = cx
+            .update(|cx| view.read_with(cx, |shell, cx| shell.buffers[&rel].read(cx).selection()));
+        assert_eq!(
+            selected,
+            2..10,
+            "heading text is selected, ready to type over"
+        );
+
+        // Typing the new title and saving renames the file.
+        cx.update_window(window, |_, window, cx| {
+            window.input("Plan", cx);
+            window.press("ctrl-s", cx);
+        })
+        .unwrap();
+        assert!(!path.exists(), "old name is gone");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("Plan.md")).unwrap(),
+            "# Plan\n"
+        );
+        let active = cx.update(|cx| view.read_with(cx, |shell, _| shell.doc_rel()));
+        assert_eq!(
+            active,
+            Some(PathBuf::from("Plan.md")),
+            "tab follows the rename"
+        );
+
+        // A second new note does not collide.
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx);
+                shell.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx);
+            });
+        });
+        assert!(dir.path().join("Untitled.md").exists());
+        assert!(dir.path().join("Untitled 2.md").exists());
     }
 
     #[test]
