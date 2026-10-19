@@ -195,6 +195,14 @@ fn parse_list_marker(rest: &str) -> Option<(usize, MarkerKind)> {
     Some((digits + 1 + spaces, MarkerKind::Ordered(num, sep)))
 }
 
+/// A single-token `http(s)://` / `mailto:` destination.
+fn looks_like_url(s: &str) -> bool {
+    let s = s.trim();
+    !s.is_empty()
+        && !s.contains(char::is_whitespace)
+        && (s.starts_with("http://") || s.starts_with("https://") || s.starts_with("mailto:"))
+}
+
 /// All-whitespace tail of a (newline-stripped) line.
 fn blank_tail(s: &str) -> bool {
     s.chars().all(char::is_whitespace)
@@ -1277,6 +1285,52 @@ impl OpenBuffer {
         if digits > 0 {
             self.apply_edit(start + leading..start + leading + digits, &n.to_string());
         }
+    }
+
+    // -- links (F9) ------------------------------------------------------------
+
+    /// `Ctrl+K` on a fresh link: a selection becomes `[text](|)` (or
+    /// `[|](url)` when the selection is itself a URL); with nothing selected
+    /// an empty `[]()` appears with the caret in the label.
+    pub fn insert_link(&mut self) {
+        let sel = self.selection();
+        let at = sel.start;
+        if sel.start == sel.end {
+            self.edit_region(at..at, "[]()", at + 1, at + 1);
+            return;
+        }
+        let text = self.text.slice(sel.clone()).to_string();
+        if looks_like_url(&text) {
+            let caret = at + 1;
+            self.edit_region(sel, &format!("[]({text})"), caret, caret);
+        } else {
+            let caret = at + 1 + text.len() + 2;
+            self.edit_region(sel, &format!("[{text}]()"), caret, caret);
+        }
+    }
+
+    /// Select a byte range (anchor at `start`, caret at `end`).
+    pub fn select_range(&mut self, range: Range<usize>) {
+        self.anchor = range.start.min(self.text.len());
+        self.caret = range.end.min(self.text.len());
+        self.coalescing = false;
+    }
+
+    /// Paste `text`. A URL pasted over a non-URL selection turns the
+    /// selection into `[selection](url)`; anything else replaces as usual.
+    pub fn paste(&mut self, text: &str) {
+        let sel = self.selection();
+        let url = text.trim();
+        if sel.start != sel.end && looks_like_url(url) {
+            let inner = self.text.slice(sel.clone()).to_string();
+            if !looks_like_url(&inner) && !inner.contains('\n') {
+                let insert = format!("[{inner}]({url})");
+                let end = sel.start + insert.len();
+                self.edit_region(sel, &insert, end, end);
+                return;
+            }
+        }
+        self.insert(text);
     }
 
     // -- auto-pairing (F6) ---------------------------------------------------
@@ -2682,5 +2736,56 @@ mod tests {
         b.move_caret(1, false);
         b.backspace();
         assert_eq!(b.text_string(), ")", "plain backspace when disabled");
+    }
+
+    // -- F9: links ---------------------------------------------------------------
+
+    #[test]
+    fn ctrl_k_builds_links() {
+        let mut b = buf("see docs now\n");
+        b.select_range(4..8);
+        b.insert_link();
+        assert_eq!(b.text_string(), "see [docs]() now\n");
+        assert_eq!(b.caret(), 11, "caret waits in the url slot");
+        let mut b = buf("https://a.dev\n");
+        b.select_range(0..13);
+        b.insert_link();
+        assert_eq!(b.text_string(), "[](https://a.dev)\n");
+        assert_eq!(b.caret(), 1, "url selection: label first");
+        let mut b = buf("x\n");
+        b.move_caret(1, false);
+        b.insert_link();
+        assert_eq!(b.text_string(), "x[]()\n");
+        assert_eq!(b.caret(), 2);
+        b.undo();
+        assert_eq!(b.text_string(), "x\n");
+    }
+
+    #[test]
+    fn pasting_a_url_over_a_selection_links_it() {
+        let mut b = buf("read the docs\n");
+        b.select_range(9..13);
+        b.paste("  https://a.dev/x \n");
+        assert_eq!(b.text_string(), "read the [docs](https://a.dev/x)\n");
+        let mut b = buf("plain\n");
+        b.move_caret(5, false);
+        b.paste("https://a.dev");
+        assert_eq!(
+            b.text_string(),
+            "plainhttps://a.dev\n",
+            "lone URL stays bare"
+        );
+        let mut b = buf("two words\n");
+        b.select_range(0..9);
+        b.paste("not a url");
+        assert_eq!(b.text_string(), "not a url\n");
+        let mut b = buf("https://old.dev\n");
+        b.select_range(0..15);
+        b.paste("https://new.dev");
+        assert_eq!(
+            b.text_string(),
+            "https://new.dev\n",
+            "URL over URL replaces"
+        );
     }
 }

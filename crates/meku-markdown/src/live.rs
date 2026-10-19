@@ -11,6 +11,7 @@
 //! caret and pointer land on the same character the user sees.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
@@ -159,6 +160,131 @@ fn style_from_bits(bits: u8) -> InlineStyle {
     .into_iter()
     .filter(|flag| bits & flag != 0)
     .fold(InlineStyle::empty(), |style, flag| style.with(flag))
+}
+
+/// An inline link found on one source line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkRef {
+    /// Byte range of the whole `[text](dest)` in the line.
+    pub range: Range<usize>,
+    pub target: String,
+}
+
+/// The inline link of `line` covering byte `col`, if any. Reference-style
+/// links with no inline destination are not resolvable here and yield `None`.
+pub fn link_at(line: &str, col: usize) -> Option<LinkRef> {
+    Parser::new_ext(line, parser_options())
+        .into_offset_iter()
+        .find_map(|(event, range)| match event {
+            Event::Start(Tag::Link { dest_url, .. })
+                if range.start <= col && col < range.end && !dest_url.is_empty() =>
+            {
+                Some(LinkRef {
+                    range,
+                    target: dest_url.to_string(),
+                })
+            }
+            _ => None,
+        })
+}
+
+/// What a link destination points at, resolved against the note holding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// `http(s)://`, `mailto:` — handed to the system.
+    External(String),
+    /// `#heading` inside the current note.
+    Anchor(String),
+    /// A path relative to the mekuto root (never escapes it), with an
+    /// optional `#heading`.
+    Path {
+        rel: PathBuf,
+        anchor: Option<String>,
+    },
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Some(hex) = s.get(i + 1..i + 3)
+            && let Ok(v) = u8::from_str_radix(hex, 16)
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Classify `dest` as written in the note at `note_rel` (root-relative).
+/// `None` for empty destinations and paths that climb out of the root.
+pub fn classify_link(dest: &str, note_rel: &Path) -> Option<LinkTarget> {
+    let dest = dest.trim();
+    if dest.is_empty() {
+        return None;
+    }
+    let lower = dest.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+    {
+        return Some(LinkTarget::External(dest.to_string()));
+    }
+    if let Some(anchor) = dest.strip_prefix('#') {
+        return Some(LinkTarget::Anchor(percent_decode(anchor)));
+    }
+    if lower.contains("://") {
+        return None; // unknown scheme: never guess
+    }
+    let (path, anchor) = match dest.split_once('#') {
+        Some((p, a)) => (p, Some(percent_decode(a))),
+        None => (dest, None),
+    };
+    let path = percent_decode(path);
+    let mut parts: Vec<std::ffi::OsString> = if path.starts_with('/') {
+        Vec::new()
+    } else {
+        note_rel
+            .parent()
+            .map(|d| d.iter().map(|c| c.to_os_string()).collect())
+            .unwrap_or_default()
+    };
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            c => parts.push(c.into()),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(LinkTarget::Path {
+        rel: parts.iter().collect(),
+        anchor,
+    })
+}
+
+/// GitHub-style heading slug: lowercase, spaces to `-`, punctuation dropped.
+pub fn heading_slug(title: &str) -> String {
+    title
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            '-' | '_' => Some(c),
+            c if c.is_alphanumeric() => Some(c),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build one row per `\n`-separated line. An empty text yields one blank row.
@@ -730,5 +856,64 @@ mod tests {
         assert_eq!(standalone_image("text ![x](y.png)"), None);
         assert_eq!(standalone_image("[link](x.png)"), None);
         assert_eq!(standalone_image("![x]()"), None);
+    }
+
+    #[test]
+    fn link_at_finds_the_link_under_a_column() {
+        let line = "see [docs](a/b.md#top) now";
+        let hit = link_at(line, 6).unwrap();
+        assert_eq!(hit.target, "a/b.md#top");
+        assert_eq!(&line[hit.range.clone()], "[docs](a/b.md#top)");
+        assert!(link_at(line, 1).is_none(), "outside the link");
+        assert!(link_at(line, 23).is_none(), "after the link");
+        assert_eq!(link_at("<https://x.io>", 3).unwrap().target, "https://x.io");
+        assert!(link_at("[[x]]", 2).is_none(), "wikilinks stay literal");
+    }
+
+    #[test]
+    fn classify_resolves_against_the_note() {
+        let note = Path::new("notes/day.md");
+        assert_eq!(
+            classify_link("https://a.dev/x", note),
+            Some(LinkTarget::External("https://a.dev/x".into()))
+        );
+        assert_eq!(
+            classify_link("#My%20Part", note),
+            Some(LinkTarget::Anchor("My Part".into()))
+        );
+        assert_eq!(
+            classify_link("../top.md#intro", note),
+            Some(LinkTarget::Path {
+                rel: PathBuf::from("top.md"),
+                anchor: Some("intro".into())
+            })
+        );
+        assert_eq!(
+            classify_link("sub/a%20b.md", note),
+            Some(LinkTarget::Path {
+                rel: PathBuf::from("notes/sub/a b.md"),
+                anchor: None
+            })
+        );
+        assert_eq!(
+            classify_link("/abs.md", note),
+            Some(LinkTarget::Path {
+                rel: PathBuf::from("abs.md"),
+                anchor: None
+            })
+        );
+        assert_eq!(
+            classify_link("../../out.md", note),
+            None,
+            "cannot leave the root"
+        );
+        assert_eq!(classify_link("ftp://h/f", note), None);
+        assert_eq!(classify_link("  ", note), None);
+    }
+
+    #[test]
+    fn slugs_follow_github_rules() {
+        assert_eq!(heading_slug("My Part: 2!"), "my-part-2");
+        assert_eq!(heading_slug("  snake_case-ok "), "snake_case-ok");
     }
 }

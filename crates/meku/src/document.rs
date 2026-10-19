@@ -18,7 +18,10 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 use meku_markdown::InlineStyle;
 use meku_markdown::highlight::{Tok, highlight};
-use meku_markdown::live::{Display, Row, RowKind, build_rows, project, row_at};
+use meku_markdown::live::{
+    Display, LinkTarget, Row, RowKind, build_rows, classify_link, heading_slug, link_at, project,
+    row_at,
+};
 
 use crate::MekuShell;
 use crate::Mode;
@@ -58,6 +61,7 @@ pub(crate) enum DocKey {
     JoinLines,
     ToggleComment,
     SoftBreak,
+    Link,
     Indent,
     Outdent,
     ListBullet,
@@ -363,6 +367,80 @@ impl MekuShell {
         cx.notify();
     }
 
+    /// Follow the link under `pos` in row `ix`. Returns `false` when the
+    /// pointer is not over a followable link (the click then acts normally).
+    pub(crate) fn doc_follow_link(
+        &mut self,
+        ix: usize,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.modal_open() {
+            return false;
+        }
+        let (Some(rel), Some(src)) = (self.doc_rel(), self.row_source(ix, pos)) else {
+            return false;
+        };
+        let Some(model) = self.doc_models.get(&rel) else {
+            return false;
+        };
+        let Some(row) = model.rows.get(ix) else {
+            return false;
+        };
+        if row.kind == RowKind::Code {
+            return false;
+        }
+        let line = &model.text[row.src.clone()];
+        let Some(link) = link_at(line, src.saturating_sub(row.src.start)) else {
+            return false;
+        };
+        match classify_link(&link.target, &rel) {
+            Some(target) => self.follow_link(target, cx),
+            None => false,
+        }
+    }
+
+    /// Open a classified link: external → system handler, `#x` → heading in
+    /// this note, path → note tab (plus heading). Missing targets do nothing.
+    pub(crate) fn follow_link(&mut self, target: LinkTarget, cx: &mut Context<Self>) -> bool {
+        match target {
+            LinkTarget::External(url) => {
+                cx.open_url(&url);
+                true
+            }
+            LinkTarget::Anchor(name) => self.goto_heading(&name, cx),
+            LinkTarget::Path { rel, anchor } => {
+                let Some(root) = self.explorer.root() else {
+                    return false;
+                };
+                if !meku_vault::is_note(&rel) || !root.join(&rel).is_file() {
+                    return false;
+                }
+                self.open_file(&rel, cx);
+                if let Some(name) = anchor {
+                    self.goto_heading(&name, cx);
+                }
+                true
+            }
+        }
+    }
+
+    /// Jump to the heading whose slug (or exact title) matches `name`.
+    fn goto_heading(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        let slug = heading_slug(name);
+        let hit = self
+            .doc_outline(cx)
+            .into_iter()
+            .find(|(_, title, _)| heading_slug(title) == slug || title == name);
+        match hit {
+            Some((_, _, at)) => {
+                self.doc_goto(at, cx);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Pointer drag over row `ix`: extend the selection to the pointer.
     pub(crate) fn doc_drag(&mut self, ix: usize, pos: Point<Pixels>, cx: &mut Context<Self>) {
         if self.modal_open() {
@@ -609,6 +687,30 @@ impl MekuShell {
                     true
                 }
             }
+            DocKey::Link => {
+                // Caret inside an existing link: select its destination to
+                // retype. Otherwise start a new one.
+                let (line_start, caret) = {
+                    let b = buffer.read(cx);
+                    let row = model.rows.get(row_at(&model.rows, b.caret()));
+                    (row.map(|r| r.src.clone()), b.caret())
+                };
+                let existing = line_start.and_then(|src| {
+                    let line = &model.text[src.clone()];
+                    link_at(line, caret - src.start).and_then(|l| {
+                        let whole = &line[l.range.clone()];
+                        let open = whole.rfind("](")?;
+                        let dest =
+                            src.start + l.range.start + open + 2..src.start + l.range.end - 1;
+                        (dest.start <= dest.end).then_some(dest)
+                    })
+                });
+                buffer.update(cx, |b, _| match existing {
+                    Some(dest) => b.select_range(dest),
+                    None => b.insert_link(),
+                });
+                true
+            }
             DocKey::SoftBreak => {
                 buffer.update(cx, |b, _| b.soft_break());
                 true
@@ -644,7 +746,7 @@ impl MekuShell {
             }
             DocKey::Paste => match cx.read_from_clipboard().and_then(|item| item.text()) {
                 Some(text) => {
-                    buffer.update(cx, |b, _| b.insert(&text));
+                    buffer.update(cx, |b, _| b.paste(&text));
                     true
                 }
                 None => false,
@@ -945,6 +1047,10 @@ fn row_element(
             down_shell.update(cx, |view, cx| {
                 let focus = view.focus_handle.clone();
                 window.focus(&focus, cx);
+                let follow = ev.modifiers.control || view.tab_mode() == Mode::Read;
+                if follow && view.doc_follow_link(ix, ev.position, cx) {
+                    return;
+                }
                 view.doc_pointer(ix, ev.position, ev.modifiers.shift, cx);
             });
         })

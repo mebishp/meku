@@ -72,6 +72,7 @@ actions!(
         DocJoinLines,
         DocToggleComment,
         DocSoftBreak,
+        DocLink,
         DocIndent,
         DocOutdent,
         DocListBullet,
@@ -714,6 +715,9 @@ impl MekuShell {
     }
     fn on_doc_soft_break(&mut self, _: &DocSoftBreak, window: &mut Window, cx: &mut Context<Self>) {
         self.doc_key(document::DocKey::SoftBreak, false, window, cx);
+    }
+    fn on_doc_link(&mut self, _: &DocLink, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Link, false, window, cx);
     }
     fn on_doc_indent(&mut self, _: &DocIndent, window: &mut Window, cx: &mut Context<Self>) {
         self.doc_key(document::DocKey::Indent, false, window, cx);
@@ -1771,6 +1775,7 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_doc_join_lines))
             .on_action(cx.listener(Self::on_doc_toggle_comment))
             .on_action(cx.listener(Self::on_doc_soft_break))
+            .on_action(cx.listener(Self::on_doc_link))
             .on_action(cx.listener(Self::on_doc_indent))
             .on_action(cx.listener(Self::on_doc_outdent))
             .on_action(cx.listener(Self::on_doc_list_bullet))
@@ -1863,6 +1868,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-enter", DocInsertLineAbove, Some("Meku")),
             KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
             KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
+            KeyBinding::new("ctrl-k", DocLink, Some("Meku")),
             KeyBinding::new("tab", DocIndent, Some("Meku")),
             KeyBinding::new("shift-tab", DocOutdent, Some("Meku")),
             KeyBinding::new("ctrl-shift-8", DocListBullet, Some("Meku")),
@@ -1912,7 +1918,7 @@ mod ui_tests {
         CancelOverlay, CloseTab, CycleMode, DocBackspace, DocCopy, DocCut, DocDelete,
         DocDeleteLine, DocDeleteToLineStart, DocDeleteWordBack, DocDeleteWordFwd, DocDocEnd,
         DocDocStart, DocDown, DocDuplicateLine, DocEnd, DocEnter, DocHome, DocIndent,
-        DocInsertLineAbove, DocInsertLineBelow, DocJoinLines, DocLeft, DocListBullet,
+        DocInsertLineAbove, DocInsertLineBelow, DocJoinLines, DocLeft, DocLink, DocListBullet,
         DocListOrdered, DocListTask, DocMoveLineDown, DocMoveLineUp, DocOutdent, DocPageDown,
         DocPageUp, DocPaste, DocRedo, DocRight, DocSelectAll, DocSelectDocEnd, DocSelectDocStart,
         DocSelectDown, DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectPageDown,
@@ -2007,6 +2013,7 @@ mod ui_tests {
                 KeyBinding::new("ctrl-shift-enter", DocInsertLineAbove, Some("Meku")),
                 KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
                 KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
+                KeyBinding::new("ctrl-k", DocLink, Some("Meku")),
                 KeyBinding::new("tab", DocIndent, Some("Meku")),
                 KeyBinding::new("shift-tab", DocOutdent, Some("Meku")),
                 KeyBinding::new("ctrl-shift-8", DocListBullet, Some("Meku")),
@@ -3660,5 +3667,61 @@ mod ui_tests {
         })
         .unwrap();
         assert_eq!(doc_caret(cx, &view, &rel), 35, "click jumps to the heading");
+    }
+
+    // -- F9: links ----------------------------------------------------
+
+    #[test]
+    fn following_links_opens_notes_and_headings() {
+        run_ui_test("follow_links", follow_links_body);
+    }
+
+    fn follow_links_body(cx: &mut TestAppContext) {
+        use meku_markdown::live::{LinkTarget, classify_link};
+        let (view, _window, dir) =
+            open_note_in(cx, 1200.0, 800.0, "# Top\n[go](other.md#second)\n");
+        std::fs::write(dir.path().join("other.md"), "# First\n\n## Second\n").unwrap();
+        let go = |cx: &mut TestAppContext, dest: &str| -> bool {
+            let from = view.read_with(&*cx, |s, _| s.doc_rel()).unwrap();
+            let target: Option<LinkTarget> = classify_link(dest, &from);
+            cx.update(|cx| view.update(cx, |s, cx| target.is_some_and(|t| s.follow_link(t, cx))))
+        };
+        assert!(go(cx, "other.md#second"));
+        let rel = view.read_with(&*cx, |s, _| s.doc_rel()).unwrap();
+        assert_eq!(rel, PathBuf::from("other.md"), "link opened the note");
+        assert_eq!(doc_caret(cx, &view, &rel), 9, "and jumped to the heading");
+        assert!(go(cx, "#first"), "in-note anchor by slug");
+        assert_eq!(doc_caret(cx, &view, &rel), 0);
+        assert!(!go(cx, "missing.md"), "dangling links do nothing");
+        assert!(!go(cx, "#nope"));
+        assert!(!go(cx, "../../etc/passwd"), "never leaves the mekuto");
+        assert_eq!(view.read_with(&*cx, |s, _| s.doc_rel()).unwrap(), rel);
+    }
+
+    #[test]
+    fn ctrl_k_links_the_selection_and_edits_existing() {
+        run_ui_test("ctrl_k", ctrl_k_body);
+    }
+
+    fn ctrl_k_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "see docs\n[a](b.md)\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        select_doc_range(cx, &view, 4, 8);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-k", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "see [docs]()\n[a](b.md)\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 11);
+        // Caret inside the second link: Ctrl+K selects its destination.
+        move_doc_caret(cx, &view, 16);
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-k", cx);
+            window.input("c.md", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "see [docs]()\n[a](c.md)\n");
     }
 }

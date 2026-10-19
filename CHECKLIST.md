@@ -16,7 +16,7 @@ _Plan efficiently before writing app code. Research done by 4 subagents (feature
 - [x] Inventory Zed UX patterns (titlebar, tabs, palette+finder split, project panel, outline, theme, keymap, status, toasts)
 - [x] Freeze `mekuto` v0.1 definition: plain folder + `.md` files + `.meku/session.json` (sidecar only, portable, git-clean)
 - [x] Freeze GFM subset: headings, emphasis/strong/strike, lists, task lists, code fence/inline, tables, quote, hr, links/images, autolinks, raw-HTML passthrough (sanitized)
-- [x] Freeze explicit deferrals: `[[wikilinks]]`, embeds, backlinks, graph/canvas, tags pane, frontmatter UI, math, mermaid, vim, plugins/sync/publish, terminal/AI
+- [x] Freeze explicit deferrals: wikilinks (dropped for good), embeds, backlinks, graph/canvas, tags pane, frontmatter UI, math, mermaid, vim, plugins/sync/publish, terminal/AI
 - [ ] Write MVP acceptance criteria into `docs/acceptance.md` (12 criteria: open mekuto <1s/100 files, file ops, live-preview round-trip, tabs+dirty, Ctrl-P <100ms/1k files, search, palette, outline ≤200ms, status bar, settings persist, crash recovery ≤2s loss, GFM fixture zero panics)
 - [x] Freeze keymap defaults (Linux): `Ctrl-P` finder · `Ctrl-Shift-P` palette · `Ctrl-B` explorer · `Ctrl-,` settings · `Ctrl-N/W/T` note/close/tab · `Ctrl-S` save · `Ctrl-F` find · `Ctrl-E` edit/live/read cycle (Build 5) · `Ctrl+←/→` word jump · `Ctrl+Backspace/Delete` word delete · `Ctrl+Shift+Backspace` delete-line-start · `Ctrl+Home/End` doc ends · PageUp/Down · smart `Home` (Build 5.x) · `Alt+↑/↓` move line · `Ctrl+Shift+D/K` duplicate/delete line · `Ctrl+Enter/Shift+Enter` insert below/above · `Ctrl+J` join lines · `Ctrl+/` comment toggle in code (F3) · `Shift+Enter` soft break, fence-aware `Enter` continuation (F4)
 - [ ] Freeze `session.json` schema v1 (`version`, `active_tab`, `open_tabs[{path,cursor,scroll,pinned}]`, `explorer{expanded,auto_reveal}`) + corrupt-file rule (backup to `session.corrupt-<ts>.json`, start empty, never crash)
@@ -30,7 +30,7 @@ my-mekuto/
     ├── session.json
     └── settings.json (optional override; else global)
 ```
-Rules: only `*.md/*.markdown` are notes · `.meku/` hidden from tree + search · rename rewrites nothing (no links yet) · delete confirms · external edit → Reload/Keep-mine prompt.
+Rules: only `*.md/*.markdown` are notes · `.meku/` hidden from tree + search · rename rewrites nothing (no link rewriting yet) · delete confirms · external edit → Reload/Keep-mine prompt.
 
 ### 1B. Performance optimisation plan (budgets + techniques, before code)
 
@@ -193,7 +193,7 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [x] Auto-close `()[]{}` `""` `''` `` ` `` and markdown markers `**` `*` `==` `~~`; typing a closer over its twin skips it; selection wraps on `* _ \` [ ( { "` — `OpenBuffer::type_char` (single-char plain typing only; IME composition, ranged input and paste never pair). Guards: no pair before a word/after an alphanumeric (`don't`, `2*3`), line-start `*` stays a bullet, ``` ``` ``` types a fence opener, markers never pair inside code fences, `[[` yields `[[|]]`
 - [x] Backspace in an empty pair deletes both characters
 - [x] Auto-close can be turned off (`OpenBuffer::auto_close`; user-facing toggle lands with the settings UI)
-- [ ] `[[` wikilink autocomplete (with F9) · smart quotes / smart dashes (off by default, not built)
+- [ ] Smart quotes / smart dashes (off by default, not built)
 - Buffer unit tests (8) + 1 headless UI test; `test(49+83)` + fmt/clippy green (2026-10-19).
 
 ### F7 Live Preview Rendering (§7)
@@ -206,7 +206,6 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [ ] Tables as grids (Build 6/13)
 - [ ] Footnotes with click preview; comments `%%…%%` hidden; emoji shortcodes (defer)
 - [ ] Superscript/subscript
-- [ ] `![[embed]]` inspection — deferred (no wikilinks in v0.1)
 
 ### F8 Source / Live / Reading modes (§8) — **Build 5, landed**
 - [x] Source/Edit mode: raw markdown (fences highlighted)
@@ -215,8 +214,13 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [x] Ctrl+E cycle + buttons; mode preserved per document session (needs session.json write check)
 - [x] Reading mode shares theme/typography
 
-### F9 Links / Wikilinks / Embeds (§9) — **defer v0.1** (no wikilinks/backlinks; `[[x]]` renders literally)
-- [ ] Full set per feature file (autocomplete, alias, anchors, block ids, follow, hover preview, broken-link highlighting)
+### F9 Links (§9) — plain markdown links only (wikilinks/embeds/backlinks are out of scope; `[[x]]` renders literally)
+- [x] Links render as clickable text with the URL hidden until the caret enters (Build 4)
+- [x] Ctrl+Click follows a link (any click in Read mode too): http(s)/mailto → system handler; relative `.md` (percent-decoded, `..` resolved, never leaves the mekuto) → opens/switches tab; `#heading` / `note.md#heading` → GitHub-style slug jump. Pure logic in `meku_markdown::live::{link_at, classify_link, heading_slug}`; missing targets do nothing
+- [x] Ctrl+K inserts or edits a link — selection → `[text](|)` (URL selection → `[|](url)`), empty → `[|]()`, caret inside an existing link selects its destination
+- [x] Paste a URL over selected text creates `[text](url)`; a lone URL stays bare (`OpenBuffer::paste`)
+- [ ] Broken-link highlighting when a relative target doesn't exist
+- Wikilinks removed from scope entirely (checklist + feature file). Tests: markdown(3) + buffer(2) + 2 headless UI; fmt/clippy green (2026-10-19).
 
 ### F10 Tags / Properties / Frontmatter (§10) — **defer v0.1**
 - [ ] Tags autocomplete + highlight; YAML frontmatter parsed as properties + properties UI; aliases/titles
@@ -248,7 +252,7 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 
 ### F17 Images and Media (§17) — partially landed
 - [x] Standalone image rows render inline (Build 5)
-- [ ] Drag-and-drop / paste-to-insert into attachment folder; `![[img.png|300]]` sizes
+- [ ] Drag-and-drop / paste-to-insert into attachment folder
 - [ ] Video/audio/PDF embeds (optional); alt-text captions polish
 
 ### F18 Paste and Clipboard Handling (§18) — later

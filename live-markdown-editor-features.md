@@ -88,7 +88,6 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 - [ ] Typing a closing character over an existing one skips it
 - [ ] Wrap selection with a marker when typing `*`, `_`, `` ` ``, `[`, `(` with text selected
 - [ ] Backspace inside an empty pair deletes both characters
-- [ ] Auto-close `[[` for wikilinks with autocomplete
 - [ ] Smart quotes option (off by default)
 - [ ] Smart dashes option (`--` to em dash, optional)
 - [ ] Autocomplete brackets can be toggled off in settings
@@ -104,7 +103,7 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 - [ ] Bold, italic, strikethrough, highlight (`==text==`), inline code
 - [ ] Superscript and subscript (where supported)
 - [ ] Links rendered as clickable text, with the URL hidden until focused
-- [ ] Images rendered inline with `![alt](src)` and `![[embed]]`
+- [ ] Images rendered inline with `![alt](src)`
 - [ ] Horizontal rules rendered as lines
 - [ ] Blockquotes styled with a left border
 - [ ] Callouts (`> [!note]`, `> [!warning]`, etc.) with collapsible `+` and `-` states
@@ -113,7 +112,6 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 - [ ] Mermaid diagrams rendered from fenced code blocks (optional)
 - [ ] Tables rendered as grids with alignment respected
 - [ ] Footnotes `[^1]` rendered with hover or click preview
-- [ ] Embedded notes and transclusion (`![[note#heading]]`)
 - [ ] Comments `%% hidden %%` hidden from preview
 - [ ] Emoji shortcodes rendered (`:smile:`)
 - [ ] Task checkboxes rendered as clickable boxes
@@ -131,19 +129,13 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 
 ---
 
-## 9. Links, Wikilinks, and Embeds
+## 9. Links
 
-- [ ] `[[wikilink]]` syntax with autocomplete from known files and headings
-- [ ] `[[link|alias]]` display text
-- [ ] `[[note#heading]]` and `[[note#^block-id]]` anchors
-- [ ] Block IDs (`^id`) created and inserted by command
 - [ ] Ctrl+Click (or Cmd+Click) follows a link
-- [ ] Hover preview of linked notes
 - [ ] Paste a URL over selected text creates `[text](url)`
 - [ ] Paste a URL alone keeps it as a bare link (or converts to a title, optional)
 - [ ] Broken link highlighting when the target does not exist
 - [ ] Autocomplete for external URLs from history (optional)
-- [ ] Backlinks display (side panel, optional for editor scope)
 
 ---
 
@@ -242,7 +234,6 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 - [ ] Drag and drop an image into the editor to insert and save it
 - [ ] Paste an image from clipboard to insert and save it
 - [ ] Image insertion writes to a configured attachment folder
-- [ ] Resize images with a size suffix (`![[img.png|300]]`)
 - [ ] Drag image handle to resize (optional)
 - [ ] Video and audio embeds (optional)
 - [ ] PDF embed (optional)
@@ -347,7 +338,7 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 5. Source mode with syntax highlighting
 6. Live preview (cursor-aware syntax hiding and inline rendering)
 7. Tables, code blocks, and math
-8. Links, wikilinks, embeds, and autocomplete
+8. Links
 9. Slash commands and command palette
 10. Find and replace, outline, and folding
 11. Paste handling, images, and drag and drop
