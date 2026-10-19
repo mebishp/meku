@@ -7,6 +7,7 @@ rust-version = "1.92"
 [dependencies]
 meku-table = { workspace = true }
 pulldown-cmark = { workspace = true }
+memchr = "2"
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-highlight = "0.25"

@@ -604,31 +604,241 @@ pub fn title_to_stem(title: &str) -> Option<String> {
 
 /// Build one row per `\n`-separated line. An empty text yields one blank row.
 pub fn build_rows(text: &str) -> Vec<Row> {
+    build_window(text, &mut Vec::new())
+}
+
+/// Rows for `text` given the list levels open before its first line; `levels`
+/// ends as the levels open after its last.
+fn build_window(text: &str, levels: &mut Vec<usize>) -> Vec<Row> {
     let spans = content_spans(text);
     let mut rows = Vec::new();
     let mut in_fence = false;
     let mut offset = 0usize;
-    // Indents of the open list levels, outermost first.
-    let mut levels: Vec<usize> = Vec::new();
     for line in text.split('\n') {
         let start = offset;
         let end = start + line.len();
         offset = end + 1;
         let mut row = classify(text, start..end, &mut in_fence, &spans);
         let indent = line.len() - line.trim_start().len();
-        match row.kind {
-            RowKind::Item => row.list_depth = nest_depth(&mut levels, indent),
-            // Blank lines keep a loose list going; flush-left prose, headings
-            // and the like end it. Indented continuation lines belong to it.
-            RowKind::Blank => {}
-            _ if indent == 0 => levels.clear(),
-            _ => {}
+        if row.kind == RowKind::Item {
+            row.list_depth = nest_depth(levels, indent);
+        } else {
+            clear_levels(levels, row.kind, indent);
         }
         rows.push(row);
     }
     mark_tables(text, &mut rows);
     mark_callouts(&mut rows);
     rows
+}
+
+/// Blank lines keep a loose list going; flush-left prose, headings and the
+/// like end it. Indented continuation lines belong to it.
+fn clear_levels(levels: &mut Vec<usize>, kind: RowKind, indent: usize) {
+    if kind != RowKind::Blank && indent == 0 {
+        levels.clear();
+    }
+}
+
+fn indent_of(text: &str, row: &Row) -> usize {
+    let line = &text[row.src.clone()];
+    line.len() - line.trim_start().len()
+}
+
+/// Replay finished `rows` (whose lines are in `text`) over `levels`. `None`
+/// if a table row is met: its pre-table kind, which drove the levels, is gone.
+fn replay_levels(levels: &mut Vec<usize>, text: &str, rows: &[Row]) -> Option<()> {
+    for row in rows {
+        if row.kind == RowKind::Table {
+            return None;
+        }
+        let indent = indent_of(text, row);
+        if row.kind == RowKind::Item {
+            nest_depth(levels, indent);
+        } else {
+            clear_levels(levels, row.kind, indent);
+        }
+    }
+    Some(())
+}
+
+fn shift_row(row: &mut Row, bytes: isize, rows: isize) {
+    let by = |x: usize, d: isize| x.wrapping_add_signed(d);
+    let range = |r: &mut Range<usize>| *r = by(r.start, bytes)..by(r.end, bytes);
+    range(&mut row.src);
+    for run in &mut row.runs {
+        range(&mut run.src);
+    }
+    if let Some(table) = row.table.as_mut() {
+        table.start = by(table.start, rows);
+        table.cells.iter_mut().for_each(range);
+    }
+}
+
+/// True when `text` has constructs whose meaning reaches across blank lines
+/// (HTML blocks, link reference definitions): a block cannot be re-parsed
+/// alone then.
+fn parses_across_blocks(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    memchr::memmem::find(bytes, b"]:").is_some()
+        || memchr::memchr_iter(b'<', bytes).any(|i| {
+            matches!(
+                bytes.get(i + 1),
+                Some(b'!' | b'?' | b's' | b'S' | b'p' | b'P' | b't' | b'T')
+            )
+        })
+}
+
+/// A window the incremental path leaves to a full rebuild: fences, and
+/// indented lines that could be code or a list continuation by context.
+fn window_is_context_dependent(window: &str) -> bool {
+    window.contains("```")
+        || window.contains("~~~")
+        || window
+            .split('\n')
+            .any(|l| l.starts_with("    ") || l.starts_with('\t'))
+}
+
+/// True when every fence in `rows` (a prefix of a note) is closed exactly as
+/// the markdown parser would close it, so the text after them starts outside
+/// any code block. Lines are classified by their own fence rules; the parser
+/// is stricter (a closing fence takes no info string), and they must agree.
+fn fences_agree(text: &str, rows: &[Row]) -> bool {
+    let mut open: Option<(char, usize)> = None;
+    for row in rows.iter().filter(|r| r.fence.is_some()) {
+        let line = &text[row.src.clone()];
+        let trimmed = line.trim_start();
+        if line.len() - trimmed.len() >= 4 {
+            return false;
+        }
+        let mark = trimmed.chars().next().unwrap_or(' ');
+        let len = trimmed.chars().take_while(|&c| c == mark).count();
+        let rest = trimmed[len..].trim();
+        match open {
+            None => {
+                if len < 3 || (mark == '`' && rest.contains('`')) {
+                    return false;
+                }
+                open = Some((mark, len));
+            }
+            Some((m, n)) => {
+                if mark != m || len < n || !rest.is_empty() {
+                    return false;
+                }
+                open = None;
+            }
+        }
+    }
+    open.is_none()
+}
+
+/// The rows of a note after an edit, plus the rows that were re-parsed.
+pub struct Rebuilt {
+    pub rows: Vec<Row>,
+    /// Rows in this range are new; the rest are the old rows, shifted.
+    pub window: Range<usize>,
+}
+
+/// Rebuild the rows after `old_text` became `new_text` by re-parsing only the
+/// blank-line separated block around the edit. Returns `None` whenever that
+/// cannot be proven identical to [`build_rows`] (the caller rebuilds fully).
+pub fn rebuild_rows(old_text: &str, old_rows: &[Row], new_text: &str) -> Option<Rebuilt> {
+    let (ob, nb) = (old_text.as_bytes(), new_text.as_bytes());
+    let mut p = ob.iter().zip(nb).take_while(|(a, b)| a == b).count();
+    while !new_text.is_char_boundary(p) || !old_text.is_char_boundary(p) {
+        p -= 1;
+    }
+    let max_suffix = ob.len().min(nb.len()) - p;
+    let mut suffix = ob
+        .iter()
+        .rev()
+        .zip(nb.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !new_text.is_char_boundary(nb.len() - suffix)
+        || !old_text.is_char_boundary(ob.len() - suffix)
+    {
+        suffix -= 1;
+    }
+    let q = ob.len() - suffix; // end of the edit in the old text
+    let delta = nb.len() as isize - ob.len() as isize;
+
+    let first = old_rows.partition_point(|r| r.src.end < p);
+    let last = old_rows.partition_point(|r| r.src.end < q);
+    if last >= old_rows.len() || old_rows.last()?.src.end != ob.len() {
+        return None;
+    }
+    let a = old_rows[..first]
+        .iter()
+        .rposition(|r| r.kind == RowKind::Blank)
+        .map_or(0, |i| i + 1);
+    let b = old_rows[last + 1..]
+        .iter()
+        .position(|r| r.kind == RowKind::Blank)
+        .map_or(old_rows.len(), |i| last + 1 + i);
+    let old_start = old_rows[a].src.start;
+    let old_end = old_rows[b - 1].src.end;
+    let new_end = old_end.checked_add_signed(delta)?;
+    let (old_window, new_window) = (
+        old_text.get(old_start..old_end)?,
+        new_text.get(old_start..new_end)?,
+    );
+
+    if window_is_context_dependent(old_window)
+        || window_is_context_dependent(new_window)
+        || parses_across_blocks(old_text)
+        || parses_across_blocks(new_text)
+    {
+        return None;
+    }
+    let flush = |w: &str| {
+        w.split('\n')
+            .find(|l| !l.trim().is_empty())
+            .is_none_or(|l| !l.starts_with(char::is_whitespace))
+    };
+    if !flush(old_window) || !flush(new_window) || !fences_agree(old_text, &old_rows[..a]) {
+        return None;
+    }
+    // The block after the window must not be one that an edit above could
+    // turn into a list continuation (or back).
+    if let Some(next) = old_rows[b..].iter().find(|r| r.kind != RowKind::Blank)
+        && indent_of(old_text, next) > 0
+    {
+        return None;
+    }
+
+    let mut before = Vec::new();
+    let clear = old_rows[..a].iter().rposition(|r| {
+        r.kind != RowKind::Blank && r.kind != RowKind::Item && indent_of(old_text, r) == 0
+    });
+    replay_levels(
+        &mut before,
+        old_text,
+        &old_rows[clear.map_or(0, |i| i + 1)..a],
+    )?;
+    let mut old_after = before.clone();
+    replay_levels(&mut old_after, old_text, &old_rows[a..b])?;
+    let mut levels = before;
+    let mut fresh = build_window(new_window, &mut levels);
+    if levels != old_after {
+        return None;
+    }
+    fresh
+        .iter_mut()
+        .for_each(|r| shift_row(r, old_start as isize, a as isize));
+    let row_delta = fresh.len() as isize - (b - a) as isize;
+
+    let mut rows = Vec::with_capacity((old_rows.len() as isize + row_delta) as usize);
+    rows.extend_from_slice(&old_rows[..a]);
+    let window = a..a + fresh.len();
+    rows.extend(fresh);
+    let tail = rows.len();
+    rows.extend_from_slice(&old_rows[b..]);
+    rows[tail..]
+        .iter_mut()
+        .for_each(|r| shift_row(r, delta, row_delta));
+    Some(Rebuilt { rows, window })
 }
 
 /// Quote lines right below a callout title join its block.
@@ -1590,6 +1800,81 @@ mod tests {
             "content_spans alone: {} spans in {:?}",
             spans.len(),
             t1.elapsed()
+        );
+    }
+
+    /// Tiny deterministic generator (no rand dependency).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn incremental_rebuild_matches_a_full_build() {
+        const LINES: &[&str] = &[
+            "# Heading",
+            "plain text with **bold** and `code`",
+            "",
+            "",
+            "- item",
+            "  - nested",
+            "1. one",
+            "- [ ] task",
+            "> quote",
+            "> [!note] Title",
+            "| a | b |",
+            "|---|---|",
+            "| 1 | 2 |",
+            "text *em* and ==mark==",
+            "---",
+            "    indented",
+            "```rust",
+            "[ref]: http://x",
+            "<b>html</b>",
+            "  continued",
+        ];
+        const EDITS: &[&str] = &[
+            "a", "*", " ", "\n", "-", "[", "]", "|", ">", "`", "#", "x y", "\n\n", "- ", "==",
+        ];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let (mut used, mut total) = (0, 0);
+        for _ in 0..4000 {
+            let n = 1 + rng.next(14);
+            let old: String = (0..n)
+                .map(|_| LINES[rng.next(LINES.len())])
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut new = old.clone();
+            for _ in 0..1 + rng.next(2) {
+                let mut at = rng.next(new.len() + 1);
+                while !new.is_char_boundary(at) {
+                    at -= 1;
+                }
+                if rng.next(3) == 0 && at < new.len() {
+                    let mut end = (at + 1 + rng.next(3)).min(new.len());
+                    while !new.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    new.replace_range(at..end, "");
+                } else {
+                    new.insert_str(at, EDITS[rng.next(EDITS.len())]);
+                }
+            }
+            let rows = build_rows(&old);
+            total += 1;
+            if let Some(got) = rebuild_rows(&old, &rows, &new) {
+                used += 1;
+                assert_eq!(got.rows, build_rows(&new), "old {old:?}\nnew {new:?}");
+            }
+        }
+        assert!(
+            used * 4 > total,
+            "the fast path is taken often: {used}/{total}"
         );
     }
 

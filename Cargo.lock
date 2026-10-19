@@ -3933,6 +3933,7 @@ name = "meku-markdown"
 version = "0.1.0"
 dependencies = [
  "meku-table",
+ "memchr",
  "pulldown-cmark",
  "tree-sitter",
  "tree-sitter-bash",

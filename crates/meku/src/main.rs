@@ -6304,7 +6304,10 @@ mod ui_tests {
 
     fn perf_typing_body(cx: &mut TestAppContext) {
         let text: String = (0..10_000)
-            .map(|i| format!("Line {i} with **bold** and `code` and a [link](x)\n"))
+            .map(|i| {
+                let sep = if i % 3 == 2 { "\n" } else { "" };
+                format!("Line {i} with **bold** and `code` and a [link](x)\n{sep}")
+            })
             .collect();
         let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, &text);
         focus_doc_for(cx, &view, window);

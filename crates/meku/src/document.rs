@@ -25,7 +25,7 @@ use meku_markdown::InlineStyle;
 use meku_markdown::highlight::{Tok, highlight};
 use meku_markdown::live::{
     CalloutKind, CalloutRole, Display, Fence, LinkTarget, Row, RowKind, TableRole, build_rows,
-    classify_link, heading_slug, link_at, project, row_at,
+    classify_link, heading_slug, link_at, project, rebuild_rows, row_at,
 };
 use meku_table::Align;
 
@@ -208,9 +208,22 @@ impl MekuShell {
             return Some(model.clone());
         }
         let text: Rc<str> = Rc::from(buffer.read(cx).text_string());
-        let mut built = build_rows(&text);
+        // Typing re-parses only the block around the edit when it can.
+        let patched = self
+            .doc_models
+            .get(rel)
+            .filter(|m| m.opts == opts)
+            .and_then(|m| rebuild_rows(&m.text, &m.rows, &text));
+        let (mut built, fresh) = match patched {
+            Some(r) => (r.rows, r.window),
+            None => {
+                let rows = build_rows(&text);
+                let all = 0..rows.len();
+                (rows, all)
+            }
+        };
         let c = crate::theme::cfg(cx);
-        for row in &mut built {
+        for row in &mut built[fresh] {
             if !c.bool("render_tables") && row.table.take().is_some() && row.kind == RowKind::Table
             {
                 row.kind = RowKind::Text;
