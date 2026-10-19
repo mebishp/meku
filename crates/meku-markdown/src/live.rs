@@ -63,6 +63,96 @@ pub fn standalone_image(line: &str) -> Option<(&str, &str)> {
     (!target.is_empty()).then_some((&bang[..alt_end], target))
 }
 
+/// One image on an image-only line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRef {
+    /// Byte range of the whole token (`![..](..)` / `![[..]]`) within the line.
+    pub range: Range<usize>,
+    pub alt: String,
+    /// Path / URL / vault file name, without title or size suffix.
+    pub target: String,
+    /// `![[name]]` embed rather than `![alt](path)`.
+    pub wiki: bool,
+    /// Explicit display width from `|320` (or `|320x200`).
+    pub width: Option<u32>,
+}
+
+const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "tiff",
+];
+
+/// A line made of nothing but images — `![alt](path)` and/or Obsidian
+/// `![[file.png|300]]` embeds, separated by spaces — as its tokens. Wiki
+/// embeds only count when they name an image file (`![[note]]` is not one).
+pub fn image_line(line: &str) -> Option<Vec<ImageRef>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    let bytes = line.as_bytes();
+    while at < line.len() {
+        if bytes[at] == b' ' || bytes[at] == b'\t' {
+            at += 1;
+            continue;
+        }
+        let rest = &line[at..];
+        let token = if let Some(inner) = rest.strip_prefix("![[") {
+            let close = inner.find("]]")?;
+            let body = &inner[..close];
+            let (name, size) = match body.split_once('|') {
+                Some((n, sz)) => (n.trim(), Some(sz.trim())),
+                None => (body.trim(), None),
+            };
+            // `name#heading` / `name^block` are note links; images have none.
+            let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+            if name.is_empty() || !IMAGE_EXTS.contains(&ext.as_str()) {
+                return None;
+            }
+            let width = size
+                .and_then(|sz| sz.split('x').next())
+                .and_then(|w| w.parse().ok())
+                .filter(|w| *w > 0);
+            (
+                3 + close + 2,
+                ImageRef {
+                    range: at..at + 3 + close + 2,
+                    alt: String::new(),
+                    target: name.to_string(),
+                    wiki: true,
+                    width,
+                },
+            )
+        } else if rest.starts_with("![") {
+            // Find the end of `![alt](target)`: the `)` closing the target.
+            let alt_end = rest.find("](")?;
+            let after = &rest[alt_end + 2..];
+            let close = if let Some(angle) = after.strip_prefix('<') {
+                // `<path with spaces>` then optionally a title, then `)`.
+                let gt = angle.find('>')?;
+                1 + gt + 1 + angle[gt + 1..].find(')')?
+            } else {
+                after.find(')')?
+            };
+            let token = &rest[..alt_end + 2 + close + 1];
+            let (alt, target) = standalone_image(token)?;
+            let (caption, width) = alt_and_width(alt);
+            (
+                token.len(),
+                ImageRef {
+                    range: at..at + token.len(),
+                    alt: caption.to_string(),
+                    target: target.to_string(),
+                    wiki: false,
+                    width,
+                },
+            )
+        } else {
+            return None;
+        };
+        at += token.0;
+        out.push(token.1);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Split an image alt text into its caption and an optional width hint
 /// (`![photo|320](x.png)` → `("photo", Some(320))`, Obsidian style).
 pub fn alt_and_width(alt: &str) -> (&str, Option<u32>) {
@@ -1502,5 +1592,43 @@ mod tests {
                 RowKind::Blank
             ]
         );
+    }
+
+    #[test]
+    fn image_lines_hold_markdown_and_wiki_images() {
+        let line = "![[Pasted image 20260813201248.png]]![[b.jpg|320]] ![alt|100](x y.png \"t\")"
+            .replace("x y.png", "<x y.png>");
+        let imgs = image_line(&line).unwrap();
+        assert_eq!(imgs.len(), 3);
+        assert_eq!(
+            (imgs[0].target.as_str(), imgs[0].wiki, imgs[0].width),
+            ("Pasted image 20260813201248.png", true, None)
+        );
+        assert_eq!(
+            (imgs[1].target.as_str(), imgs[1].width),
+            ("b.jpg", Some(320))
+        );
+        assert_eq!(
+            (
+                imgs[2].target.as_str(),
+                imgs[2].alt.as_str(),
+                imgs[2].wiki,
+                imgs[2].width
+            ),
+            ("x y.png", "alt", false, Some(100))
+        );
+        assert_eq!(&line[imgs[1].range.clone()], "![[b.jpg|320]]");
+        assert_eq!(
+            image_line("![[a.png|200x100]]").unwrap()[0].width,
+            Some(200)
+        );
+        assert!(
+            image_line("![[some note]]").is_none(),
+            "a note embed is not an image"
+        );
+        assert!(image_line("![[a.png]] and text").is_none());
+        assert!(image_line("text ![[a.png]]").is_none());
+        assert!(image_line("![[a.png").is_none());
+        assert!(image_line("").is_none());
     }
 }

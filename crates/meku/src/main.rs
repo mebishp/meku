@@ -344,7 +344,7 @@ impl MekuShell {
         if std::env::var("MEKU_LIGHTBOX").is_ok()
             && let Some(rel) = self.doc_rel()
             && let Some(model) = self.doc_model(&rel, cx)
-            && let Some(info) = model.images.iter().flatten().next().cloned()
+            && let Some(info) = model.images.iter().flatten().flatten().next().cloned()
         {
             self.open_lightbox(info, cx);
             self.lightbox_zoom = std::env::var("MEKU_ZOOM").ok().and_then(|v| v.parse().ok());
@@ -5229,6 +5229,7 @@ mod ui_tests {
     fn image_frames_keep_proportions_and_caps() {
         use crate::document::{ImageInfo, ImageSrc, image_frame_size};
         let mk = |dims: Option<(u32, u32)>, width: Option<u32>| ImageInfo {
+            range: 0..0,
             src: ImageSrc::Url("x".into()),
             caption: String::new(),
             width,
@@ -5288,7 +5289,9 @@ mod ui_tests {
         let info = cx.update(|cx| {
             view.update(cx, |s, cx| {
                 let rel = s.doc_rel().unwrap();
-                s.doc_model(&rel, cx).and_then(|m| m.images[2].clone())
+                s.doc_model(&rel, cx)
+                    .and_then(|m| m.images[2].clone())
+                    .and_then(|v| v.into_iter().next())
             })
         });
         let info = info.expect("image row is recognised (spaces in the path, |width hint)");
@@ -5340,12 +5343,9 @@ mod ui_tests {
         });
         step(cx, window, |w, cx| w.press("ctrl-v", cx));
         let text = buffer_text(cx, &view, &rel).0;
+        assert!(text.starts_with("intro\n![[Pasted image 20"), "{text:?}");
         assert!(
-            text.starts_with("intro\n![](attachments/pasted-"),
-            "{text:?}"
-        );
-        assert!(
-            text.ends_with(".png)\n"),
+            text.ends_with(".png]]\n"),
             "own line, with a trailing newline: {text:?}"
         );
         let saved: Vec<_> = std::fs::read_dir(dir.path().join("attachments"))
@@ -5559,5 +5559,128 @@ mod ui_tests {
         );
         move_doc_caret(cx, &view, 11);
         assert!(!caret_row_raw(cx, &view));
+    }
+
+    // -- Obsidian-style images -----------------------------------------------
+
+    #[test]
+    fn pasted_stamps_are_obsidian_style_utc() {
+        assert_eq!(crate::document::pasted_stamp(0), "19700101000000");
+        assert_eq!(crate::document::pasted_stamp(1786567208), "20260812204008");
+        assert_eq!(
+            crate::document::pasted_stamp(951_782_400),
+            "20000229000000",
+            "leap day"
+        );
+    }
+
+    #[test]
+    fn wiki_embeds_resolve_by_name_and_sit_side_by_side() {
+        run_ui_test("wiki_images", wiki_images_body);
+    }
+
+    fn wiki_images_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(
+            cx,
+            1200.0,
+            800.0,
+            "![[Pasted image 1.png]]![[Pasted image 2.png|50]]\ntext\n![[missing.png]]\n![[some note]]\n",
+        );
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::fs::write(dir.path().join("attachments/Pasted image 1.png"), PNG_1X1).unwrap();
+        std::fs::write(dir.path().join("Pasted image 2.png"), PNG_1X1).unwrap();
+        cx.update(|cx| view.update(cx, |s, _| s.doc_models.clear()));
+        let rel = PathBuf::from("doc.md");
+        let imgs = cx
+            .update(|cx| {
+                view.update(cx, |s, cx| {
+                    s.doc_model(&rel, cx).map(|m| (*m.images).clone())
+                })
+            })
+            .unwrap();
+        let first = imgs[0].as_ref().expect("an image row");
+        assert_eq!(first.len(), 2, "two embeds on one line");
+        assert_eq!(first[0].dims, Some((1, 1)), "found in attachments/ by name");
+        assert_eq!(
+            (first[1].width, first[1].dims),
+            (Some(50), Some((1, 1))),
+            "found in the note's folder, |50 width"
+        );
+        assert!(imgs[1].is_none(), "text line");
+        let missing = imgs[2]
+            .as_ref()
+            .expect("unresolved image is still an image row");
+        assert_eq!(missing[0].dims, None);
+        assert!(imgs[3].is_none(), "![[note]] is not an image");
+        // Rendered frames: both pictures exist side by side.
+        step(cx, window, |_, _| {});
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let a = w.find(("image-row", 0usize)).bounds();
+            let b = w.find(("image-row-n", 1usize)).bounds();
+            assert!(
+                b.origin.x > a.origin.x,
+                "second image to the right of the first"
+            );
+            assert_eq!(a.origin.y, b.origin.y, "on the same line");
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn caret_treats_image_rows_as_one_atom_and_backspace_removes_the_last() {
+        run_ui_test("image_atom", image_atom_body);
+    }
+
+    fn image_atom_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "a\n![[p.png]] ![[q.png]]\nb\n");
+        std::fs::write(dir.path().join("p.png"), PNG_1X1).unwrap();
+        std::fs::write(dir.path().join("q.png"), PNG_1X1).unwrap();
+        cx.update(|cx| view.update(cx, |s, _| s.doc_models.clear()));
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        // Down from the first line lands after the images, not inside the token.
+        move_doc_caret(cx, &view, 1);
+        step(cx, window, |w, cx| w.press("down", cx));
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            2 + 21,
+            "Down lands at the end of the image row"
+        );
+        assert!(
+            !caret_row_raw(cx, &view),
+            "the images stay rendered under the caret"
+        );
+        step(cx, window, |w, cx| w.press("left", cx));
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            2,
+            "Left jumps over the whole row"
+        );
+        step(cx, window, |w, cx| w.press("right", cx));
+        assert_eq!(doc_caret(cx, &view, &rel), 23);
+        step(cx, window, |w, cx| w.press("backspace", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "a\n![[p.png]]\nb\n",
+            "Backspace removes the last image"
+        );
+        step(cx, window, |w, cx| w.press("backspace", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "a\n\nb\n",
+            "…then the next one"
+        );
+        // Selecting the line shows its source for editing.
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.buffers[&rel].update(cx, |b, _| b.insert("![[p.png]]"))
+            })
+        });
+        select_doc_range(cx, &view, 2, 12);
+        assert!(
+            caret_row_raw(cx, &view),
+            "a selection reveals the embed's source"
+        );
     }
 }

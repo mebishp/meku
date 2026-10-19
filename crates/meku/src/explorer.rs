@@ -23,6 +23,9 @@ pub struct TreeRow {
 }
 
 pub struct Explorer {
+    /// Lower-cased file name → vault-relative paths of every non-note file,
+    /// built on first use (wiki image embeds name files, not paths).
+    attachments: std::cell::RefCell<Option<std::collections::HashMap<String, Vec<PathBuf>>>>,
     vault: Option<Mekuto>,
     files: Vec<VaultFile>,
     dirs: HashSet<PathBuf>,
@@ -33,6 +36,7 @@ pub struct Explorer {
 impl Explorer {
     pub fn new() -> Self {
         Self {
+            attachments: std::cell::RefCell::new(None),
             vault: None,
             files: Vec::new(),
             dirs: HashSet::new(),
@@ -77,6 +81,69 @@ impl Explorer {
             }
         }
         hits
+    }
+
+    fn scan_attachments(root: &Path) -> std::collections::HashMap<String, Vec<PathBuf>> {
+        let mut map: std::collections::HashMap<String, Vec<PathBuf>> = Default::default();
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| {
+                // Skip dot-folders (`.meku`, `.git`) but not the root itself.
+                e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.')
+            })
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            if meku_vault::is_note(entry.path()) {
+                continue;
+            }
+            if let (Some(name), Ok(rel)) =
+                (entry.file_name().to_str(), entry.path().strip_prefix(root))
+            {
+                map.entry(name.to_lowercase())
+                    .or_default()
+                    .push(rel.to_path_buf());
+            }
+        }
+        map
+    }
+
+    /// Absolute path of the file an image reference names, the way Obsidian
+    /// resolves `![[name.png]]`: a path relative to the note or the vault root
+    /// first, otherwise the file of that name anywhere in the vault (the
+    /// closest to the note wins). Finds files added since the last lookup.
+    pub fn resolve_attachment(&self, note_rel: &Path, name: &str) -> Option<PathBuf> {
+        let root = self.root()?;
+        let note_dir = note_rel.parent().unwrap_or(Path::new(""));
+        for candidate in [note_dir.join(name), PathBuf::from(name)] {
+            if candidate.components().any(|c| c.as_os_str() == "..") {
+                continue;
+            }
+            let abs = root.join(&candidate);
+            if abs.is_file() {
+                return Some(abs);
+            }
+        }
+        let file_name = Path::new(name).file_name()?.to_str()?.to_lowercase();
+        for attempt in 0..2 {
+            if self.attachments.borrow().is_none() || attempt == 1 {
+                *self.attachments.borrow_mut() = Some(Self::scan_attachments(root));
+            }
+            let map = self.attachments.borrow();
+            if let Some(found) = map.as_ref().and_then(|m| m.get(&file_name)) {
+                let shared = |p: &&PathBuf| {
+                    p.components()
+                        .zip(note_dir.components())
+                        .take_while(|(a, b)| a == b)
+                        .count()
+                };
+                let best = found
+                    .iter()
+                    .max_by_key(|p| (shared(p), std::cmp::Reverse(p.components().count())))?;
+                return Some(root.join(best));
+            }
+        }
+        None
     }
 
     pub fn root(&self) -> Option<&Path> {
@@ -439,6 +506,49 @@ mod tests {
         assert_eq!(
             explorer.fuzzy_files("bmd", 5),
             vec![PathBuf::from("sub/b.md")]
+        );
+    }
+
+    #[test]
+    fn attachments_resolve_by_name_anywhere_in_the_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::create_dir_all(root.join("assets/img")).unwrap();
+        std::fs::create_dir_all(root.join(".meku")).unwrap();
+        std::fs::write(root.join("notes/a.md"), "x").unwrap();
+        std::fs::write(root.join("assets/img/Photo One.PNG"), "p").unwrap();
+        std::fs::write(root.join(".meku/hidden.png"), "h").unwrap();
+        let mut explorer = Explorer::new();
+        let _ = explorer.open(root).unwrap();
+        let note = Path::new("notes/a.md");
+        assert_eq!(
+            explorer.resolve_attachment(note, "photo one.png"),
+            Some(root.join("assets/img/Photo One.PNG")),
+            "by name, case-insensitive, any folder"
+        );
+        assert_eq!(
+            explorer.resolve_attachment(note, "assets/img/Photo One.PNG"),
+            Some(root.join("assets/img/Photo One.PNG")),
+            "or by vault-relative path"
+        );
+        assert_eq!(
+            explorer.resolve_attachment(note, "hidden.png"),
+            None,
+            "dot folders are skipped"
+        );
+        assert_eq!(explorer.resolve_attachment(note, "../../etc/passwd"), None);
+        // A file added later is found on the next lookup.
+        std::fs::write(root.join("notes/late.png"), "l").unwrap();
+        assert_eq!(
+            explorer.resolve_attachment(note, "late.png"),
+            Some(root.join("notes/late.png"))
+        );
+        // The note's own folder wins over a same-named file elsewhere.
+        std::fs::write(root.join("assets/late.png"), "other").unwrap();
+        assert_eq!(
+            explorer.resolve_attachment(note, "late.png"),
+            Some(root.join("notes/late.png"))
         );
     }
 

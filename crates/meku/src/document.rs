@@ -150,7 +150,7 @@ pub(crate) struct DocModel {
     /// Syntax spans per code row, in line-content byte offsets.
     pub hl: Rc<RowSpans>,
     /// Standalone-image source per row (computed once per version).
-    pub images: Rc<Vec<Option<ImageInfo>>>,
+    pub images: Rc<Vec<Option<Vec<ImageInfo>>>>,
     /// Word count of the note (status bar).
     pub words: usize,
 }
@@ -198,14 +198,19 @@ impl MekuShell {
         let hl = Self::colored_rows(&text, &rows);
         let root = self.explorer.root().map(Path::to_path_buf);
         let mut dim_cache = std::mem::take(&mut self.image_dims);
-        let images = Rc::new(
-            rows.iter()
-                .map(|row| {
-                    root.as_deref()
-                        .and_then(|root| image_source_of(row, &text, root, rel, &mut dim_cache))
-                })
-                .collect(),
-        );
+        let images = {
+            let explorer = &self.explorer;
+            let resolve = |name: &str| explorer.resolve_attachment(rel, name);
+            Rc::new(
+                rows.iter()
+                    .map(|row| {
+                        root.as_deref().and_then(|root| {
+                            image_source_of(row, &text, root, rel, &mut dim_cache, &resolve)
+                        })
+                    })
+                    .collect(),
+            )
+        };
         self.image_dims = dim_cache;
         let words = text.split_whitespace().count();
         let model = DocModel {
@@ -691,10 +696,21 @@ impl MekuShell {
         let mutated = match key {
             DocKey::Left | DocKey::Right => {
                 let forward = key == DocKey::Right;
-                let target = (sel.start == sel.end || extend)
-                    .then(|| Visible::of(&model, cur_ix, revealed_now))
-                    .flatten()
-                    .and_then(|v| v.step(&model.text, &model.rows[cur_ix].src, caret_now, forward));
+                let row_src = model.rows[cur_ix].src.clone();
+                let on_image = !revealed_now && model.images[cur_ix].is_some();
+                let target = if !(sel.start == sel.end || extend) {
+                    None
+                } else if on_image {
+                    // Images are one atom: the caret is before or after them.
+                    if forward {
+                        (caret_now < row_src.end).then_some(row_src.end)
+                    } else {
+                        (caret_now > row_src.start).then_some(row_src.start)
+                    }
+                } else {
+                    Visible::of(&model, cur_ix, revealed_now)
+                        .and_then(|v| v.step(&model.text, &row_src, caret_now, forward))
+                };
                 buffer.update(cx, |b, _| match target {
                     Some(p) => b.move_caret(p, extend),
                     None if forward => b.move_right(extend),
@@ -752,8 +768,11 @@ impl MekuShell {
                         None => model.text[model.rows[row].src.start..caret].chars().count(),
                     };
                     let target_row = &model.rows[target];
-                    match Visible::of(&model, target, revealed_when_caret(target)) {
+                    match Visible::of(&model, target, revealed_when_caret(target))
+                        .filter(|_| model.images[target].is_none())
+                    {
                         Some(v) => v.offset(column),
+                        None if model.images[target].is_some() => target_row.src.end,
                         None => {
                             let line = &model.text[target_row.src.clone()];
                             let offset = line
@@ -789,8 +808,11 @@ impl MekuShell {
                         None => model.text[model.rows[row].src.start..caret].chars().count(),
                     };
                     let target_row = &model.rows[target];
-                    match Visible::of(&model, target, revealed_when_caret(target)) {
+                    match Visible::of(&model, target, revealed_when_caret(target))
+                        .filter(|_| model.images[target].is_none())
+                    {
                         Some(v) => v.offset(column),
+                        None if model.images[target].is_some() => target_row.src.end,
                         None => {
                             let line = &model.text[target_row.src.clone()];
                             let offset = line
@@ -880,6 +902,24 @@ impl MekuShell {
             DocKey::Backspace | DocKey::Delete => {
                 let backward = key == DocKey::Backspace;
                 let collapsed = sel.start == sel.end;
+                // Backspace on an image row removes the last image (with the
+                // spaces before it); select the line to edit the source.
+                if backward
+                    && collapsed
+                    && !revealed_now
+                    && let Some(last) = model.images[cur_ix].as_ref().and_then(|v| v.last())
+                {
+                    let line_start = model.rows[cur_ix].src.start;
+                    let mut start = last.range.start;
+                    while start > line_start && model.text.as_bytes()[start - 1] == b' ' {
+                        start -= 1;
+                    }
+                    let range = start..last.range.end;
+                    buffer.update(cx, |b, _| b.replace(range, "", false));
+                    self.doc_note_edit(&rel);
+                    cx.notify();
+                    return;
+                }
                 let vis = (collapsed && !revealed_now)
                     .then(|| Visible::of(&model, cur_ix, revealed_now))
                     .flatten();
@@ -1127,11 +1167,13 @@ impl MekuShell {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let mut name = format!("pasted-{secs}.{}", image_extension(image.format));
+        let stamp = pasted_stamp(secs);
+        let ext = image_extension(image.format);
+        let mut name = format!("Pasted image {stamp}.{ext}");
         let mut n = 1;
         while root.join(&dir).join(&name).exists() {
             n += 1;
-            name = format!("pasted-{secs}-{n}.{}", image_extension(image.format));
+            name = format!("Pasted image {stamp}-{n}.{ext}");
         }
         let saved = std::fs::create_dir_all(root.join(&dir))
             .and_then(|()| std::fs::write(root.join(&dir).join(&name), &image.bytes));
@@ -1139,7 +1181,7 @@ impl MekuShell {
             self.notice = Some(format!("Could not save the pasted image: {e}"));
             return false;
         }
-        let link = format!("![](attachments/{name})");
+        let link = format!("![[{name}]]");
         buffer.update(cx, |b, _| {
             // Images render when they are alone on their line.
             let (line_start, line) = (b.line_start_of_caret(), b.caret_line_text());
@@ -1231,12 +1273,12 @@ pub(crate) enum ImageSrc {
     Path(PathBuf),
 }
 
-/// A row whose whole source line is one image: targeted when hidden (Live/
-/// Read presentation); the caret row and Edit mode show the raw text.
 /// An image row: where it comes from, its caption, an explicit width
 /// (`![alt|320](..)`) and, for local files, its real pixel size.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ImageInfo {
+    /// Absolute source range of this image's `![..]` token.
+    pub range: Range<usize>,
     pub src: ImageSrc,
     pub caption: String,
     pub width: Option<u32>,
@@ -1260,53 +1302,67 @@ fn probe_dims(cache: &mut DimCache, path: &Path) -> Option<(u32, u32)> {
     Some(dims)
 }
 
-/// A row whose whole source line is one image: targeted when hidden (Live/
-/// Read presentation); the caret row and Edit mode show the raw text.
+/// The images of a row that holds nothing else (`![](a.png)`, Obsidian
+/// `![[b.png|300]]`, any number side by side): targeted while the row is
+/// not being edited as source. `resolve` finds a vault file by name.
 fn image_source_of(
     row: &Row,
     text: &str,
     root: &Path,
     note_rel: &Path,
     dims: &mut DimCache,
-) -> Option<ImageInfo> {
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Option<Vec<ImageInfo>> {
     if row.kind != RowKind::Text {
         return None;
     }
-    let (alt, target) = meku_markdown::live::standalone_image(&text[row.src.clone()])?;
-    let (caption, width) = meku_markdown::live::alt_and_width(alt);
-    let caption = caption.to_string();
-    if target.starts_with("http://")
-        || target.starts_with("https://")
-        || target.starts_with("data:")
-    {
-        return Some(ImageInfo {
-            src: ImageSrc::Url(target.to_string()),
-            caption,
-            width,
-            dims: None,
+    let line = &text[row.src.clone()];
+    let refs = meku_markdown::live::image_line(line)?;
+    let mut out = Vec::with_capacity(refs.len());
+    for r in refs {
+        let range = row.src.start + r.range.start..row.src.start + r.range.end;
+        let target = r.target.as_str();
+        let remote = target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("data:");
+        let src = if remote {
+            ImageSrc::Url(target.to_string())
+        } else if r.wiki {
+            // Missing files still get a (broken) slot so the embed is visible.
+            let path = resolve(target).unwrap_or_else(|| root.join(".missing").join(target));
+            ImageSrc::Path(path)
+        } else {
+            let decoded = meku_markdown::live::percent_decode(target);
+            let note_dir = note_rel.parent().unwrap_or(Path::new(""));
+            // Resolve `..` lexically and refuse anything that climbs out of the mekuto.
+            let mut parts: Vec<std::ffi::OsString> =
+                note_dir.iter().map(|c| c.to_os_string()).collect();
+            let mut escapes = false;
+            for comp in decoded.split('/') {
+                match comp {
+                    "" | "." => {}
+                    ".." => escapes |= parts.pop().is_none(),
+                    c => parts.push(c.into()),
+                }
+            }
+            if escapes {
+                continue;
+            }
+            ImageSrc::Path(root.join(parts.iter().collect::<PathBuf>()))
+        };
+        let dims = match &src {
+            ImageSrc::Path(p) => probe_dims(dims, p),
+            ImageSrc::Url(_) => None,
+        };
+        out.push(ImageInfo {
+            range,
+            src,
+            caption: r.alt,
+            width: r.width,
+            dims,
         });
     }
-    let decoded = meku_markdown::live::percent_decode(target);
-    let note_dir = note_rel.parent().unwrap_or(Path::new(""));
-    // Resolve `..` lexically and refuse anything that climbs out of the mekuto.
-    let mut parts: Vec<std::ffi::OsString> = note_dir.iter().map(|c| c.to_os_string()).collect();
-    for comp in decoded.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            c => parts.push(c.into()),
-        }
-    }
-    let joined = root.join(parts.iter().collect::<PathBuf>());
-    let dims = probe_dims(dims, &joined);
-    Some(ImageInfo {
-        src: ImageSrc::Path(joined),
-        caption,
-        width,
-        dims,
-    })
+    (!out.is_empty()).then_some(out)
 }
 
 fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
@@ -1646,6 +1702,27 @@ impl<E: IntoElement + Styled + 'static> OpenFade for E {
     }
 }
 
+/// `YYYYMMDDHHMMSS` (UTC) for Obsidian-style `Pasted image …` file names.
+pub(crate) fn pasted_stamp(unix_secs: u64) -> String {
+    let (days, rem) = (unix_secs / 86_400, unix_secs % 86_400);
+    // Civil date from a day count (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}{:02}{:02}{:02}",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
 /// The first image on the clipboard, if any.
 fn pasted_image(item: &ClipboardItem) -> Option<Image> {
     item.entries().iter().find_map(|entry| match entry {
@@ -1936,7 +2013,7 @@ fn row_element(
     caret: Option<usize>,
     selection: Option<Range<usize>>,
     colored: RowColors,
-    image: Option<ImageInfo>,
+    image: Option<Vec<ImageInfo>>,
     pointer: bool,
     find_hits: &[(Range<usize>, bool)],
     col_width: Pixels,
@@ -1986,7 +2063,7 @@ fn row_element(
 
     // Standalone image rows draw their picture when hidden; the caret row and
     // Edit mode show the raw text instead (unchanged flow below).
-    if !reveal && let Some(info) = image {
+    if !reveal && let Some(images) = image {
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
         }
@@ -1999,7 +2076,14 @@ fn row_element(
         return row_div
             .pl(inset)
             .py(px(6.))
-            .child(image_row_element(info, ix, avail, shell, cx))
+            .child(image_row_element(
+                images,
+                ix,
+                caret.is_some(),
+                avail,
+                shell,
+                cx,
+            ))
             .into_any_element();
     }
 
@@ -2361,54 +2445,67 @@ pub(crate) fn picture(src: &ImageSrc, cx: &App) -> AnyElement {
     }
 }
 
-/// A standalone image row: framed, rounded, click to zoom (lightbox).
+/// An image-only row: each picture framed and rounded, flowing left to right
+/// and wrapping like inline images; click one to zoom it (lightbox). The
+/// accent ring shows the caret is on this row.
 fn image_row_element(
-    info: ImageInfo,
+    images: Vec<ImageInfo>,
     ix: usize,
+    focused: bool,
     avail: Pixels,
     shell: &Entity<MekuShell>,
     cx: &App,
 ) -> AnyElement {
-    let (fw, fh) = image_frame_size(&info, avail);
     let theme_colors = cx.theme();
     let border = theme_colors.border;
-    let hover_border = crate::theme::accent_alpha(cx, 0.9);
     let muted = theme_colors.muted_foreground;
-    let open = info.clone();
-    let shell = shell.clone();
-    let frame = div()
-        .id(("image-row", ix))
-        .test_support()
-        .w(fw)
-        .h(fh)
-        .rounded_lg()
-        .border_1()
-        .border_color(border)
-        .overflow_hidden()
-        .cursor_pointer()
-        .hover(move |s| s.border_color(hover_border))
-        // A press on the picture zooms it; it must not move the caret.
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            let open = open.clone();
-            shell.update(cx, |view, cx| {
-                // Esc must reach the shell whatever had focus before.
-                window.focus(&view.focus_handle, cx);
-                view.open_lightbox(open, cx);
-            });
-        })
-        .child(picture(&info.src, cx));
-    let mut column = v_flex().gap_1().child(frame);
-    if !info.caption.is_empty() {
-        column = column.child(
-            div()
-                .w(fw)
-                .text_xs()
-                .text_color(muted)
-                .child(info.caption.clone()),
-        );
+    let ring = crate::theme::accent_alpha(cx, 0.9);
+    let hover_border = ring;
+    let mut flow = h_flex().flex_wrap().gap(px(10.)).items_start();
+    for (k, info) in images.into_iter().enumerate() {
+        let (fw, fh) = image_frame_size(&info, avail);
+        let open = info.clone();
+        let shell = shell.clone();
+        let id: ElementId = if k == 0 {
+            ("image-row", ix).into()
+        } else {
+            ("image-row-n", ix * 1000 + k).into()
+        };
+        let frame = div()
+            .id(id)
+            .test_support()
+            .w(fw)
+            .h(fh)
+            .rounded_lg()
+            .border_1()
+            .border_color(if focused { ring } else { border })
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(move |s| s.border_color(hover_border))
+            // A press on the picture zooms it; it must not move the caret.
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
+                let open = open.clone();
+                shell.update(cx, |view, cx| {
+                    // Esc must reach the shell whatever had focus before.
+                    window.focus(&view.focus_handle, cx);
+                    view.open_lightbox(open, cx);
+                });
+            })
+            .child(picture(&info.src, cx));
+        let mut column = v_flex().gap_1().child(frame);
+        if !info.caption.is_empty() {
+            column = column.child(
+                div()
+                    .w(fw)
+                    .text_xs()
+                    .text_color(muted)
+                    .child(info.caption.clone()),
+            );
+        }
+        flow = flow.child(column);
     }
-    column.into_any_element()
+    flow.into_any_element()
 }
 
 // -- text input ----------------------------------------------------------
