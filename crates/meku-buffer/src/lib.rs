@@ -195,6 +195,23 @@ fn parse_list_marker(rest: &str) -> Option<(usize, MarkerKind)> {
     Some((digits + 1 + spaces, MarkerKind::Ordered(num, sep)))
 }
 
+/// Content hash of a string, comparable with [`OpenBuffer::disk_hash`].
+pub fn hash_text(text: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(text.as_bytes());
+    h.finish()
+}
+
+fn rope_hash(text: &Rope) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for chunk in text.chunks() {
+        h.write(chunk.as_bytes());
+    }
+    h.finish()
+}
+
 /// A single-token `http(s)://` / `mailto:` destination.
 fn looks_like_url(s: &str) -> bool {
     let s = s.trim();
@@ -244,6 +261,10 @@ pub struct OpenBuffer {
     pub version: BufferVersion,
     pub dirty: bool,
     pub disk_mtime: Option<SystemTime>,
+    /// Hash of the text last read from or written to disk, so a watcher
+    /// event for our own save is recognised by content, however much has
+    /// been typed since.
+    pub disk_hash: Option<u64>,
     caret: usize,
     anchor: usize,
     marked: Option<Range<usize>>,
@@ -269,12 +290,14 @@ impl OpenBuffer {
     }
 
     fn with_text(rel: PathBuf, text: Rope, disk_mtime: Option<SystemTime>) -> Self {
+        let disk_hash = disk_mtime.map(|_| rope_hash(&text));
         Self {
             rel,
             text,
             version: 0,
             dirty: false,
             disk_mtime,
+            disk_hash,
             caret: 0,
             anchor: 0,
             marked: None,
@@ -1738,6 +1761,7 @@ impl OpenBuffer {
     pub fn mark_saved(&mut self, mtime: SystemTime) {
         self.dirty = false;
         self.disk_mtime = Some(mtime);
+        self.disk_hash = Some(rope_hash(&self.text));
     }
 
     /// Clone out the text for a background parse. The version lets the
@@ -1781,6 +1805,17 @@ mod tests {
         // 'é' is 2 bytes: byte range 1..3 covers it.
         b.apply_edit(1..3, "e");
         assert_eq!(b.snapshot().1, "hello\n");
+    }
+
+    #[test]
+    fn hash_matches_across_rope_chunking() {
+        let long = "line of text\n".repeat(5000);
+        let b = buf(&long);
+        assert_eq!(rope_hash(&b.text), hash_text(&long));
+        let mut b = buf("x\n");
+        b.apply_edit(0..0, "y");
+        b.mark_saved(UNIX_EPOCH);
+        assert_eq!(b.disk_hash, Some(hash_text("yx\n")));
     }
 
     #[test]

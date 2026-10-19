@@ -720,13 +720,18 @@ impl MekuShell {
             return;
         };
         let disk = std::fs::read_to_string(&abs).unwrap_or_default();
-        let (dirty, snapshot) = buffer.read_with(cx, |b, _| (b.dirty, b.snapshot().1));
-        if disk == snapshot {
+        let (dirty, snapshot, known) =
+            buffer.read_with(cx, |b, _| (b.dirty, b.snapshot().1, b.disk_hash));
+        // Our own save (or the content we loaded): the watcher event can
+        // arrive after more typing, when the buffer no longer equals the
+        // disk. That is not an outside edit.
+        if disk == snapshot || known == Some(meku_buffer::hash_text(&disk)) {
             let mtime = std::fs::metadata(&abs).and_then(|m| m.modified()).ok();
             buffer.update(cx, |b, _| {
                 if let Some(mtime) = mtime {
                     b.disk_mtime = Some(mtime);
                 }
+                b.disk_hash = Some(meku_buffer::hash_text(&disk));
             });
             return;
         }
@@ -753,6 +758,7 @@ impl MekuShell {
             buffer.update(cx, |b, _| {
                 b.apply_edit(0..len, text);
                 b.dirty = false;
+                b.disk_hash = Some(meku_buffer::hash_text(text));
                 b.move_caret(0, false);
             });
         }
@@ -1056,8 +1062,10 @@ impl MekuShell {
         match std::fs::write(&abs, &text) {
             Ok(()) => {
                 let mtime = std::fs::metadata(&abs).and_then(|m| m.modified()).ok();
+                let hash = meku_buffer::hash_text(&text);
                 buffer.update(cx, |b, _| {
                     b.dirty = false;
+                    b.disk_hash = Some(hash);
                     if let Some(mtime) = mtime {
                         b.disk_mtime = Some(mtime);
                     }
@@ -1116,6 +1124,12 @@ impl MekuShell {
             // no further event will arrive for this change.
             if let Ok(mtime) = std::fs::metadata(&abs).and_then(|m| m.modified()) {
                 buffer.update(cx, |b, _| b.disk_mtime = Some(mtime));
+            }
+            // Remember this disk content as seen, so repeated watcher events
+            // for it do not raise the banner again.
+            if let Ok(disk) = std::fs::read_to_string(&abs) {
+                let hash = meku_buffer::hash_text(&disk);
+                buffer.update(cx, |b, _| b.disk_hash = Some(hash));
             }
         }
         self.conflict = None;
@@ -2685,6 +2699,55 @@ mod ui_tests {
         assert_eq!(text, "# Theirs\n");
         let conflict = cx.update(|cx| view.read_with(cx, |shell, _| shell.conflict.clone()));
         assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn own_save_event_after_more_typing_is_not_a_conflict() {
+        run_ui_test("own_save_event", own_save_event_body);
+    }
+
+    fn own_save_event_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        let rel = PathBuf::from("note.md");
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| shell.open_file_inner(&rel, cx));
+        });
+        focus_doc_for(cx, &view, window);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("first ", cx);
+        })
+        .unwrap();
+        // Save, then keep typing before the watcher reports our own write.
+        cx.update(|cx| view.update(cx, |shell, cx| shell.save_buffer(&rel, cx)));
+        cx.update_window(window, |_, window, cx| window.input("more", cx))
+            .unwrap();
+        assert!(buffer_text(cx, &view, &rel).1, "buffer is dirty again");
+        cx.update(|cx| view.update(cx, |shell, cx| shell.sync_buffer_with_disk(&rel, cx)));
+        let (conflict, notice) = cx.update(|cx| {
+            view.read_with(cx, |shell, _| {
+                (shell.conflict.clone(), shell.notice.clone())
+            })
+        });
+        assert_eq!(conflict, None, "our own save is not an outside edit");
+        assert_eq!(notice, None);
+        assert!(
+            buffer_text(cx, &view, &rel).0.contains("more"),
+            "typing kept"
+        );
+
+        // A genuinely different disk version still raises the banner.
+        std::fs::write(_dir.path().join("note.md"), "# Theirs\n").unwrap();
+        cx.update(|cx| view.update(cx, |shell, cx| shell.sync_buffer_with_disk(&rel, cx)));
+        let conflict = cx.update(|cx| view.read_with(cx, |shell, _| shell.conflict.clone()));
+        assert_eq!(conflict, Some(rel.clone()));
+
+        // Keeping mine silences repeat events for that same disk content.
+        cx.update(|cx| view.update(cx, |shell, cx| shell.resolve_keep_mine(cx)));
+        cx.update(|cx| view.update(cx, |shell, cx| shell.sync_buffer_with_disk(&rel, cx)));
+        let conflict = cx.update(|cx| view.read_with(cx, |shell, _| shell.conflict.clone()));
+        assert_eq!(conflict, None);
     }
 
     #[test]
