@@ -204,7 +204,7 @@ pub(crate) fn menu_element(view: &SlashView, shell: &Entity<MekuShell>, cx: &App
                 .into_any_element()
         })
         .collect();
-    v_flex()
+    let menu = v_flex()
         .id("slash-menu")
         .test_support()
         .w(px(280.))
@@ -217,8 +217,8 @@ pub(crate) fn menu_element(view: &SlashView, shell: &Entity<MekuShell>, cx: &App
         .shadow_lg()
         // Presses on the menu must not move the caret under it.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .children(rows)
-        .into_any_element()
+        .children(rows);
+    crate::theme::fade_in(menu, "slash-in", 120, 4.0, cx)
 }
 
 /// Highlight helper for the selected menu row.

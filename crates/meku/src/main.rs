@@ -536,6 +536,10 @@ impl MekuShell {
         };
         match OpenBuffer::load(rel.to_path_buf(), &abs) {
             Ok(buffer) => {
+                // The empty "Welcome" placeholder only exists until a real
+                // note is opened.
+                self.tabs
+                    .retain(|t| !(t.rel.is_none() && t.title == "Welcome"));
                 self.buffers.insert(rel.to_path_buf(), cx.new(|_| buffer));
                 self.tabs.push(EditorTab {
                     rel: Some(rel.to_path_buf()),
@@ -2298,12 +2302,24 @@ impl Render for MekuShell {
                 ),
             )
             .child(self.render_status_bar(cx));
-        if let Some(modal) = self
-            .render_naming_modal(cx)
-            .or_else(|| self.render_delete_modal(cx))
-            .or_else(|| self.render_palette(cx))
-        {
-            root = root.child(modal);
+        if let Some(modal) = self.render_naming_modal(cx) {
+            root = root.child(theme::fade_in(
+                div().absolute().inset_0().child(modal),
+                "naming-in",
+                140,
+                0.0,
+                cx,
+            ));
+        } else if let Some(modal) = self.render_delete_modal(cx) {
+            root = root.child(theme::fade_in(
+                div().absolute().inset_0().child(modal),
+                "delete-in",
+                140,
+                0.0,
+                cx,
+            ));
+        } else if let Some(palette) = self.render_palette(cx) {
+            root = root.child(palette);
         }
         root
     }
@@ -2721,7 +2737,7 @@ mod ui_tests {
         let (naming_open, tabs) = cx
             .update(|cx| view.read_with(cx, |shell, _| (shell.naming.is_some(), shell.tabs.len())));
         assert!(!naming_open, "creating a note shows no window");
-        assert_eq!(tabs, 2); // Welcome + Untitled.md
+        assert_eq!(tabs, 1); // Untitled.md replaced the placeholder
         assert_eq!(title_value(cx, &view, "Untitled.md"), "Untitled");
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
@@ -5341,5 +5357,33 @@ mod ui_tests {
             );
         })
         .unwrap();
+    }
+
+    // -- motion ---------------------------------------------------------
+
+    #[test]
+    fn motion_follows_the_reduce_motion_setting() {
+        run_ui_test("motion_setting", motion_setting_body);
+    }
+
+    fn motion_setting_body(cx: &mut TestAppContext) {
+        assert!(
+            !cx.update(|cx| crate::theme::motion(cx)),
+            "no settings loaded (tests): motion off"
+        );
+        cx.update(|cx| cx.set_global(crate::theme::Settings::default()));
+        assert!(
+            cx.update(|cx| crate::theme::motion(cx)),
+            "default: motion on"
+        );
+        cx.update(|cx| {
+            let mut s = cx.global::<crate::theme::Settings>().clone();
+            s.reduce_motion = true;
+            cx.set_global(s);
+        });
+        assert!(
+            !cx.update(|cx| crate::theme::motion(cx)),
+            "reduce motion turns it off"
+        );
     }
 }

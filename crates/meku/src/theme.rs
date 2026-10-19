@@ -370,6 +370,59 @@ pub fn apply(palette: Palette, cx: &mut App) {
     cx.refresh_windows();
 }
 
+// -- motion ------------------------------------------------------------------
+
+/// Whether animations run: the user has not asked to reduce motion. With no
+/// settings loaded (headless tests) motion is off, because animations only
+/// finish when real time passes.
+pub fn motion(cx: &App) -> bool {
+    cx.try_global::<Settings>()
+        .is_some_and(|s| !s.reduce_motion)
+}
+
+/// Fade `el` in over `ms` (ease-out) when it first appears, sliding it
+/// `lift` pixels into place from below. A plain element with reduced motion.
+pub fn fade_in<E>(
+    el: E,
+    id: impl Into<gpui_kit::ElementId>,
+    ms: u64,
+    lift: f32,
+    cx: &App,
+) -> gpui_kit::AnyElement
+where
+    E: gpui_kit::IntoElement + gpui_kit::Styled + 'static,
+{
+    fade_from(el, id, ms, 0.0, lift, cx)
+}
+
+/// Like [`fade_in`], starting at `from` opacity instead of invisible.
+pub fn fade_from<E>(
+    el: E,
+    id: impl Into<gpui_kit::ElementId>,
+    ms: u64,
+    from: f32,
+    lift: f32,
+    cx: &App,
+) -> gpui_kit::AnyElement
+where
+    E: gpui_kit::IntoElement + gpui_kit::Styled + 'static,
+{
+    use gpui_kit::{Animation, AnimationExt as _, IntoElement as _};
+    if !motion(cx) {
+        return el.into_any_element();
+    }
+    el.with_animation(
+        id,
+        Animation::new(std::time::Duration::from_millis(ms))
+            .with_easing(gpui_kit::ease_out_quint()),
+        move |el, t| {
+            el.opacity(from + (1.0 - from) * t)
+                .mt(gpui_kit::px(lift * (1.0 - t)))
+        },
+    )
+    .into_any_element()
+}
+
 // -- settings -----------------------------------------------------------------
 
 /// User preferences kept across runs in `~/.config/meku/settings.json`.

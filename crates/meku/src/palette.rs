@@ -491,6 +491,31 @@ impl MekuShell {
                     .child("No matches"),
             );
         }
+        let panel = v_flex()
+            .id("palette")
+            .w(px(560.))
+            .max_w_full()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .shadow_lg()
+            .overflow_hidden()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        Input::new(&state.input)
+                            .appearance(false)
+                            .bordered(false)
+                            .focus_bordered(false),
+                    ),
+            )
+            .child(list);
         Some(
             div()
                 .absolute()
@@ -512,33 +537,7 @@ impl MekuShell {
                             close_shell.update(cx, |view, cx| view.close_palette(true, cx));
                         }),
                 )
-                .child(
-                    v_flex()
-                        .id("palette")
-                        .w(px(560.))
-                        .max_w_full()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().popover)
-                        .text_color(cx.theme().popover_foreground)
-                        .shadow_lg()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .child(
-                                    Input::new(&state.input)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .focus_bordered(false),
-                                ),
-                        )
-                        .child(list),
-                )
+                .child(theme::fade_in(panel, "palette-in", 140, 6.0, cx))
                 .into_any_element(),
         )
     }

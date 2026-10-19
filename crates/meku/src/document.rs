@@ -419,7 +419,7 @@ impl MekuShell {
             .child(input_bridge)
             .child(list_body)
             .children(self.render_find_bar(cx))
-            .into_any_element()
+            .pipe_fade(rel, cx)
     }
     /// Source byte offset for a point hit on row `ix`. Rows without a text
     /// layout (blank rules, spacers) resolve to their start.
@@ -1331,6 +1331,18 @@ fn caret_element(
         .bg(color)
 }
 
+/// Short fade when a note becomes the visible one (tab switch, open).
+trait OpenFade: Sized {
+    fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement;
+}
+
+impl<E: IntoElement + Styled + 'static> OpenFade for E {
+    fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement {
+        let id = SharedString::from(format!("doc-open-{}", rel.display()));
+        crate::theme::fade_in(self, id, 160, 0.0, cx)
+    }
+}
+
 /// Background of fenced code blocks.
 fn code_bg(cx: &App) -> Hsla {
     cx.theme().sidebar
@@ -1914,6 +1926,11 @@ fn row_element(
             font_size,
             cx.theme().caret,
         ));
+    }
+    // The row that becomes the editing row eases from slightly dimmed, so
+    // the markers appearing feels like a reveal rather than a jump.
+    if reveal && caret.is_some() {
+        return crate::theme::fade_from(el, ("row-reveal", ix), 120, 0.6, 0.0, cx);
     }
     el.into_any_element()
 }

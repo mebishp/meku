@@ -479,7 +479,7 @@ impl MekuShell {
                     ),
             );
         }
-        Some(bar.into_any_element())
+        Some(crate::theme::fade_in(bar, "find-in", 160, -6.0, cx))
     }
 }
 
