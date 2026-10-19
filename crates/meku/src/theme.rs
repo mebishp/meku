@@ -84,7 +84,7 @@ pub const SOLARIZED_LIGHT: Palette = Palette {
     surface: 0xeee8d5,
     border: 0xddd6c1,
     fg: 0x073642,
-    muted: 0x586e75,
+    muted: 0x52676e,
     accent: 0x268bd2,
     keyword: 0x6b7a00,
     string: 0x1f8a82,
@@ -104,7 +104,7 @@ pub const SOLARIZED_DARK: Palette = Palette {
     surface: 0x073642,
     border: 0x16505f,
     fg: 0xa9b6b6,
-    muted: 0x839496,
+    muted: 0x93a1a1,
     accent: 0x2f9fe0,
     keyword: 0xa4b800,
     string: 0x35b8ae,
@@ -700,7 +700,7 @@ mod tests {
                 p.name
             );
             assert!(
-                ratio(p.muted, p.surface) >= 4.0,
+                ratio(p.muted, p.surface) >= 4.5,
                 "{} muted on surface",
                 p.name
             );

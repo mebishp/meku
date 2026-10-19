@@ -300,7 +300,7 @@ pub const DEFS: &[Def] = &[
         "caret_blink",
         Section::Editor,
         "Blinking caret",
-        "",
+        "Blink the text cursor.",
         Kind::Bool,
         Dv::B(true),
     ),

@@ -43,6 +43,8 @@ pub(crate) fn icon_button(
         .size(px(28.))
         .rounded_md()
         .cursor_pointer()
+        .tab_stop(true)
+        .focus_visible(move |s| s.bg(hover_bg).text_color(fg))
         .text_color(if active { fg } else { muted })
         .when_active(active, on_bg)
         .hover(move |style| style.bg(hover_bg).text_color(fg))
@@ -192,8 +194,8 @@ impl MekuShell {
         if self.doc_rel().is_some() {
             right = right.child(self.render_mode_switch_icons(cx));
         }
-        right = right
-            .child(icon_button(
+        if !self.show_sidebar {
+            right = right.child(icon_button(
                 "title-search",
                 Ico::Search,
                 false,
@@ -204,19 +206,20 @@ impl MekuShell {
                         v.open_palette(crate::palette::PaletteKind::Files, cx)
                     });
                 },
-            ))
-            .child(icon_button(
-                "title-commands",
-                Ico::Terminal,
-                false,
-                "Command palette (Ctrl+Shift+P)",
-                cx,
-                move |_, cx| {
-                    palette_shell.update(cx, |v, cx| {
-                        v.open_palette(crate::palette::PaletteKind::Commands, cx)
-                    });
-                },
             ));
+        }
+        right = right.child(icon_button(
+            "title-commands",
+            Ico::Terminal,
+            false,
+            "Command palette (Ctrl+Shift+P)",
+            cx,
+            move |_, cx| {
+                palette_shell.update(cx, |v, cx| {
+                    v.open_palette(crate::palette::PaletteKind::Commands, cx)
+                });
+            },
+        ));
 
         h_flex()
             .size_full()
@@ -275,10 +278,20 @@ impl MekuShell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(26.))
+                    .h(px(26.))
+                    .px_2p5()
                     .rounded_md()
                     .cursor_pointer()
-                    .child(icon(m.icon(), px(15.), if on { fg } else { muted }))
+                    .tab_stop(true)
+                    .focus_visible(move |s| s.text_color(fg).bg(raised))
+                    .text_xs()
+                    .font_weight(if on {
+                        FontWeight::MEDIUM
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(if on { fg } else { muted })
+                    .child(m.label())
                     .tooltip(move |window, cx| Tooltip::new(m.tip()).build(window, cx))
                     .on_click(move |_, _, cx| {
                         click_shell.update(cx, |view, cx| view.set_tab_mode(m, cx));
@@ -626,7 +639,6 @@ impl MekuShell {
         );
 
         let footer_shell = cx.entity();
-        let cmd_shell = footer_shell.clone();
         let settings_shell = footer_shell.clone();
         let footer = h_flex()
             .flex_none()
@@ -645,21 +657,7 @@ impl MekuShell {
                 move |window, cx| {
                     settings_shell.update(cx, |v, cx| v.open_settings(None, window, cx));
                 },
-            ))
-            .child(icon_button(
-                "footer-commands",
-                Ico::Terminal,
-                false,
-                "Command palette",
-                cx,
-                move |_, cx| {
-                    cmd_shell.update(cx, |v, cx| {
-                        v.open_palette(crate::palette::PaletteKind::Commands, cx)
-                    });
-                },
-            ))
-            .child(div().flex_1())
-            .child(div().text_xs().text_color(muted).child("Meku"));
+            ));
 
         base.child(header)
             .child(search_field)
@@ -851,6 +849,10 @@ impl MekuShell {
     /// Collapsible heading tree of the active note (follows the caret).
     fn render_outline_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let outline = self.doc_outline(cx);
+        // Nothing to show: no empty section taking room from the tree.
+        if outline.is_empty() {
+            return div().into_any_element();
+        }
         let border = cx.theme().sidebar_border;
         let open = self.outline_open;
         let header = self.section_label("Outline", Ico::Outline, Some((open, cx.entity())), cx);

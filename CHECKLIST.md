@@ -367,3 +367,10 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] **Themes** (first in Appearance; no theme buttons in the main UI) — one Theme dropdown, "Follow system" and, only while following, Light and Dark dropdowns. Custom themes from a `themes` list in either settings file (`name`, `base`, `dark`, any of `bg surface border fg muted accent keyword string number func ty constant prop comment code` as `#rrggbb`); "Add theme" appends a starter entry. A mekuto theme overrides a global one of the same name.
 - [x] **Wired to features**: zoom, fonts, column width, motion, sidebar/outline/tab bar/status bar visibility, fold breakpoint, default view, markdown-reveal rule, auto-close pairs, smart lists, caret blink, image max height / click-to-zoom, table/callout/image rendering, autosave (+delay), attachments folder, delete confirmation, tab restore. Edits to the JSON by hand are picked up live (mtime poll).
 - Also wired: slash menu on/off, link click (plain / Ctrl), folder for new notes.
+
+## Section 13 — Critique fixes (2026-10-19)
+
+- [x] Callout types get distinct hues (Question teal, Bug magenta from the theme's syntax colours).
+- [x] Mode switch is labelled Edit / Live / Read; footer terminal icon and "Meku" label removed; title-bar search icon only shows while the sidebar is hidden; empty Outline section hidden.
+- [x] Settings: scope sentence, subheads in Editor/Files, keyboard tab stops + focus styles on settings and chrome controls.
+- [x] Muted text on surface ≥4.5:1 in every preset (Solarized tweaked).

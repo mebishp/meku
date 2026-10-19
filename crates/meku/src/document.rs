@@ -2022,8 +2022,12 @@ fn callout_color(kind: CalloutKind, cx: &App) -> Hsla {
         CalloutKind::Note => crate::theme::accent_alpha(cx, 1.0),
         CalloutKind::Info => theme.info,
         CalloutKind::Tip | CalloutKind::Success => theme.success,
-        CalloutKind::Question | CalloutKind::Warning => theme.warning,
-        CalloutKind::Danger | CalloutKind::Bug => theme.danger,
+        CalloutKind::Warning => theme.warning,
+        // Own hues from the theme's syntax colours, so each type reads apart
+        // even where the status colours coincide.
+        CalloutKind::Question => hex(crate::theme::active(cx).prop),
+        CalloutKind::Danger => theme.danger,
+        CalloutKind::Bug => hex(crate::theme::active(cx).constant),
         CalloutKind::Example => hex(crate::theme::active(cx).keyword),
         CalloutKind::Quote => theme.muted_foreground,
     }

@@ -375,6 +375,8 @@ impl MekuShell {
                 .py_1p5()
                 .rounded_md()
                 .cursor_pointer()
+                .tab_stop(true)
+                .focus_visible(move |s| s.bg(hover).text_color(fg))
                 .text_sm()
                 .text_color(if on { fg } else { muted })
                 .hover(move |s| s.bg(hover).text_color(fg))
@@ -395,6 +397,18 @@ impl MekuShell {
 
         // -- body
         let mut body = v_flex().w_full().max_w(px(560.)).gap_1().px_6().py_4();
+        body = body.child(
+            div()
+                .id("settings-scope-note")
+                .test_support()
+                .pb_2()
+                .text_xs()
+                .text_color(muted)
+                .child(match scope {
+                    Scope::Global => "Applies to every mekuto, unless a mekuto overrides it.",
+                    Scope::Mekuto => "Applies to this mekuto only and overrides Global.",
+                }),
+        );
         for issue in state.issues.iter().filter(|i| i.fatal) {
             body = body.child(self.json_banner(issue.scope, &issue.message, cx));
         }
@@ -411,7 +425,16 @@ impl MekuShell {
         }
         let rows: Vec<&'static Def> = if query.is_empty() {
             let Tab::Section(section) = tab;
-            ordered_defs(section, state.effective_for(scope).bool("follow_system"))
+            let mut rows = ordered_defs(section, state.effective_for(scope).bool("follow_system"));
+            // Keep each subhead's rows together (stable within a group).
+            let rank = |k: &str| match group_of(k) {
+                "View" | "Saving" => 1,
+                "Typing" | "Folders" => 2,
+                "Caret" | "Behaviour" => 3,
+                _ => 0,
+            };
+            rows.sort_by_key(|d| rank(d.key));
+            rows
         } else {
             DEFS.iter()
                 .filter(|d| {
@@ -432,7 +455,26 @@ impl MekuShell {
                     .child(format!("No settings match “{query}”.")),
             );
         }
+        let mut group = "";
         for def in rows {
+            // Subheads inside a section (not while searching).
+            let g = if query.is_empty() {
+                group_of(def.key)
+            } else {
+                ""
+            };
+            if g != group && !g.is_empty() {
+                body = body.child(
+                    div()
+                        .pt_4()
+                        .pb_1()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(muted)
+                        .child(g),
+                );
+            }
+            group = g;
             body = body.child(self.setting_row(def, scope, &state, cx));
         }
         if query.is_empty() && tab == Tab::Section(Section::Appearance) {
@@ -892,6 +934,19 @@ fn ordered_defs(section: Section, follow: bool) -> Vec<&'static Def> {
     rows
 }
 
+/// Subhead a setting sits under within its section; empty for none.
+fn group_of(key: &str) -> &'static str {
+    match key {
+        "default_mode" | "reveal_markdown" | "link_click" => "View",
+        "auto_close_pairs" | "smart_lists" | "slash_menu" => "Typing",
+        "caret_blink" | "caret_blink_ms" => "Caret",
+        "autosave" | "autosave_delay_ms" => "Saving",
+        "new_note_folder" | "attachments_folder" => "Folders",
+        "confirm_delete" | "restore_session" => "Behaviour",
+        _ => "",
+    }
+}
+
 /// Panel size: most of the window, capped.
 fn panel_size(window: &Window) -> (Pixels, Pixels) {
     let v = window.viewport_size();
@@ -925,7 +980,7 @@ struct Segment {
 fn segmented(segments: Vec<Segment>, cx: &App) -> AnyElement {
     let colors = cx.theme();
     let (fg, muted) = (colors.foreground, colors.muted_foreground);
-    let (track, raised) = (colors.secondary, colors.background);
+    let (track, raised, focus) = (colors.secondary, colors.background, colors.list_hover);
     let mut row = h_flex()
         .flex_none()
         .p_0p5()
@@ -950,6 +1005,8 @@ fn segmented(segments: Vec<Segment>, cx: &App) -> AnyElement {
         if seg.enabled {
             el = el
                 .cursor_pointer()
+                .tab_stop(true)
+                .focus_visible(move |s| s.text_color(fg).bg(focus))
                 .hover(move |s| s.text_color(fg))
                 .on_click(move |_, window, cx| click(window, cx));
         } else {
@@ -984,6 +1041,8 @@ fn small_button(
         .size(px(26.))
         .rounded_md()
         .cursor_pointer()
+        .tab_stop(true)
+        .focus_visible(move |s| s.bg(hover).text_color(fg))
         .text_color(muted)
         .hover(move |s| s.bg(hover).text_color(fg))
         .child(icon(ico, px(15.), muted))
@@ -1007,6 +1066,8 @@ fn link_button(
         .text_xs()
         .text_color(accent)
         .cursor_pointer()
+        .tab_stop(true)
+        .focus_visible(move |s| s.text_color(fg).underline())
         .hover(move |s| s.text_color(fg))
         .child(label)
         .on_click(move |_, window, cx| click(window, cx))

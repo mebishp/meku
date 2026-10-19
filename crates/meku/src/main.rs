@@ -5355,7 +5355,7 @@ mod ui_tests {
         });
         assert_eq!(words, Some(4));
         assert_eq!(lc, (2, 2));
-        step(cx, window, |w, cx| w.click("title-search", cx));
+        step(cx, window, |w, cx| w.click("sidebar-search", cx));
         step(cx, window, |_, _| {});
         assert!(
             view.read_with(&*cx, |s, _| s.palette.is_some()),
