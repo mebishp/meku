@@ -811,6 +811,15 @@ fn classify(
         }
     }
 
+    // A marker that is not (yet) a list marker stays literal text, though the
+    // parser may already treat it as one and hide its bytes.
+    if bullet.is_none()
+        && heading.is_none()
+        && let Some(len) = unfinished_marker_len(rest)
+    {
+        specials.push((p..p + len, Role::Plain));
+    }
+
     // `> [!note] Title`: the tag is markup; the row opens a callout block.
     let mut callout = None;
     if kind == RowKind::Quote
@@ -884,54 +893,54 @@ fn is_rule(trimmed: &str) -> bool {
     count >= 3
 }
 
-/// Length of a list marker (including its following space) and whether it is ordered.
-fn bullet_len(rest: &str) -> Option<(usize, bool)> {
+/// Bytes of a list-looking marker that is not a bullet in Meku: `-`, `+`,
+/// `1.` or `1)` still being typed (no space yet), and `*` markers, which are
+/// emphasis rather than bullets.
+fn unfinished_marker_len(rest: &str) -> Option<usize> {
     let bytes = rest.as_bytes();
     match bytes.first()? {
-        b'-' | b'*' | b'+' => {
-            if rest.len() == 1 {
-                Some((1, false))
-            } else if bytes[1] == b' ' {
-                Some((2, false))
-            } else {
-                None
-            }
-        }
+        b'-' | b'+' => (bytes.len() == 1).then_some(1),
+        b'*' => (bytes.len() == 1 || bytes[1] == b' ').then_some(bytes.len().min(2)),
         b'0'..=b'9' => {
             let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-            if digits > 9 || digits >= bytes.len() {
-                return None;
-            }
-            if !matches!(bytes[digits], b'.' | b')') {
-                return None;
-            }
-            let after = digits + 1;
-            if after == bytes.len() {
-                Some((after, true))
-            } else if bytes[after] == b' ' {
-                Some((after + 1, true))
-            } else {
-                None
-            }
+            (digits <= 9
+                && matches!(bytes.get(digits), Some(b'.' | b')'))
+                && bytes.len() == digits + 1)
+                .then_some(digits + 1)
         }
         _ => None,
     }
 }
 
-/// Length of a task checkbox (including its following space) and its checked state.
+/// Length of a *completed* list marker (including its following space) and
+/// whether it is ordered. A marker still being typed (`-`, `1.`) stays plain
+/// text until the space arrives, and `*` is never a bullet: it belongs to
+/// emphasis.
+fn bullet_len(rest: &str) -> Option<(usize, bool)> {
+    let bytes = rest.as_bytes();
+    match bytes.first()? {
+        b'-' | b'+' => (bytes.get(1) == Some(&b' ')).then_some((2, false)),
+        b'0'..=b'9' => {
+            let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+            if digits > 9 || !matches!(bytes.get(digits), Some(b'.' | b')')) {
+                return None;
+            }
+            (bytes.get(digits + 1) == Some(&b' ')).then_some((digits + 2, true))
+        }
+        _ => None,
+    }
+}
+
+/// Length of a completed task checkbox (`[ ] `, with its following space)
+/// and its checked state; `[ ]` without the space is still plain text.
 fn task_len(after_marker: &str) -> Option<(usize, bool)> {
     let bytes = after_marker.as_bytes();
-    if bytes.len() < 3 || bytes[0] != b'[' || bytes[2] != b']' {
+    if bytes.len() < 4 || bytes[0] != b'[' || bytes[2] != b']' || bytes[3] != b' ' {
         return None;
     }
-    let checked = match bytes[1] {
-        b' ' => false,
-        b'x' | b'X' => true,
-        _ => return None,
-    };
-    match bytes.get(3) {
-        None => Some((3, checked)),
-        Some(b' ') => Some((4, checked)),
+    match bytes[1] {
+        b' ' => Some((4, false)),
+        b'x' | b'X' => Some((4, true)),
         _ => None,
     }
 }
@@ -1179,9 +1188,37 @@ mod tests {
     #[test]
     fn bullets_become_glyphs_and_ordered_markers_stay() {
         assert_eq!(shown("- a", 0, false), "• a");
-        assert_eq!(shown("* a", 0, false), "• a");
         assert_eq!(shown("1. a", 0, false), "1. a");
         assert_eq!(shown("- a", 0, true), "- a");
+    }
+
+    #[test]
+    fn markers_become_lists_only_once_completed_with_a_space() {
+        let kind = |t: &str| build_rows(t)[0].kind;
+        // Still being typed: plain text, shown exactly as typed.
+        for typing in ["-", "+", "1.", "12)", "*"] {
+            assert_eq!(shown(typing, 0, false), typing, "{typing:?} stays literal");
+        }
+        // After "- " the bullet shows; the half-typed box after it does not.
+        for typing in ["- [", "- [ ]", "- [x]"] {
+            assert!(build_rows(typing)[0].task().is_none(), "{typing:?}");
+        }
+        assert_eq!(kind("-"), RowKind::Text);
+        assert_eq!(kind("1."), RowKind::Text);
+        assert_eq!(
+            kind("- [ ]"),
+            RowKind::Item,
+            "the dash is complete, the box is not"
+        );
+        assert!(build_rows("- [ ]")[0].task().is_none());
+        // The space completes them.
+        assert_eq!(kind("- "), RowKind::Item);
+        assert_eq!(kind("1. "), RowKind::Item);
+        assert!(build_rows("- [ ] ")[0].task().is_some());
+        // `*` is emphasis, never a bullet.
+        assert_eq!(kind("* a"), RowKind::Text);
+        assert_eq!(shown("* a", 0, false), "* a");
+        assert_eq!(kind("*a*"), RowKind::Text);
     }
 
     #[test]

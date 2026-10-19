@@ -154,12 +154,12 @@ impl MarkerKind {
     }
 }
 
-/// A `- `/`* `/`+ ` bullet, `- [x] `/`- [ ] ` task or `12. `/`12) ` ordered
+/// A `- `/`+ ` bullet (`* ` is emphasis, never a bullet), `- [x] `/`- [ ] ` task or `12. `/`12) ` ordered
 /// item at the start of `rest` (after any indent). Returns the byte length
 /// of the marker (trailing spaces included) and its kind.
 fn parse_list_marker(rest: &str) -> Option<(usize, MarkerKind)> {
     let bytes = rest.as_bytes();
-    if matches!(bytes.first(), Some(b'-') | Some(b'*') | Some(b'+')) {
+    if matches!(bytes.first(), Some(b'-') | Some(b'+')) {
         let bullet = bytes[0] as char;
         let after_bullet = &rest[1..];
         return if let Some(space) = after_bullet.strip_prefix(' ') {
