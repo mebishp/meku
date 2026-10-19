@@ -246,6 +246,31 @@ impl MekuShell {
         .detach();
     }
 
+    /// Startup overrides from the environment (see `main`).
+    fn apply_startup_state(&mut self, cx: &mut Context<Self>) {
+        let mode = match std::env::var("MEKU_MODE").as_deref() {
+            Ok("edit") => Some(Mode::Edit),
+            Ok("live") => Some(Mode::Live),
+            Ok("read") => Some(Mode::Read),
+            _ => None,
+        };
+        if let (Some(mode), Some(tab)) = (mode, self.tabs.get_mut(self.active_tab)) {
+            tab.mode = mode;
+        }
+        if let Some(at) = std::env::var("MEKU_CARET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            && let Some(rel) = self.doc_rel()
+            && let Some(buffer) = self.buffers.get(&rel).cloned()
+        {
+            buffer.update(cx, |b, _| b.move_caret(at, false));
+        }
+        if std::env::var("MEKU_MODAL").as_deref() == Ok("folder") {
+            self.begin_naming(NamingMode::NewFolder, PathBuf::new(), None, cx);
+        }
+        cx.notify();
+    }
+
     /// Stepped caret blink: 530ms on, 530ms off, held solid for 600ms after
     /// any input. Only re-renders while a note is open outside Read mode.
     fn start_caret_blink(&self, cx: &mut Context<Self>) {
@@ -1695,10 +1720,22 @@ impl MekuShell {
             _ => self.render_empty_state(&active.title, cx),
         };
 
+        // `min_w_0` + clipping keep a long tab strip from widening the pane
+        // (and with it the whole window); the strip scrolls sideways instead.
         v_flex()
             .size_full()
-            .child(div().flex_none().child(tab_bar))
-            .child(v_flex().flex_1().min_h_0().child(body))
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("tabs-scroll")
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .child(tab_bar),
+            )
+            .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
     }
 
     /// Edit / Live / Read buttons, right-aligned above the document. Only
@@ -1850,8 +1887,15 @@ impl MekuShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(0x0000_0000))
-                .opacity(0.5)
+                // The scrim is its own layer; opacity on a parent would also
+                // fade the dialog card inside it.
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(cx.theme().foreground)
+                        .opacity(0.28),
+                )
                 .child(
                     div()
                         .w(px(360.))
@@ -1860,7 +1904,6 @@ impl MekuShell {
                         .border_color(cx.theme().border)
                         .bg(cx.theme().background)
                         .p_4()
-                        .opacity(1.0)
                         .gap_3()
                         .flex()
                         .flex_col()
@@ -1913,8 +1956,15 @@ impl MekuShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(0x0000_0000))
-                .opacity(0.5)
+                // The scrim is its own layer; opacity on a parent would also
+                // fade the dialog card inside it.
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(cx.theme().foreground)
+                        .opacity(0.28),
+                )
                 .child(
                     div()
                         .w(px(360.))
@@ -1923,7 +1973,6 @@ impl MekuShell {
                         .border_color(cx.theme().border)
                         .bg(cx.theme().background)
                         .p_4()
-                        .opacity(1.0)
                         .gap_3()
                         .flex()
                         .flex_col()
@@ -2183,7 +2232,17 @@ fn main() {
             cx.open_window(options, |window, cx| {
                 let view = cx.new(MekuShell::new);
                 if let Some(dir) = initial_dir {
-                    view.update(cx, |shell, cx| shell.open_mekuto(Path::new(&dir), cx));
+                    view.update(cx, |shell, cx| {
+                        shell.open_mekuto(Path::new(&dir), cx);
+                        // Optional second argument: a note (relative path) to
+                        // open at startup; `MEKU_MODE=edit|live|read` and
+                        // `MEKU_CARET=<byte>` set up reproducible states for
+                        // screenshots.
+                        for file in std::env::args().skip(2) {
+                            shell.open_file_inner(Path::new(&file), cx);
+                        }
+                        shell.apply_startup_state(cx);
+                    });
                 }
                 // First level on the window must be a Root.
                 cx.new(|cx| Root::new(view, window, cx))
