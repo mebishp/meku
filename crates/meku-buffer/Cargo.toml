@@ -6,6 +6,7 @@ rust-version = "1.92"
 
 [dependencies]
 anyhow = { workspace = true }
+meku-table = { workspace = true }
 ropey = { workspace = true }
 
 [dev-dependencies]

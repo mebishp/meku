@@ -136,7 +136,9 @@ fn extract_headings(text: &str) -> (String, Vec<Heading>) {
     (title, headings)
 }
 
-fn fuzzy_score(query: &str, candidate: &str) -> Option<u64> {
+/// Case-insensitive subsequence score of `query` against `candidate`
+/// (`None` when it is not a subsequence); higher is better.
+pub fn fuzzy_score(query: &str, candidate: &str) -> Option<u64> {
     let query: Vec<char> = query.to_lowercase().chars().collect();
     let candidate_lower: Vec<char> = candidate.to_lowercase().chars().collect();
     if query.is_empty() {

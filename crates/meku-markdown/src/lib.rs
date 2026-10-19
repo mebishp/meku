@@ -36,6 +36,7 @@ impl InlineStyle {
     pub const STRIKE: u8 = 0b0000_0100;
     pub const CODE: u8 = 0b0000_1000;
     pub const LINK: u8 = 0b0001_0000;
+    pub const HIGHLIGHT: u8 = 0b0010_0000;
 
     pub fn empty() -> Self {
         Self { bits: 0 }

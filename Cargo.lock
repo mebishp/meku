@@ -3323,6 +3323,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
 
 [[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
+
+[[package]]
 name = "imgref"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3890,12 +3896,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "imagesize 0.15.0",
  "meku-buffer",
  "meku-index",
  "meku-markdown",
+ "meku-table",
  "meku-vault",
  "notify",
+ "regex",
  "rfd",
+ "serde",
+ "serde_json",
  "tempfile",
  "walkdir",
 ]
@@ -3905,6 +3916,7 @@ name = "meku-buffer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "meku-table",
  "ropey",
  "tempfile",
 ]
@@ -3920,6 +3932,8 @@ dependencies = [
 name = "meku-markdown"
 version = "0.1.0"
 dependencies = [
+ "meku-table",
+ "memchr",
  "pulldown-cmark",
  "tree-sitter",
  "tree-sitter-bash",
@@ -3929,6 +3943,10 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
 ]
+
+[[package]]
+name = "meku-table"
+version = "0.1.0"
 
 [[package]]
 name = "meku-vault"

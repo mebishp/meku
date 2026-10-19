@@ -14,9 +14,14 @@ gpui-kit = { workspace = true }
 meku-buffer = { workspace = true }
 meku-index = { workspace = true }
 meku-markdown = { workspace = true }
+meku-table = { workspace = true }
 meku-vault = { workspace = true }
 notify = { workspace = true }
 rfd = "0.17"
+regex = { workspace = true }
+imagesize = "0.15"
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
 walkdir = { workspace = true }
 
 [dev-dependencies]
