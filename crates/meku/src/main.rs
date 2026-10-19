@@ -34,6 +34,9 @@ actions!(
         CycleTheme,
         NavBack,
         NavForward,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
         NewTab,
         CloseTab,
         NextTab,
@@ -196,6 +199,10 @@ pub struct MekuShell {
     caret_touch: Instant,
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
+    /// Window currently narrower than the sidebar breakpoint, and whether the
+    /// sidebar was hidden by that (so it comes back when the window widens).
+    narrow: bool,
+    sidebar_auto_hidden: bool,
     /// Notes visited, oldest first, and the position in them (back/forward).
     nav_history: Vec<PathBuf>,
     nav_pos: usize,
@@ -269,6 +276,8 @@ impl MekuShell {
             caret_on: true,
             caret_touch: Instant::now(),
             hover_link: None,
+            narrow: false,
+            sidebar_auto_hidden: false,
             nav_history: Vec::new(),
             nav_pos: 0,
             navigating: false,
@@ -349,6 +358,14 @@ impl MekuShell {
             self.open_lightbox(info, cx);
             self.lightbox_zoom = std::env::var("MEKU_ZOOM").ok().and_then(|v| v.parse().ok());
         }
+        if let Some(z) = std::env::var("MEKU_ZOOM_LEVEL")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            let mut settings = cx.global::<theme::Settings>().clone();
+            settings.zoom = z;
+            cx.set_global(settings);
+        }
         if std::env::var("MEKU_FIND").is_ok() {
             self.open_find(std::env::var("MEKU_REPLACE").is_ok(), cx);
         }
@@ -357,6 +374,7 @@ impl MekuShell {
             Ok("commands") => self.open_palette(palette::PaletteKind::Commands, cx),
             Ok("themes") => self.open_palette(palette::PaletteKind::Themes, cx),
             Ok("search") => self.open_palette(palette::PaletteKind::Search, cx),
+            Ok("shortcuts") => self.open_palette(palette::PaletteKind::Shortcuts, cx),
             _ => {}
         }
         if std::env::var("MEKU_MODAL").as_deref() == Ok("folder") {
@@ -1669,6 +1687,34 @@ impl MekuShell {
         self.find_step(-1, cx);
     }
 
+    /// Narrow windows give the editor the room: below ~820px the sidebar
+    /// folds away, and returns when the window widens again — unless the user
+    /// toggled it themselves in the meantime.
+    fn adapt_to_width(&mut self, window: &Window) {
+        let narrow = window.viewport_size().width < px(820.);
+        if narrow == self.narrow {
+            return;
+        }
+        self.narrow = narrow;
+        if narrow && self.show_sidebar {
+            self.show_sidebar = false;
+            self.sidebar_auto_hidden = true;
+        } else if !narrow && self.sidebar_auto_hidden {
+            self.show_sidebar = true;
+            self.sidebar_auto_hidden = false;
+        }
+    }
+
+    fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        theme::set_zoom(Some(1), cx);
+    }
+    fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        theme::set_zoom(Some(-1), cx);
+    }
+    fn on_zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        theme::set_zoom(None, cx);
+    }
+
     fn on_nav_back(&mut self, _: &NavBack, _: &mut Window, cx: &mut Context<Self>) {
         self.nav_step(-1, cx);
     }
@@ -1687,6 +1733,7 @@ impl MekuShell {
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.show_sidebar = !self.show_sidebar;
+        self.sidebar_auto_hidden = false;
         cx.notify();
     }
 
@@ -1917,6 +1964,7 @@ impl Render for MekuShell {
         self.ensure_title_input(window, cx);
         self.ensure_palette(window, cx);
         self.ensure_find(window, cx);
+        self.adapt_to_width(window);
         let focus = self.focus_handle.clone();
         if std::mem::take(&mut self.focus_doc) && self.naming.is_none() {
             window.focus(&focus, cx);
@@ -1928,6 +1976,12 @@ impl Render for MekuShell {
             .key_context("Meku")
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::on_cycle_theme))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.on_drop_paths(paths.paths(), cx);
+            }))
+            .on_action(cx.listener(Self::on_zoom_in))
+            .on_action(cx.listener(Self::on_zoom_out))
+            .on_action(cx.listener(Self::on_zoom_reset))
             .on_action(cx.listener(Self::on_nav_back))
             .on_action(cx.listener(Self::on_nav_forward))
             .on_action(cx.listener(Self::on_open_find))
@@ -2104,6 +2158,11 @@ fn main() {
             KeyBinding::new("ctrl-alt-t", CycleTheme, Some("Meku")),
             KeyBinding::new("alt-left", NavBack, Some("Meku")),
             KeyBinding::new("alt-right", NavForward, Some("Meku")),
+            KeyBinding::new("ctrl-=", ZoomIn, Some("Meku")),
+            KeyBinding::new("ctrl-+", ZoomIn, Some("Meku")),
+            KeyBinding::new("ctrl-shift-=", ZoomIn, Some("Meku")),
+            KeyBinding::new("ctrl--", ZoomOut, Some("Meku")),
+            KeyBinding::new("ctrl-alt-0", ZoomReset, Some("Meku")),
             KeyBinding::new("ctrl-t", NewTab, Some("Meku")),
             KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
             KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
@@ -2283,6 +2342,11 @@ mod ui_tests {
                 KeyBinding::new("ctrl-\\", ToggleSidebar, Some("Meku")),
                 KeyBinding::new("alt-left", crate::NavBack, Some("Meku")),
                 KeyBinding::new("alt-right", crate::NavForward, Some("Meku")),
+                KeyBinding::new("ctrl-=", crate::ZoomIn, Some("Meku")),
+                KeyBinding::new("ctrl-+", crate::ZoomIn, Some("Meku")),
+                KeyBinding::new("ctrl-shift-=", crate::ZoomIn, Some("Meku")),
+                KeyBinding::new("ctrl--", crate::ZoomOut, Some("Meku")),
+                KeyBinding::new("ctrl-alt-0", crate::ZoomReset, Some("Meku")),
                 KeyBinding::new("ctrl-p", crate::palette::OpenFileFinder, Some("Meku")),
                 KeyBinding::new(
                     "ctrl-shift-p",
@@ -5682,5 +5746,99 @@ mod ui_tests {
             caret_row_raw(cx, &view),
             "a selection reveals the embed's source"
         );
+    }
+
+    // -- UX pass: zoom, narrow windows, hints, drops --------------------
+
+    #[test]
+    fn zoom_keys_step_clamp_and_show_in_the_status_bar() {
+        run_ui_test("zoom", zoom_body);
+    }
+
+    fn zoom_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "text\n");
+        cx.update(|cx| cx.set_global(crate::theme::Settings::default()));
+        focus_doc_for(cx, &view, window);
+        assert_eq!(cx.update(|cx| crate::theme::zoom(cx)), 1.0);
+        step(cx, window, |w, cx| w.press("ctrl-=", cx));
+        step(cx, window, |w, cx| w.press("ctrl-=", cx));
+        assert!(
+            (cx.update(|cx| crate::theme::zoom(cx)) - 1.2).abs() < 0.001,
+            "two steps in"
+        );
+        step(cx, window, |w, cx| w.press("ctrl--", cx));
+        assert!((cx.update(|cx| crate::theme::zoom(cx)) - 1.1).abs() < 0.001);
+        step(cx, window, |_, _| {});
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(
+                w.try_find("status-zoom").is_some(),
+                "status bar shows the zoom"
+            );
+        })
+        .unwrap();
+        step(cx, window, |w, cx| w.press("ctrl-alt-0", cx));
+        assert_eq!(cx.update(|cx| crate::theme::zoom(cx)), 1.0, "reset");
+        for _ in 0..30 {
+            step(cx, window, |w, cx| w.press("ctrl-=", cx));
+        }
+        assert_eq!(
+            cx.update(|cx| crate::theme::zoom(cx)),
+            2.0,
+            "capped at 200%"
+        );
+        for _ in 0..40 {
+            step(cx, window, |w, cx| w.press("ctrl--", cx));
+        }
+        assert_eq!(cx.update(|cx| crate::theme::zoom(cx)), 0.7, "floor at 70%");
+    }
+
+    #[test]
+    fn narrow_windows_fold_the_sidebar_and_restore_it() {
+        run_ui_test("narrow_sidebar", narrow_sidebar_body);
+    }
+
+    fn narrow_sidebar_body(cx: &mut TestAppContext) {
+        let (view, _window, _dir) = open_note_in(cx, 700.0, 600.0, "text\n");
+        assert!(
+            !view.read_with(&*cx, |s, _| s.show_sidebar),
+            "folded in a 700px window"
+        );
+        let (view, _window, _dir) = open_note_in(cx, 1100.0, 700.0, "text\n");
+        assert!(
+            view.read_with(&*cx, |s, _| s.show_sidebar),
+            "shown in a wide window"
+        );
+    }
+
+    #[test]
+    fn empty_notes_hint_at_how_to_begin_and_files_can_be_dropped() {
+        run_ui_test("drops_and_hint", drops_and_hint_body);
+    }
+
+    fn drops_and_hint_body(cx: &mut TestAppContext) {
+        let (view, _window, dir) = open_note_in(cx, 1200.0, 800.0, "");
+        let rel = PathBuf::from("doc.md");
+        let outside = tempfile::tempdir().unwrap();
+        let note = outside.path().join("Elsewhere.md");
+        std::fs::write(&note, "# E\n").unwrap();
+        let pic = outside.path().join("shot.png");
+        std::fs::write(&pic, PNG_1X1).unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.on_drop_paths(&[note.clone(), pic.clone()], cx)
+            })
+        });
+        // The outside note is copied into the mekuto and opened…
+        assert!(dir.path().join("Elsewhere.md").exists());
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.doc_rel()),
+            Some(PathBuf::from("Elsewhere.md"))
+        );
+        // …and the image goes into whichever note is open, as an embed.
+        assert!(dir.path().join("attachments/shot.png").exists());
+        let text = buffer_text(cx, &view, &PathBuf::from("Elsewhere.md")).0;
+        assert!(text.contains("![[shot.png]]"), "{text:?}");
+        let _ = rel;
     }
 }

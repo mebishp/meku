@@ -426,6 +426,9 @@ impl MekuShell {
             .id("md-scroll")
             .test_support()
             .px_4()
+            // Zoom scales the document only (chrome keeps its size): every row
+            // measure derives from this container's text size.
+            .text_size(cx.theme().font_size * crate::theme::zoom(cx))
             .child(input_bridge)
             .child(list_body)
             .children(self.render_find_bar(cx))
@@ -1181,9 +1184,16 @@ impl MekuShell {
             self.notice = Some(format!("Could not save the pasted image: {e}"));
             return false;
         }
+        Self::insert_embed(buffer, &name, cx);
+        self.notice = Some(format!("Saved attachments/{name}"));
+        true
+    }
+
+    /// Put `![[name]]` on its own line at the caret (images render when they
+    /// are alone on their line).
+    fn insert_embed(buffer: &Entity<OpenBuffer>, name: &str, cx: &mut Context<Self>) {
         let link = format!("![[{name}]]");
         buffer.update(cx, |b, _| {
-            // Images render when they are alone on their line.
             let (line_start, line) = (b.line_start_of_caret(), b.caret_line_text());
             let text = if line.trim().is_empty() && b.caret() == line_start + line.len() {
                 format!("{link}\n")
@@ -1192,8 +1202,88 @@ impl MekuShell {
             };
             b.insert(&text);
         });
-        self.notice = Some(format!("Saved attachments/{name}"));
-        true
+    }
+
+    /// Files dropped on the window: a folder opens as the mekuto, a note
+    /// opens (copied into the mekuto first when it lives elsewhere), an image
+    /// is copied into `attachments/` and embedded in the open note.
+    pub(crate) fn on_drop_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        for path in paths {
+            if path.is_dir() {
+                self.open_mekuto(path, cx);
+                return;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            let Some(root) = self.explorer.root().map(Path::to_path_buf) else {
+                self.notice = Some("Open a folder first, then drop notes and images".into());
+                continue;
+            };
+            if meku_vault::is_note(path) {
+                let rel = match path.strip_prefix(&root) {
+                    Ok(rel) => rel.to_path_buf(),
+                    Err(_) => {
+                        let name = path.file_name().map(PathBuf::from).unwrap_or_default();
+                        let mut target = name.clone();
+                        let mut n = 1;
+                        while root.join(&target).exists() {
+                            n += 1;
+                            target = PathBuf::from(format!(
+                                "{} {n}.{ext}",
+                                name.file_stem().and_then(|s| s.to_str()).unwrap_or("note")
+                            ));
+                        }
+                        if std::fs::copy(path, root.join(&target)).is_err() {
+                            self.notice = Some(format!("Could not copy {}", path.display()));
+                            continue;
+                        }
+                        self.explorer.refresh();
+                        self.notice =
+                            Some(format!("Copied into the mekuto as {}", target.display()));
+                        target
+                    }
+                };
+                self.open_file(&rel, cx);
+            } else if matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "avif"
+            ) {
+                let (Some(rel), Some(name)) = (
+                    self.doc_rel(),
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(str::to_string),
+                ) else {
+                    self.notice = Some("Open a note first, then drop the image into it".into());
+                    continue;
+                };
+                let Some(buffer) = self.buffers.get(&rel).cloned() else {
+                    continue;
+                };
+                let dir = rel.parent().unwrap_or(Path::new("")).join("attachments");
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+                let mut file = name.clone();
+                let mut n = 1;
+                while root.join(&dir).join(&file).exists() {
+                    n += 1;
+                    file = format!("{stem} {n}.{ext}");
+                }
+                let copied = std::fs::create_dir_all(root.join(&dir))
+                    .and_then(|()| std::fs::copy(path, root.join(&dir).join(&file)).map(|_| ()));
+                match copied {
+                    Ok(()) => {
+                        Self::insert_embed(&buffer, &file, cx);
+                        self.doc_note_edit(&rel);
+                        self.notice = Some(format!("Added {file}"));
+                    }
+                    Err(e) => self.notice = Some(format!("Could not add the image: {e}")),
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Scroll the row holding `offset` into view without moving the caret.
@@ -2135,6 +2225,17 @@ fn row_element(
         // vanishes whenever the user creates a new line. Approximate the
         // text rows' glyph centering: the glyph box (~1em) sits centered in
         // the 1.1em row, so offset it by the slack.
+        // A brand-new note says how to begin.
+        if text.is_empty() && ix == 0 {
+            el = el.child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(0.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Start writing, or type / for blocks"),
+            );
+        }
         if caret.is_some() && caret_on {
             el = el.child(caret_element(
                 px(0.),

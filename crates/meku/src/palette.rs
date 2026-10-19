@@ -30,6 +30,7 @@ pub(crate) enum PaletteKind {
     Themes,
     Search,
     GotoLine,
+    Shortcuts,
 }
 
 impl PaletteKind {
@@ -40,6 +41,7 @@ impl PaletteKind {
             PaletteKind::Themes => "Choose a theme…",
             PaletteKind::Search => "Search every note…",
             PaletteKind::GotoLine => "Line number…",
+            PaletteKind::Shortcuts => "Search shortcuts…",
         }
     }
 }
@@ -64,6 +66,10 @@ pub(crate) enum Command {
     ThemeFollowSystem,
     ThemeNext,
     ToggleReduceMotion,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    ShortcutsHelp,
 }
 
 /// `(command, title, shortcut)` in the order shown for an empty query.
@@ -85,6 +91,10 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::ThemeFollowSystem, "Theme: follow system", ""),
     (Command::ThemeNext, "Theme: next", "Ctrl+Alt+T"),
     (Command::ToggleReduceMotion, "Toggle reduce motion", ""),
+    (Command::ZoomIn, "Zoom in", "Ctrl +"),
+    (Command::ZoomOut, "Zoom out", "Ctrl -"),
+    (Command::ZoomReset, "Reset zoom", "Ctrl Alt 0"),
+    (Command::ShortcutsHelp, "Keyboard shortcuts", ""),
 ];
 
 #[derive(Clone)]
@@ -114,6 +124,49 @@ pub(crate) struct PaletteState {
     /// Look to restore when a theme preview is cancelled.
     pub original: Option<Palette>,
 }
+
+/// Every default shortcut, grouped by what it does: `(action, keys)`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Open note", "Ctrl P"),
+    ("Command palette", "Ctrl Shift P"),
+    ("Search all notes", "Ctrl Shift F"),
+    ("Find / replace in note", "Ctrl F  ·  Ctrl H"),
+    ("Go to line", "Ctrl G"),
+    ("Back / forward", "Alt ←  ·  Alt →"),
+    ("New note", "Ctrl T"),
+    ("Close tab / next tab", "Ctrl W  ·  Ctrl Tab"),
+    ("Toggle sidebar", "Ctrl \\"),
+    ("Source / Live / Read", "Ctrl E"),
+    ("Zoom in / out / reset", "Ctrl +  ·  Ctrl -  ·  Ctrl Alt 0"),
+    ("Next theme", "Ctrl Alt T"),
+    ("Bold", "Ctrl B"),
+    ("Italic", "Ctrl I"),
+    ("Strikethrough", "Ctrl Shift X"),
+    ("Highlight", "Ctrl Shift H"),
+    ("Inline code", "Ctrl `"),
+    ("Insert / edit link", "Ctrl K"),
+    ("Heading 1-6 / paragraph", "Ctrl 1-6  ·  Ctrl 0"),
+    ("Quote", "Ctrl Alt Q"),
+    (
+        "Numbered / bulleted / task list",
+        "Ctrl Shift 7  ·  8  ·  9",
+    ),
+    ("Toggle task done", "Ctrl L"),
+    ("Indent / outdent item", "Tab  ·  Shift Tab"),
+    ("Move line up / down", "Alt ↑  ·  Alt ↓"),
+    ("Duplicate / delete line", "Ctrl Shift D  ·  Ctrl Shift K"),
+    ("Join lines", "Ctrl J"),
+    ("Comment (in code)", "Ctrl /"),
+    ("Expand selection", "Ctrl D"),
+    ("Word left / right", "Ctrl ←  ·  Ctrl →"),
+    ("Block menu", "/"),
+    (
+        "Insert line below / above",
+        "Ctrl Enter  ·  Ctrl Shift Enter",
+    ),
+    ("Soft line break", "Shift Enter"),
+    ("Undo / redo", "Ctrl Z  ·  Ctrl Y"),
+];
 
 const MAX_ITEMS: usize = 10;
 
@@ -241,6 +294,26 @@ impl MekuShell {
                         label: text.chars().take(120).collect(),
                         detail: format!("{}:{}", rel.display(), line + 1),
                         target: Target::Hit(rel, line),
+                    })
+                    .collect()
+            }
+            PaletteKind::Shortcuts => {
+                let mut scored: Vec<(u64, usize)> = SHORTCUTS
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, (action, keys))| {
+                        meku_index::fuzzy_score(q, &format!("{action} {keys}")).map(|s| (s, i))
+                    })
+                    .collect();
+                if !q.is_empty() {
+                    scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+                }
+                scored
+                    .into_iter()
+                    .map(|(_, i)| Item {
+                        label: SHORTCUTS[i].0.to_string(),
+                        detail: SHORTCUTS[i].1.to_string(),
+                        target: Target::None,
                     })
                     .collect()
             }
@@ -393,6 +466,7 @@ impl MekuShell {
             Command::CloseTab => self.close_tab(self.active_tab, cx),
             Command::ToggleSidebar => {
                 self.show_sidebar = !self.show_sidebar;
+                self.sidebar_auto_hidden = false;
                 cx.notify();
             }
             Command::CycleMode => {
@@ -429,6 +503,10 @@ impl MekuShell {
                     .unwrap_or(0);
                 theme::choose(theme::PRESETS[(at + 1) % theme::PRESETS.len()].name, cx);
             }
+            Command::ZoomIn => theme::set_zoom(Some(1), cx),
+            Command::ZoomOut => theme::set_zoom(Some(-1), cx),
+            Command::ZoomReset => theme::set_zoom(None, cx),
+            Command::ShortcutsHelp => self.open_palette(PaletteKind::Shortcuts, cx),
             Command::ToggleReduceMotion => {
                 let mut settings = cx.global::<theme::Settings>().clone();
                 settings.reduce_motion = !settings.reduce_motion;
@@ -447,7 +525,11 @@ impl MekuShell {
         let rows: Vec<AnyElement> = state
             .items
             .iter()
-            .take(MAX_ITEMS)
+            .take(if state.kind == PaletteKind::Shortcuts {
+                14
+            } else {
+                MAX_ITEMS
+            })
             .enumerate()
             .map(|(i, item)| {
                 let click_shell = shell.clone();
@@ -480,7 +562,12 @@ impl MekuShell {
             })
             .collect();
         let empty = rows.is_empty();
-        let mut list = v_flex().p_1().max_h(px(360.)).children(rows);
+        let mut list = v_flex()
+            .id("palette-list")
+            .p_1()
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .children(rows);
         if empty {
             list = list.child(
                 div()

@@ -423,6 +423,35 @@ where
     .into_any_element()
 }
 
+/// Smallest / largest document zoom and the step between presets.
+pub const ZOOM_MIN: f32 = 0.7;
+pub const ZOOM_MAX: f32 = 2.0;
+const ZOOM_STEP: f32 = 0.1;
+
+/// Current document zoom (1.0 with no settings, e.g. in tests).
+pub fn zoom(cx: &App) -> f32 {
+    cx.try_global::<Settings>()
+        .map_or(1.0, |s| s.zoom.clamp(ZOOM_MIN, ZOOM_MAX))
+}
+
+/// Step the zoom by `steps` tenths (negative = out), or reset with `None`.
+/// Saved immediately.
+pub fn set_zoom(change: Option<i32>, cx: &mut App) {
+    let mut settings = cx.try_global::<Settings>().cloned().unwrap_or_default();
+    settings.zoom = match change {
+        None => 1.0,
+        Some(steps) => {
+            ((settings.zoom + steps as f32 * ZOOM_STEP) * 10.0)
+                .round()
+                .clamp(ZOOM_MIN * 10.0, ZOOM_MAX * 10.0)
+                / 10.0
+        }
+    };
+    settings.save();
+    cx.set_global(settings);
+    cx.refresh_windows();
+}
+
 // -- settings -----------------------------------------------------------------
 
 /// User preferences kept across runs in `~/.config/meku/settings.json`.
@@ -435,6 +464,8 @@ pub struct Settings {
     pub follow_system: bool,
     /// Disable every non-essential animation.
     pub reduce_motion: bool,
+    /// Document text scale (1.0 = 100%), 0.7 – 2.0.
+    pub zoom: f32,
 }
 
 impl Default for Settings {
@@ -443,6 +474,7 @@ impl Default for Settings {
             theme: MEKU_LIGHT.name.to_string(),
             follow_system: true,
             reduce_motion: false,
+            zoom: 1.0,
         }
     }
 }
@@ -467,6 +499,10 @@ impl Settings {
     }
 
     pub fn save(&self) {
+        // Tests must never overwrite the user's real settings.
+        if cfg!(test) {
+            return;
+        }
         let Some(path) = settings_path() else {
             return;
         };
@@ -587,6 +623,14 @@ mod tests {
         assert_eq!(on(0xffffff), "#0f1115");
         assert_eq!(on(0x000000), "#ffffff");
         assert_eq!(alpha(0xff0000, 0.5), "#ff000080");
+    }
+
+    #[test]
+    fn zoom_defaults_and_old_settings_files_still_load() {
+        assert_eq!(Settings::default().zoom, 1.0);
+        let old: Settings =
+            serde_json::from_str(r#"{"theme":"Nord","follow_system":false}"#).unwrap();
+        assert_eq!(old.zoom, 1.0, "settings saved before zoom existed");
     }
 
     #[test]

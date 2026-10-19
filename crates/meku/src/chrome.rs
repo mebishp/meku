@@ -257,6 +257,7 @@ impl MekuShell {
                         move |_, cx| {
                             sidebar_shell.update(cx, |v, cx| {
                                 v.show_sidebar = !v.show_sidebar;
+                                v.sidebar_auto_hidden = false;
                                 cx.notify();
                             });
                         },
@@ -1105,6 +1106,22 @@ impl MekuShell {
             let hover = cx.theme().list_hover;
             let goto_shell = cx.entity();
             let mode_shell = cx.entity();
+            let zoom = theme::zoom(cx);
+            if (zoom - 1.0).abs() > 0.01 {
+                let zoom_hover = cx.theme().list_hover;
+                right = right.child(
+                    div()
+                        .id("status-zoom")
+                        .test_support()
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(zoom_hover).text_color(fg))
+                        .tooltip(|window, cx| Tooltip::new("Reset zoom").build(window, cx))
+                        .child(format!("{}%", (zoom * 100.0).round() as u32))
+                        .on_click(|_, _, cx| theme::set_zoom(None, cx)),
+                );
+            }
             right = right
                 .child(format!(
                     "{words} {}",
