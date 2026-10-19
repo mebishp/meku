@@ -67,6 +67,10 @@ pub(crate) enum DocKey {
     JoinLines,
     ToggleComment,
     SoftBreak,
+    Wrap(&'static str),
+    Heading(usize),
+    Quote,
+    Expand,
     Link,
     Indent,
     Outdent,
@@ -304,6 +308,7 @@ impl MekuShell {
         let caret_on = self.caret_on;
         let wrap_cell = self.doc_wrap.clone();
         let tables = self.doc_tables.clone();
+        let slash_view = self.slash_view(cx);
         let copied_ix = self
             .copied
             .filter(|(_, at)| at.elapsed() < std::time::Duration::from_millis(1500))
@@ -328,7 +333,7 @@ impl MekuShell {
                 row,
                 &text,
                 reveal,
-                (is_caret_row && caret_on).then_some(caret),
+                is_caret_row.then_some(caret),
                 match mode {
                     Mode::Read => None,
                     _ => selection_for(row, &selection),
@@ -346,6 +351,12 @@ impl MekuShell {
                 &tables,
                 version,
                 copied_ix == Some(ix),
+                caret_on,
+                if is_caret_row {
+                    slash_view.as_ref()
+                } else {
+                    None
+                },
                 &shell,
                 &views,
                 window,
@@ -444,6 +455,7 @@ impl MekuShell {
         ix: usize,
         pos: Point<Pixels>,
         extend: bool,
+        clicks: usize,
         cx: &mut Context<Self>,
     ) {
         if self.modal_open() {
@@ -461,8 +473,13 @@ impl MekuShell {
             return;
         };
         if let Some(buffer) = self.buffers.get(&rel).cloned() {
-            buffer.update(cx, |b, _| b.move_caret(src, extend));
+            buffer.update(cx, |b, _| match clicks {
+                0 | 1 => b.move_caret(src, extend),
+                2 => b.select_word_at(src),
+                _ => b.select_line_at(src),
+            });
         }
+        self.update_slash(false, cx);
         cx.notify();
     }
 
@@ -627,6 +644,24 @@ impl MekuShell {
             return;
         }
         self.touch_caret();
+        // An open slash menu takes the navigation keys.
+        if self.slash.is_some() {
+            match key {
+                DocKey::Up => {
+                    self.slash_move(-1, cx);
+                    return;
+                }
+                DocKey::Down => {
+                    self.slash_move(1, cx);
+                    return;
+                }
+                DocKey::Enter | DocKey::Indent => {
+                    self.slash_confirm(None, cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
         let Some(rel) = self.doc_rel() else {
             return;
         };
@@ -872,6 +907,34 @@ impl MekuShell {
                 });
                 true
             }
+            DocKey::Wrap(marker) => {
+                if fence_at(&model, buffer.read(cx).caret()).0 {
+                    false
+                } else {
+                    buffer.update(cx, |b, _| b.toggle_wrap(marker));
+                    true
+                }
+            }
+            DocKey::Heading(level) => {
+                if fence_at(&model, buffer.read(cx).caret()).0 {
+                    false
+                } else {
+                    buffer.update(cx, |b, _| b.set_heading(level));
+                    true
+                }
+            }
+            DocKey::Quote => {
+                if fence_at(&model, buffer.read(cx).caret()).0 {
+                    false
+                } else {
+                    buffer.update(cx, |b, _| b.toggle_quote());
+                    true
+                }
+            }
+            DocKey::Expand => {
+                buffer.update(cx, |b, _| b.expand_selection());
+                false
+            }
             DocKey::SoftBreak => {
                 buffer.update(cx, |b, _| b.soft_break());
                 true
@@ -921,6 +984,8 @@ impl MekuShell {
             let caret = buffer.read(cx).caret();
             self.doc_list
                 .scroll_to_reveal_item(row_at(&model.rows, caret));
+            let in_code = fence_at(&model, caret).0;
+            self.update_slash(in_code, cx);
         }
         cx.notify();
     }
@@ -1527,6 +1592,8 @@ fn row_element(
     tables: &TableCache,
     version: u64,
     copied: bool,
+    caret_on: bool,
+    slash: Option<&crate::slash::SlashView>,
     shell: &Entity<MekuShell>,
     views: &RowViews,
     window: &mut Window,
@@ -1547,7 +1614,7 @@ fn row_element(
                 if view.doc_follow_link(ix, ev.position, ev.modifiers.control, cx) {
                     return;
                 }
-                view.doc_pointer(ix, ev.position, ev.modifiers.shift, cx);
+                view.doc_pointer(ix, ev.position, ev.modifiers.shift, ev.click_count, cx);
             });
         })
         .on_mouse_move(move |ev: &MouseMoveEvent, _window, cx| {
@@ -1625,7 +1692,7 @@ fn row_element(
         // vanishes whenever the user creates a new line. Approximate the
         // text rows' glyph centering: the glyph box (~1em) sits centered in
         // the 1.1em row, so offset it by the slack.
-        if caret.is_some() {
+        if caret.is_some() && caret_on {
             el = el.child(caret_element(
                 px(0.),
                 (row_h - base_font) / 2.0,
@@ -1826,7 +1893,20 @@ fn row_element(
     let caret_geo = caret_shape.and_then(|(text, runs, index)| {
         caret_geometry(window, &text, &runs, font_size, index, wrap)
     });
-    if let Some((advance, y_offset, cheight)) = caret_geo {
+    if let (Some(menu), Some((advance, y_offset, cheight))) = (slash, caret_geo) {
+        // Drawn above the rows below it, anchored under the caret.
+        el = el.child(
+            deferred(
+                div()
+                    .absolute()
+                    .left(text_x + advance)
+                    .top(text_y + y_offset + cheight + px(6.))
+                    .child(crate::slash::menu_element(menu, shell, cx)),
+            )
+            .with_priority(10),
+        );
+    }
+    if let Some((advance, y_offset, cheight)) = caret_geo.filter(|_| caret_on) {
         el = el.child(caret_element(
             text_x + advance,
             text_y + y_offset,
@@ -2017,6 +2097,7 @@ impl EntityInputHandler for MekuShell {
             let code = fence_at(&model, buffer.read(cx).caret()).0;
             if buffer.update(cx, |b, _| b.type_char(ch, code)) {
                 self.doc_note_edit(&rel);
+                self.update_slash(code, cx);
                 cx.notify();
                 return;
             }
@@ -2024,6 +2105,10 @@ impl EntityInputHandler for MekuShell {
         let typing = text.chars().count() == 1 && text != "\n";
         buffer.update(cx, |b, _| b.replace(target, text, typing));
         self.doc_note_edit(&rel);
+        let in_code = self
+            .doc_model(&rel, cx)
+            .is_some_and(|m| fence_at(&m, buffer.read(cx).caret()).0);
+        self.update_slash(in_code, cx);
         cx.notify();
     }
 

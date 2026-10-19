@@ -2,6 +2,7 @@ mod document;
 mod explorer;
 mod find;
 mod palette;
+mod slash;
 mod theme;
 
 use std::cell::RefCell;
@@ -77,6 +78,20 @@ actions!(
         DocJoinLines,
         DocToggleComment,
         DocSoftBreak,
+        DocBold,
+        DocItalic,
+        DocStrike,
+        DocHighlight,
+        DocInlineCode,
+        DocQuote,
+        DocExpand,
+        DocH0,
+        DocH1,
+        DocH2,
+        DocH3,
+        DocH4,
+        DocH5,
+        DocH6,
         DocLink,
         DocIndent,
         DocOutdent,
@@ -181,6 +196,9 @@ pub struct MekuShell {
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
     palette: Option<palette::PaletteState>,
+    slash: Option<slash::SlashState>,
+    /// `/` offset whose menu was closed with Esc.
+    slash_dismissed: Option<usize>,
     find: Option<find::FindState>,
     /// Open the find bar on the next render (`true` = with replace).
     find_request: Option<bool>,
@@ -237,6 +255,8 @@ impl MekuShell {
             caret_touch: Instant::now(),
             hover_link: None,
             palette: None,
+            slash: None,
+            slash_dismissed: None,
             find: None,
             find_request: None,
             palette_request: None,
@@ -292,6 +312,7 @@ impl MekuShell {
         {
             buffer.update(cx, |b, _| b.move_caret(at, false));
         }
+        self.update_slash(false, cx);
         self.pending_scroll = std::env::var("MEKU_ROW")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1035,6 +1056,53 @@ impl MekuShell {
     ) {
         self.doc_key(document::DocKey::ToggleTask, false, window, cx);
     }
+    fn on_doc_bold(&mut self, _: &DocBold, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Wrap("**"), false, window, cx);
+    }
+    fn on_doc_italic(&mut self, _: &DocItalic, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Wrap("*"), false, window, cx);
+    }
+    fn on_doc_strike(&mut self, _: &DocStrike, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Wrap("~~"), false, window, cx);
+    }
+    fn on_doc_highlight(&mut self, _: &DocHighlight, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Wrap("=="), false, window, cx);
+    }
+    fn on_doc_inline_code(
+        &mut self,
+        _: &DocInlineCode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::Wrap("`"), false, window, cx);
+    }
+    fn on_doc_quote(&mut self, _: &DocQuote, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Quote, false, window, cx);
+    }
+    fn on_doc_expand(&mut self, _: &DocExpand, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Expand, false, window, cx);
+    }
+    fn on_doc_h0(&mut self, _: &DocH0, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Heading(0), false, window, cx);
+    }
+    fn on_doc_h1(&mut self, _: &DocH1, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Heading(1), false, window, cx);
+    }
+    fn on_doc_h2(&mut self, _: &DocH2, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Heading(2), false, window, cx);
+    }
+    fn on_doc_h3(&mut self, _: &DocH3, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Heading(3), false, window, cx);
+    }
+    fn on_doc_h4(&mut self, _: &DocH4, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Heading(4), false, window, cx);
+    }
+    fn on_doc_h5(&mut self, _: &DocH5, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Heading(5), false, window, cx);
+    }
+    fn on_doc_h6(&mut self, _: &DocH6, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Heading(6), false, window, cx);
+    }
     fn on_doc_up(&mut self, _: &DocUp, window: &mut Window, cx: &mut Context<Self>) {
         self.doc_key(document::DocKey::Up, false, window, cx);
     }
@@ -1532,7 +1600,9 @@ impl MekuShell {
     }
 
     fn on_cancel_overlay(&mut self, _: &CancelOverlay, _: &mut Window, cx: &mut Context<Self>) {
-        if self.palette_open() || self.naming.is_some() || self.pending_delete.is_some() {
+        if self.slash_dismiss() {
+            cx.notify();
+        } else if self.palette_open() || self.naming.is_some() || self.pending_delete.is_some() {
             self.close_palette(true, cx);
         } else {
             self.close_find(cx);
@@ -2186,6 +2256,20 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_doc_toggle_comment))
             .on_action(cx.listener(Self::on_doc_soft_break))
             .on_action(cx.listener(Self::on_doc_link))
+            .on_action(cx.listener(Self::on_doc_bold))
+            .on_action(cx.listener(Self::on_doc_italic))
+            .on_action(cx.listener(Self::on_doc_strike))
+            .on_action(cx.listener(Self::on_doc_highlight))
+            .on_action(cx.listener(Self::on_doc_inline_code))
+            .on_action(cx.listener(Self::on_doc_quote))
+            .on_action(cx.listener(Self::on_doc_expand))
+            .on_action(cx.listener(Self::on_doc_h0))
+            .on_action(cx.listener(Self::on_doc_h1))
+            .on_action(cx.listener(Self::on_doc_h2))
+            .on_action(cx.listener(Self::on_doc_h3))
+            .on_action(cx.listener(Self::on_doc_h4))
+            .on_action(cx.listener(Self::on_doc_h5))
+            .on_action(cx.listener(Self::on_doc_h6))
             .on_action(cx.listener(Self::on_doc_indent))
             .on_action(cx.listener(Self::on_doc_outdent))
             .on_action(cx.listener(Self::on_doc_list_bullet))
@@ -2263,7 +2347,7 @@ fn main() {
         theme::init(cx);
 
         cx.bind_keys([
-            KeyBinding::new("ctrl-b", ToggleSidebar, Some("Meku")),
+            KeyBinding::new("ctrl-\\", ToggleSidebar, Some("Meku")),
             KeyBinding::new("ctrl-p", palette::OpenFileFinder, Some("Meku")),
             KeyBinding::new("ctrl-shift-p", palette::OpenCommandPalette, Some("Meku")),
             KeyBinding::new("ctrl-shift-f", palette::OpenVaultSearch, Some("Meku")),
@@ -2320,6 +2404,20 @@ fn main() {
             KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
             KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
             KeyBinding::new("ctrl-k", DocLink, Some("Meku")),
+            KeyBinding::new("ctrl-b", DocBold, Some("Meku")),
+            KeyBinding::new("ctrl-i", DocItalic, Some("Meku")),
+            KeyBinding::new("ctrl-shift-x", DocStrike, Some("Meku")),
+            KeyBinding::new("ctrl-shift-h", DocHighlight, Some("Meku")),
+            KeyBinding::new("ctrl-`", DocInlineCode, Some("Meku")),
+            KeyBinding::new("ctrl-alt-q", DocQuote, Some("Meku")),
+            KeyBinding::new("ctrl-d", DocExpand, Some("Meku")),
+            KeyBinding::new("ctrl-0", DocH0, Some("Meku")),
+            KeyBinding::new("ctrl-1", DocH1, Some("Meku")),
+            KeyBinding::new("ctrl-2", DocH2, Some("Meku")),
+            KeyBinding::new("ctrl-3", DocH3, Some("Meku")),
+            KeyBinding::new("ctrl-4", DocH4, Some("Meku")),
+            KeyBinding::new("ctrl-5", DocH5, Some("Meku")),
+            KeyBinding::new("ctrl-6", DocH6, Some("Meku")),
             KeyBinding::new("tab", DocIndent, Some("Meku")),
             KeyBinding::new("shift-tab", DocOutdent, Some("Meku")),
             KeyBinding::new("ctrl-shift-8", DocListBullet, Some("Meku")),
@@ -2380,16 +2478,18 @@ mod ui_tests {
     // would shadow the builtin `#[test]` and send the harness into macro
     // recursion. Import everything this module needs explicitly.
     use crate::{
-        CancelOverlay, CloseTab, CycleMode, DocBackspace, DocCopy, DocCut, DocDelete,
+        CancelOverlay, CloseTab, CycleMode, DocBackspace, DocBold, DocCopy, DocCut, DocDelete,
         DocDeleteLine, DocDeleteToLineStart, DocDeleteWordBack, DocDeleteWordFwd, DocDocEnd,
-        DocDocStart, DocDown, DocDuplicateLine, DocEnd, DocEnter, DocHome, DocIndent,
-        DocInsertLineAbove, DocInsertLineBelow, DocJoinLines, DocLeft, DocLink, DocListBullet,
-        DocListOrdered, DocListTask, DocMoveLineDown, DocMoveLineUp, DocOutdent, DocPageDown,
-        DocPageUp, DocPaste, DocRedo, DocRight, DocSelectAll, DocSelectDocEnd, DocSelectDocStart,
-        DocSelectDown, DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectPageDown,
-        DocSelectPageUp, DocSelectRight, DocSelectUp, DocSelectWordLeft, DocSelectWordRight,
-        DocSoftBreak, DocToggleComment, DocToggleTask, DocUndo, DocUp, DocWordRight, MekuShell,
-        Mode, NamingMode, NewTab, NextTab, OpenFolder, Save, ToggleSidebar,
+        DocDocStart, DocDown, DocDuplicateLine, DocEnd, DocEnter, DocExpand, DocH0, DocH1, DocH2,
+        DocH3, DocH4, DocH5, DocH6, DocHighlight, DocHome, DocIndent, DocInlineCode,
+        DocInsertLineAbove, DocInsertLineBelow, DocItalic, DocJoinLines, DocLeft, DocLink,
+        DocListBullet, DocListOrdered, DocListTask, DocMoveLineDown, DocMoveLineUp, DocOutdent,
+        DocPageDown, DocPageUp, DocPaste, DocQuote, DocRedo, DocRight, DocSelectAll,
+        DocSelectDocEnd, DocSelectDocStart, DocSelectDown, DocSelectEnd, DocSelectHome,
+        DocSelectLeft, DocSelectPageDown, DocSelectPageUp, DocSelectRight, DocSelectUp,
+        DocSelectWordLeft, DocSelectWordRight, DocSoftBreak, DocStrike, DocToggleComment,
+        DocToggleTask, DocUndo, DocUp, DocWordRight, MekuShell, Mode, NamingMode, NewTab, NextTab,
+        OpenFolder, Save, ToggleSidebar,
     };
     use gpui_kit::Focusable as _;
     use gpui_kit::component::Root;
@@ -2435,7 +2535,7 @@ mod ui_tests {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             cx.bind_keys([
-                KeyBinding::new("ctrl-b", ToggleSidebar, Some("Meku")),
+                KeyBinding::new("ctrl-\\", ToggleSidebar, Some("Meku")),
                 KeyBinding::new("ctrl-p", crate::palette::OpenFileFinder, Some("Meku")),
                 KeyBinding::new(
                     "ctrl-shift-p",
@@ -2498,6 +2598,20 @@ mod ui_tests {
                 KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
                 KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
                 KeyBinding::new("ctrl-k", DocLink, Some("Meku")),
+                KeyBinding::new("ctrl-b", DocBold, Some("Meku")),
+                KeyBinding::new("ctrl-i", DocItalic, Some("Meku")),
+                KeyBinding::new("ctrl-shift-x", DocStrike, Some("Meku")),
+                KeyBinding::new("ctrl-shift-h", DocHighlight, Some("Meku")),
+                KeyBinding::new("ctrl-`", DocInlineCode, Some("Meku")),
+                KeyBinding::new("ctrl-alt-q", DocQuote, Some("Meku")),
+                KeyBinding::new("ctrl-d", DocExpand, Some("Meku")),
+                KeyBinding::new("ctrl-0", DocH0, Some("Meku")),
+                KeyBinding::new("ctrl-1", DocH1, Some("Meku")),
+                KeyBinding::new("ctrl-2", DocH2, Some("Meku")),
+                KeyBinding::new("ctrl-3", DocH3, Some("Meku")),
+                KeyBinding::new("ctrl-4", DocH4, Some("Meku")),
+                KeyBinding::new("ctrl-5", DocH5, Some("Meku")),
+                KeyBinding::new("ctrl-6", DocH6, Some("Meku")),
                 KeyBinding::new("tab", DocIndent, Some("Meku")),
                 KeyBinding::new("shift-tab", DocOutdent, Some("Meku")),
                 KeyBinding::new("ctrl-shift-8", DocListBullet, Some("Meku")),
@@ -5042,5 +5156,190 @@ mod ui_tests {
             })
         });
         assert_eq!(kinds, Some(vec![true, true, false, false, false]));
+    }
+
+    // -- formatting shortcuts --------------------------------------------
+
+    #[test]
+    fn formatting_shortcuts_wrap_and_set_headings() {
+        run_ui_test("format_keys", format_keys_body);
+    }
+
+    fn format_keys_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "make bold now\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        select_doc_range(cx, &view, 5, 9);
+        step(cx, window, |w, cx| w.press("ctrl-b", cx));
+        assert_eq!(buffer_text(cx, &view, &rel).0, "make **bold** now\n");
+        step(cx, window, |w, cx| w.press("ctrl-i", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "make ***bold*** now\n",
+            "italic stacks on bold"
+        );
+        step(cx, window, |w, cx| w.press("ctrl-i", cx));
+        step(cx, window, |w, cx| w.press("ctrl-b", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "make bold now\n",
+            "both toggle off again"
+        );
+        step(cx, window, |w, cx| w.press("ctrl-shift-h", cx));
+        assert_eq!(buffer_text(cx, &view, &rel).0, "make ==bold== now\n");
+        move_doc_caret(cx, &view, 2);
+        step(cx, window, |w, cx| w.press("ctrl-2", cx));
+        assert_eq!(buffer_text(cx, &view, &rel).0, "## make ==bold== now\n");
+        step(cx, window, |w, cx| w.press("ctrl-0", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "make ==bold== now\n",
+            "Ctrl+0 is a paragraph"
+        );
+        // The sidebar toggle moved to Ctrl+\ so Ctrl+B can be bold.
+        assert!(cx.update(|cx| view.read_with(cx, |s, _| s.show_sidebar)));
+        step(cx, window, |w, cx| w.press("ctrl-\\", cx));
+        assert!(!cx.update(|cx| view.read_with(cx, |s, _| s.show_sidebar)));
+    }
+
+    #[test]
+    fn ctrl_d_expands_and_double_click_selects_a_word() {
+        run_ui_test("expand_click", expand_click_body);
+    }
+
+    fn expand_click_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "alpha beta\ngamma\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        let selected = |cx: &mut TestAppContext| {
+            cx.update(|cx| view.read_with(cx, |s, cx| s.buffers[&rel].read(cx).selected_text()))
+        };
+        move_doc_caret(cx, &view, 2);
+        step(cx, window, |w, cx| w.press("ctrl-d", cx));
+        assert_eq!(selected(cx), "alpha");
+        step(cx, window, |w, cx| w.press("ctrl-d", cx));
+        assert_eq!(selected(cx), "alpha beta");
+        move_doc_caret(cx, &view, 0);
+        step(cx, window, |w, cx| {
+            w.double_click(("doc-row", 0usize), cx);
+        });
+        assert!(!selected(cx).is_empty(), "double click selects something");
+    }
+
+    // -- slash menu ---------------------------------------------------
+
+    #[test]
+    fn slash_menu_filters_inserts_and_dismisses() {
+        run_ui_test("slash_menu", slash_menu_body);
+    }
+
+    fn slash_menu_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "intro\n\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 7);
+        let open =
+            |cx: &mut TestAppContext| cx.update(|cx| view.read_with(cx, |s, _| s.slash.is_some()));
+        step(cx, window, |w, cx| w.input("/", cx));
+        assert!(open(cx), "typing / at the start of a line opens the menu");
+        step(cx, window, |w, cx| w.input("tab", cx));
+        step(cx, window, |w, cx| w.press("enter", cx));
+        assert!(!open(cx), "choosing closes the menu");
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "intro\n\n| Column | Column |\n| ------ | ------ |\n|        |        |",
+            "the table template replaces /tab"
+        );
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            7 + 20 + 20 + 2,
+            "caret in the first body cell"
+        );
+
+        // Esc dismisses; typing on keeps it closed; deleting the slash resets.
+        let (view2, window2, _d2) = open_note_in(cx, 1200.0, 800.0, "x /");
+        focus_doc_for(cx, &view2, window2);
+        move_doc_caret(cx, &view2, 3);
+        step(cx, window2, |w, cx| w.input("h", cx));
+        assert!(cx.update(|cx| view2.read_with(cx, |s, _| s.slash.is_some())));
+        step(cx, window2, |w, cx| w.press("escape", cx));
+        assert!(
+            !cx.update(|cx| view2.read_with(cx, |s, _| s.slash.is_some())),
+            "Esc closes"
+        );
+        step(cx, window2, |w, cx| w.input("e", cx));
+        assert!(
+            !cx.update(|cx| view2.read_with(cx, |s, _| s.slash.is_some())),
+            "stays closed"
+        );
+        // A path-like slash never opens it.
+        let (view3, window3, _d3) = open_note_in(cx, 1200.0, 800.0, "a");
+        focus_doc_for(cx, &view3, window3);
+        move_doc_caret(cx, &view3, 1);
+        step(cx, window3, |w, cx| w.input("/", cx));
+        assert!(
+            !cx.update(|cx| view3.read_with(cx, |s, _| s.slash.is_some())),
+            "a/ is not a command"
+        );
+    }
+
+    #[test]
+    fn slash_menu_arrows_and_click() {
+        run_ui_test("slash_arrows", slash_arrows_body);
+    }
+
+    fn slash_arrows_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        step(cx, window, |w, cx| w.input("/", cx));
+        step(cx, window, |w, cx| w.press("down", cx));
+        step(cx, window, |w, cx| w.press("down", cx));
+        step(cx, window, |w, cx| w.press("enter", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "### ",
+            "third entry is Heading 3"
+        );
+        // Click an entry with the mouse.
+        step(cx, window, |w, cx| w.press("enter", cx));
+        step(cx, window, |w, cx| w.input("/", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.click(("slash-item", 6usize), cx));
+        assert!(
+            buffer_text(cx, &view, &rel).0.ends_with("> "),
+            "clicked the Quote entry: {:?}",
+            buffer_text(cx, &view, &rel).0
+        );
+    }
+
+    #[test]
+    fn slash_menu_does_not_depend_on_the_caret_blink() {
+        run_ui_test("slash_blink", slash_blink_body);
+    }
+
+    fn slash_blink_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "");
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |w, cx| w.input("/", cx));
+        // Blink the caret off: the menu must stay on screen.
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.caret_on = false;
+                cx.notify();
+            })
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("slash-menu").is_some(),
+                "menu drawn with the caret hidden"
+            );
+            assert!(
+                window.try_find("doc-caret").is_none(),
+                "caret really is hidden"
+            );
+        })
+        .unwrap();
     }
 }

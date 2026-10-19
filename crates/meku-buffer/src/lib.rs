@@ -1709,6 +1709,278 @@ impl OpenBuffer {
         self.coalescing = false;
     }
 
+    // -- formatting (F8) -----------------------------------------------------
+
+    /// Byte range of the alphanumeric/underscore word touching the caret.
+    pub fn word_at_caret(&self) -> Option<Range<usize>> {
+        let (line_start, line) = self.line_body();
+        let col = self.caret - line_start;
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut start = col;
+        for (i, c) in line[..col].char_indices().rev() {
+            if is_word(c) {
+                start = i;
+            } else {
+                break;
+            }
+        }
+        let mut end = col;
+        for (i, c) in line[col..].char_indices() {
+            if is_word(c) {
+                end = col + i + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        (start < end).then_some(line_start + start..line_start + end)
+    }
+
+    /// Toggle an inline `marker` (`**`, `*`, `~~`, `==`, `` ` ``) around the
+    /// selection (or the word under the caret). Already-wrapped text is
+    /// unwrapped, whether the markers are inside or just outside the
+    /// selection. With nothing to wrap an empty pair is inserted. One undo
+    /// step; the inner text stays selected.
+    pub fn toggle_wrap(&mut self, marker: &str) {
+        let mut sel = self.selection();
+        if sel.start == sel.end {
+            match self.word_at_caret() {
+                Some(w) => sel = w,
+                None => {
+                    let at = sel.start;
+                    let pair = format!("{marker}{marker}");
+                    self.edit_region(at..at, &pair, at + marker.len(), at + marker.len());
+                    return;
+                }
+            }
+        }
+        let m = marker.len();
+        let before_ok = sel.start >= m && self.text.slice(sel.start - m..sel.start) == marker;
+        let after_ok =
+            sel.end + m <= self.text.len() && self.text.slice(sel.end..sel.end + m) == marker;
+        // Emphasis stars combine (`*` italic, `**` bold, `***` both), so the
+        // marker is "on" by the run of stars around the text, not by an
+        // exact neighbour match.
+        let star_run = |from: usize, forward: bool| -> usize {
+            let mut n = 0;
+            loop {
+                let at = if forward {
+                    from + n
+                } else {
+                    match from.checked_sub(n + 1) {
+                        Some(p) => p,
+                        None => break,
+                    }
+                };
+                if at >= self.text.len() || self.text.slice(at..at + 1) != "*" {
+                    break;
+                }
+                n += 1;
+            }
+            n
+        };
+        let active = match marker {
+            "*" => star_run(sel.start, false) % 2 == 1 && star_run(sel.end, true) % 2 == 1,
+            "**" => star_run(sel.start, false) >= 2 && star_run(sel.end, true) >= 2,
+            _ => before_ok && after_ok,
+        };
+        if active {
+            // Markers just outside the selection: drop them.
+            let inner = self.text.slice(sel.clone()).to_string();
+            self.edit_region(
+                sel.start - m..sel.end + m,
+                &inner,
+                sel.start - m + inner.len(),
+                sel.start - m,
+            );
+            return;
+        }
+        let inner = self.text.slice(sel.clone()).to_string();
+        if inner.len() >= 2 * m && inner.starts_with(marker) && inner.ends_with(marker) {
+            // Markers inside the selection: strip them.
+            let stripped = inner[m..inner.len() - m].to_string();
+            self.edit_region(
+                sel.clone(),
+                &stripped,
+                sel.start + stripped.len(),
+                sel.start,
+            );
+            return;
+        }
+        let wrapped = format!("{marker}{inner}{marker}");
+        self.edit_region(
+            sel.clone(),
+            &wrapped,
+            sel.start + m + inner.len(),
+            sel.start + m,
+        );
+    }
+
+    /// Set the heading level of the caret's line (`1..=6`); the same level
+    /// again, or `0`, turns it back into a paragraph.
+    pub fn set_heading(&mut self, level: usize) {
+        let (line_start, line) = self.line_body();
+        let indent = line.len() - line.trim_start().len();
+        let rest = &line[indent..];
+        let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+        let has_heading = (1..=6).contains(&hashes) && rest[hashes..].starts_with(' ');
+        let current = if has_heading { hashes } else { 0 };
+        let content_at = indent + if has_heading { hashes + 1 } else { 0 };
+        let target = if level == current { 0 } else { level };
+        let prefix = if target == 0 {
+            String::new()
+        } else {
+            format!("{} ", "#".repeat(target))
+        };
+        let new_len = prefix.len();
+        let old_len = content_at - indent;
+        let caret_col = self.caret - line_start;
+        let new_col = if caret_col <= indent + old_len {
+            indent + new_len
+        } else {
+            caret_col - old_len + new_len
+        };
+        self.edit_region(
+            line_start + indent..line_start + content_at,
+            &prefix,
+            line_start + new_col,
+            line_start + new_col,
+        );
+    }
+
+    /// Toggle `> ` on every selected line (all quoted → unquote).
+    pub fn toggle_quote(&mut self) {
+        let lines = self.selected_lines();
+        let all_quoted = lines.clone().all(|i| {
+            blank_tail(&self.line_string(i)) || self.line_string(i).trim_start().starts_with('>')
+        });
+        self.rewrite_lines(lines, |_, body| {
+            if blank_tail(body) {
+                return (body.to_string(), 0, 0, 0);
+            }
+            let indent = body.len() - body.trim_start().len();
+            if all_quoted {
+                let rest = &body[indent..];
+                let strip = if rest.starts_with("> ") { 2 } else { 1 };
+                (
+                    format!("{}{}", &body[..indent], &rest[strip..]),
+                    indent,
+                    strip,
+                    0,
+                )
+            } else {
+                (
+                    format!("{}> {}", &body[..indent], &body[indent..]),
+                    indent,
+                    0,
+                    2,
+                )
+            }
+        });
+    }
+
+    /// Grow the selection: word → line → paragraph → whole document.
+    pub fn expand_selection(&mut self) {
+        let sel = self.selection();
+        let total = self.text.len();
+        let collapsed = sel.start == sel.end;
+        if collapsed {
+            if let Some(w) = self.word_at_caret() {
+                self.select_range(w);
+                return;
+            }
+        }
+        let line = self.selected_lines();
+        let line_span = self.line_span(line.start).start..{
+            let end = self.line_span(line.end - 1).end;
+            if end > 0 && self.text.slice(end - 1..end) == "\n" {
+                end - 1
+            } else {
+                end
+            }
+        };
+        if sel.start > line_span.start || sel.end < line_span.end || collapsed {
+            self.select_range(line_span);
+            return;
+        }
+        // Paragraph: contiguous non-blank lines around the selection.
+        let (mut lo, mut hi) = (line.start, line.end);
+        while lo > 0 && !blank_tail(&self.line_string(lo - 1)) {
+            lo -= 1;
+        }
+        let last = self.text.len_lines(LineType::LF);
+        while hi < last && !blank_tail(&self.line_string(hi)) {
+            hi += 1;
+        }
+        let para_start = self.line_span(lo).start;
+        let para_end = {
+            let e = self.line_span(hi - 1).end;
+            if e > para_start && self.text.slice(e - 1..e) == "\n" {
+                e - 1
+            } else {
+                e
+            }
+        };
+        if para_start < sel.start || para_end > sel.end {
+            self.select_range(para_start..para_end);
+        } else {
+            self.select_range(0..total);
+        }
+    }
+
+    /// Select the line under `offset` without its newline (triple click).
+    pub fn select_line_at(&mut self, offset: usize) {
+        let idx = self
+            .text
+            .byte_to_line_idx(offset.min(self.text.len()), LineType::LF);
+        let span = self.line_span(idx);
+        let end = if span.end > span.start && self.text.slice(span.end - 1..span.end) == "\n" {
+            span.end - 1
+        } else {
+            span.end
+        };
+        self.select_range(span.start..end);
+    }
+
+    /// Select the word under `offset` (double click); on whitespace or
+    /// punctuation, just that one character.
+    pub fn select_word_at(&mut self, offset: usize) {
+        self.move_caret(offset, false);
+        match self.word_at_caret() {
+            Some(w) => self.select_range(w),
+            None => {
+                let end = self.next_boundary(offset);
+                self.select_range(offset..end);
+            }
+        }
+    }
+
+    /// `/query` the caret is typing, for the slash menu: the byte offset of
+    /// the `/` (it must start the line or follow whitespace) and the text
+    /// after it up to the caret (no spaces). `None` otherwise, including
+    /// while a selection exists.
+    pub fn slash_trigger(&self) -> Option<(usize, String)> {
+        if self.selection().start != self.selection().end {
+            return None;
+        }
+        let (line_start, line) = self.line_body();
+        let col = self.caret - line_start;
+        let before = line.get(..col)?;
+        let slash = before.rfind('/')?;
+        let query = &before[slash + 1..];
+        let lead_ok = slash == 0 || before[..slash].ends_with(char::is_whitespace);
+        if !lead_ok || query.chars().count() > 24 || query.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some((line_start + slash, query.to_string()))
+    }
+
+    /// Replace `range` with `snippet` and place the caret `caret_back` bytes
+    /// before its end (slash menu templates). One undo step.
+    pub fn insert_snippet(&mut self, range: Range<usize>, snippet: &str, caret_back: usize) {
+        let caret = range.start + snippet.len() - caret_back.min(snippet.len());
+        self.edit_region(range, snippet, caret, caret);
+    }
+
     // -- tables -----------------------------------------------------------------
 
     /// Lines `start..end` of the pipe table holding line `idx`, if any: from
@@ -3348,5 +3620,151 @@ mod tests {
             "| Name | Score |\n| ---- | ----: |\n| Ada  |     7 |\n"
         );
         assert_eq!(b.caret(), 38, "still after 'Ad' of Ada");
+    }
+
+    // -- formatting ---------------------------------------------------------
+
+    #[test]
+    fn bold_wraps_unwraps_and_uses_the_word_under_the_caret() {
+        let mut b = buf("make bold now\n");
+        b.select_range(5..9);
+        b.toggle_wrap("**");
+        assert_eq!(b.text_string(), "make **bold** now\n");
+        assert_eq!(b.selected_text(), "bold", "inner text stays selected");
+        b.toggle_wrap("**");
+        assert_eq!(b.text_string(), "make bold now\n", "second press unwraps");
+        // No selection: the word under the caret.
+        let mut b = buf("make bold now\n");
+        b.move_caret(7, false);
+        b.toggle_wrap("*");
+        assert_eq!(b.text_string(), "make *bold* now\n");
+        // Selection that includes its own markers is stripped.
+        let mut b = buf("a **b** c\n");
+        b.select_range(2..7);
+        b.toggle_wrap("**");
+        assert_eq!(b.text_string(), "a b c\n");
+        // Nothing to wrap: an empty pair with the caret inside.
+        let mut b = buf("a  b\n");
+        b.move_caret(2, false);
+        b.toggle_wrap("**");
+        assert_eq!(b.text_string(), "a **** b\n");
+        assert_eq!(b.caret(), 4);
+    }
+
+    #[test]
+    fn italic_is_not_fooled_by_bold_markers() {
+        let mut b = buf("**bold**\n");
+        b.select_range(2..6);
+        b.toggle_wrap("*");
+        assert_eq!(
+            b.text_string(),
+            "***bold***\n",
+            "adds italic around bold instead of eating a star"
+        );
+        b.toggle_wrap("*");
+        assert_eq!(b.text_string(), "**bold**\n");
+        let mut b = buf("x\n");
+        b.select_range(0..1);
+        b.toggle_wrap("`");
+        assert_eq!(b.text_string(), "`x`\n");
+        b.toggle_wrap("~~");
+        assert_eq!(
+            b.text_string(),
+            "`~~x~~`\n",
+            "wraps the selected inner text"
+        );
+    }
+
+    #[test]
+    fn headings_set_toggle_and_clear() {
+        let mut b = buf("title\n");
+        b.move_caret(3, false);
+        b.set_heading(2);
+        assert_eq!(b.text_string(), "## title\n");
+        assert_eq!(b.caret(), 6, "caret stays in the text");
+        b.set_heading(3);
+        assert_eq!(b.text_string(), "### title\n", "level changes in place");
+        b.set_heading(3);
+        assert_eq!(b.text_string(), "title\n", "same level toggles off");
+        b.set_heading(1);
+        b.set_heading(0);
+        assert_eq!(b.text_string(), "title\n");
+        let mut b = buf("#hash\n");
+        b.set_heading(1);
+        assert_eq!(
+            b.text_string(),
+            "# #hash\n",
+            "no space after # is not a heading"
+        );
+    }
+
+    #[test]
+    fn quote_toggles_on_selected_lines() {
+        let mut b = buf("a\nb\n");
+        b.select_all();
+        b.toggle_quote();
+        assert_eq!(b.text_string(), "> a\n> b\n");
+        b.toggle_quote();
+        assert_eq!(b.text_string(), "a\nb\n");
+    }
+
+    #[test]
+    fn expand_selection_walks_word_line_paragraph_document() {
+        let mut b = buf("alpha beta\ngamma\n\nnext para\n");
+        b.move_caret(2, false);
+        b.expand_selection();
+        assert_eq!(b.selected_text(), "alpha");
+        b.expand_selection();
+        assert_eq!(b.selected_text(), "alpha beta", "line");
+        b.expand_selection();
+        assert_eq!(b.selected_text(), "alpha beta\ngamma", "paragraph");
+        b.expand_selection();
+        assert_eq!(b.selected_text(), b.text_string(), "whole document");
+    }
+
+    #[test]
+    fn click_selections_pick_words_and_lines() {
+        let mut b = buf("one two\nthree\n");
+        b.select_word_at(5);
+        assert_eq!(b.selected_text(), "two");
+        let mut b = buf("a  b\n");
+        b.select_word_at(2);
+        assert_eq!(b.selected_text(), " ", "a gap selects itself");
+        let mut b = buf("one two\nthree\n");
+        b.select_line_at(9);
+        assert_eq!(b.selected_text(), "three");
+    }
+
+    #[test]
+    fn snippets_replace_the_trigger_and_place_the_caret() {
+        let mut b = buf("intro\n/co\n");
+        b.insert_snippet(6..9, "```\n\n```", 4);
+        assert_eq!(b.text_string(), "intro\n```\n\n```\n");
+        assert_eq!(b.caret(), 10, "caret on the empty middle line");
+        b.undo();
+        assert_eq!(b.text_string(), "intro\n/co\n");
+    }
+
+    #[test]
+    fn slash_trigger_needs_a_word_boundary() {
+        let t = |text: &str, caret: usize| {
+            let mut b = buf(text);
+            b.move_caret(caret, false);
+            b.slash_trigger()
+        };
+        assert_eq!(t("/", 1), Some((0, String::new())));
+        assert_eq!(t("/hea", 4), Some((0, "hea".into())));
+        assert_eq!(t("text /ta", 8), Some((5, "ta".into())));
+        assert_eq!(t("a/b", 3), None, "inside a path");
+        assert_eq!(t("https://x", 9), None, "inside a URL");
+        assert_eq!(t("/he llo", 7), None, "a space ends the query");
+        assert_eq!(
+            t("/he", 1),
+            Some((0, String::new())),
+            "caret before the query text"
+        );
+        let mut b = buf("/x\n");
+        b.select_range(0..2);
+        assert_eq!(b.slash_trigger(), None, "no trigger while selecting");
     }
 }

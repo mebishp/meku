@@ -143,7 +143,7 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [x] Select all (Ctrl+A)
 - [x] Auto-save (800ms idle) + dirty dots (Build 3)
 - [ ] Multi-copy paste rich-to-markdown conversion
-- [ ] Select word / line / paragraph + expand selection
+- [x] Select word / line / paragraph + expand selection — double-click word, triple-click line, `Ctrl+D` expands word → line → paragraph → document
 - [ ] Multiple cursors (Ctrl+Alt+Up/Down, Ctrl+D)
 - [ ] Column/box selection (Alt+drag)
 - [ ] Soft wrap toggle
@@ -326,4 +326,7 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] **Callouts** — `> [!type] Title` blocks (note/info/tip/success/question/warning/danger/bug/example/quote + aliases like `caution`, `tldr`, `fail`) render as one tinted rounded block with a kind icon (kit icons), bold colored title (default title when none), body lines inside; colors come from the active theme; the caret row shows raw `> [!type]` source. (Fold markers `+`/`-` are accepted and hidden; folding itself is not built.) No side stripe (design rule). Model: `Row::callout` (`CalloutKind/Role`), `mark_callouts` pass.
 - [x] **Code-block chrome** — fenced blocks render as one rounded container: hidden fence lines become a header strip (language label + **Copy** button → clipboard, "Copied" feedback) and a closing strip; uniform 14px padding; copy excludes the fence lines and never moves the caret. Model: `Row::fence` (`Fence{open, lang}`).
 - Screenshot-verified in Meku Light, Meku Dark and Solarized Light.
+- [x] **Formatting shortcuts** — `Ctrl+B` bold, `Ctrl+I` italic (stacks correctly with bold via star-run parity), `Ctrl+Shift+X` strikethrough, `Ctrl+Shift+H` highlight, ``Ctrl+` `` inline code (toggle: wrap/unwrap the selection or the word under the caret; markers inside or just outside the selection are recognised; nothing to wrap inserts an empty pair), `Ctrl+1..6` set heading level (same level again or `Ctrl+0` → paragraph), `Ctrl+Alt+Q` toggle quote on selected lines. Skipped inside code fences. **Sidebar toggle moved from `Ctrl+B` to `Ctrl+\`** to free bold (same as Obsidian).
+- [x] **Slash menu** (`crates/meku/src/slash.rs`) — `/` at a line start or after a space opens a menu anchored under the caret (Heading 1-3, bulleted/numbered/task list, quote, callout, warning callout, code block, table, divider, link, image, bold, inline code); type to filter (fuzzy), Up/Down, Enter/Tab or click to insert (caret lands in the template's first useful spot), Esc dismisses until that `/` is gone; never opens inside paths/URLs/code fences. The menu stays visible regardless of the caret blink phase (bug found by screenshot). Not yet: date/time entries; menu does not flip above the caret near the window bottom.
+- Not built (stay unchecked): multiple cursors, column/box selection.
 

@@ -74,7 +74,7 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::OpenFolder, "Open folder…", "Ctrl+O"),
     (Command::Save, "Save", "Ctrl+S"),
     (Command::CloseTab, "Close tab", "Ctrl+W"),
-    (Command::ToggleSidebar, "Toggle sidebar", "Ctrl+B"),
+    (Command::ToggleSidebar, "Toggle sidebar", "Ctrl+\\"),
     (Command::CycleMode, "Cycle Edit / Live / Read", "Ctrl+E"),
     (Command::FormatTable, "Format table", ""),
     (Command::FindInNote, "Find in note", "Ctrl+F"),
