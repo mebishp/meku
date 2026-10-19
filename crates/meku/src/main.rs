@@ -6357,4 +6357,45 @@ mod ui_tests {
             "caret moves right on every key: {xs:?}"
         );
     }
+
+    #[test]
+    fn enter_on_a_heading_keeps_the_scroll_position() {
+        run_ui_test("enter_scroll", enter_scroll_body);
+    }
+
+    fn enter_scroll_body(cx: &mut TestAppContext) {
+        let body: String = (0..120).map(|i| format!("## Head {i}\n\n")).collect();
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, &body);
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |_, _| {});
+        let at = body.find("## Head 50").unwrap() + "## Head 50".len();
+        move_doc_caret(cx, &view, at);
+        step(cx, window, |_, _| {});
+        let top = |cx: &mut TestAppContext| {
+            view.read_with(&*cx, |s, _| s.doc_list.logical_scroll_top().item_ix)
+        };
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.doc_list.scroll_to(gpui_kit::ListOffset {
+                    item_ix: 100,
+                    offset_in_item: gpui_kit::px(0.),
+                })
+            })
+        });
+        step(cx, window, |_, _| {});
+        let before = top(cx);
+        assert!(before > 20, "scrolled down: {before}");
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.press("enter", cx);
+            w.render_frame(cx);
+        })
+        .unwrap();
+        step(cx, window, |_, _| {});
+        let after = top(cx);
+        assert!(
+            after.abs_diff(before) <= 2,
+            "Enter must not snap the page: {before} -> {after}"
+        );
+    }
 }

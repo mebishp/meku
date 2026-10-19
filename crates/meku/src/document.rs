@@ -339,7 +339,11 @@ impl MekuShell {
             self.doc_list.reset(count);
             self.doc_list_rel = Some(rel.to_path_buf());
         } else if self.doc_list.item_count() != count {
+            // A reset forgets the scroll position (Enter would snap to the top).
+            let mut top = self.doc_list.logical_scroll_top();
             self.doc_list.reset(count);
+            top.item_ix = top.item_ix.min(count.saturating_sub(1));
+            self.doc_list.scroll_to(top);
         }
         *self.doc_views.borrow_mut() = (0..count).map(|_| None).collect();
         // Startup scroll waits until the list has been measured.
