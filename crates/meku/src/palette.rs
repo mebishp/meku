@@ -621,20 +621,13 @@ impl MekuShell {
             })
             .collect();
         let empty = rows.is_empty();
-        let mut list = v_flex()
+        let mut inner = v_flex()
             .id("palette-list")
             .p_1()
             .max_h(px(360.))
-            .relative()
-            .overflow_y_scroll()
-            .track_scroll(&self.smooth.palette_h)
-            .children(rows)
-            .child(crate::smooth::wheel(
-                &self.smooth.palette,
-                crate::smooth::for_handle(&self.smooth.palette_h, false),
-            ));
+            .children(rows);
         if empty {
-            list = list.child(
+            inner = inner.child(
                 div()
                     .px_3()
                     .py_2()
@@ -643,6 +636,13 @@ impl MekuShell {
                     .child("No matches"),
             );
         }
+        let list = crate::smooth::frame(
+            "palette-scrollbar",
+            div().max_h(px(360.)),
+            inner,
+            &self.smooth.palette_h,
+            &self.smooth.palette,
+        );
         let panel = v_flex()
             .id("palette")
             .w(px(560.))

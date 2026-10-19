@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
@@ -676,23 +675,17 @@ impl MekuShell {
         base.child(header)
             .child(search_field)
             .child(self.section_label("Notes", Ico::Notes, None, cx))
-            .child(
+            .child(crate::smooth::frame(
+                "tree-scrollbar",
+                div().flex_1().min_h_0(),
                 div()
-                    .flex_1()
-                    .min_h_0()
                     .id("file-tree-scroll")
                     .test_support()
-                    .relative()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.smooth.tree_h)
                     .px_1()
-                    .child(self.render_tree_rows(cx))
-                    .child(crate::smooth::wheel(
-                        &self.smooth.tree,
-                        crate::smooth::for_handle(&self.smooth.tree_h, false),
-                    ))
-                    .vertical_scrollbar(&self.smooth.tree_h),
-            )
+                    .child(self.render_tree_rows(cx)),
+                &self.smooth.tree_h,
+                &self.smooth.tree,
+            ))
             .children(
                 theme::cfg(cx)
                     .bool("outline_visible")
@@ -933,23 +926,26 @@ impl MekuShell {
                     el.into_any_element()
                 })
                 .collect();
-            panel = panel.child(
+            panel = panel.child(crate::smooth::frame(
+                "outline-scrollbar",
+                div().max_h(px(200.)),
                 div()
                     .id("outline-scroll")
                     .max_h(px(200.))
-                    .relative()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.smooth.outline_h)
                     .px_1()
                     .pb_1()
                     .children(rows)
-                    .child(crate::smooth::wheel(
-                        &self.smooth.outline,
-                        crate::smooth::for_handle(&self.smooth.outline_h, false),
-                    ))
-                    .vertical_scrollbar(&self.smooth.outline_h)
-                    .when_empty(empty, muted),
-            );
+                    .children(empty.then(|| {
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Headings appear here")
+                    })),
+                &self.smooth.outline_h,
+                &self.smooth.outline,
+            ));
         }
         panel.into_any_element()
     }
@@ -1211,29 +1207,6 @@ impl<T: Styled> WhenWeight for T {
             self.font_weight(FontWeight::MEDIUM)
         } else {
             self
-        }
-    }
-}
-
-trait WhenEmpty: Sized {
-    fn when_empty(self, empty: bool, muted: Hsla) -> AnyElement;
-}
-
-impl WhenEmpty for Stateful<Div> {
-    /// A hint line instead of nothing when the note has no headings.
-    fn when_empty(self, empty: bool, muted: Hsla) -> AnyElement {
-        if empty {
-            self.child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("Headings appear here"),
-            )
-            .into_any_element()
-        } else {
-            self.into_any_element()
         }
     }
 }

@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::*;
 
 /// Time constant of the glide: short, so it settles in about 100ms.
@@ -123,6 +124,32 @@ pub(crate) fn wheel(state: &GlideState, scroller: Scroller) -> impl IntoElement 
     .top_0()
     .left_0()
     .size_full()
+}
+
+/// A vertical scroll area with a scroll bar and smooth wheel, built the way
+/// the kit lays them out: `outer` (sized by the caller) holds the scrolling
+/// `inner` area, and the wheel layer and the bar are its siblings, so neither
+/// scrolls with, or adds to, the content.
+pub(crate) fn frame<E>(
+    id: &'static str,
+    outer: Div,
+    inner: E,
+    handle: &ScrollHandle,
+    glide: &GlideState,
+) -> Div
+where
+    E: Styled + StatefulInteractiveElement + IntoElement,
+{
+    outer
+        .relative()
+        .child(inner.size_full().overflow_y_scroll().track_scroll(handle))
+        .child(wheel(glide, for_handle(handle, false)))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .child(Scrollbar::vertical(handle).id(id).viewport_from_layout()),
+        )
 }
 
 /// Consume one frame's share of the pending distance at time `now`:

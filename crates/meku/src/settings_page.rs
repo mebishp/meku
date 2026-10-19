@@ -12,7 +12,6 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
@@ -515,21 +514,13 @@ impl MekuShell {
             body = body.child(list);
         }
 
-        let content = div()
-            .id("settings-scroll")
-            .test_support()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .relative()
-            .overflow_y_scroll()
-            .track_scroll(&self.smooth.settings_h)
-            .child(body)
-            .child(crate::smooth::wheel(
-                &self.smooth.settings,
-                crate::smooth::for_handle(&self.smooth.settings_h, false),
-            ))
-            .vertical_scrollbar(&self.smooth.settings_h);
+        let content = crate::smooth::frame(
+            "settings-scrollbar",
+            div().flex_1().min_w_0().h_full(),
+            div().id("settings-scroll").test_support().child(body),
+            &self.smooth.settings_h,
+            &self.smooth.settings,
+        );
 
         let path = state
             .layer(scope)

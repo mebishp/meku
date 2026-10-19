@@ -376,6 +376,15 @@ impl MekuShell {
         {
             buffer.update(cx, |b, _| b.move_caret(at, false));
         }
+        // `MEKU_SIDEBAR_SCROLL=<px>` scrolls the tree and outline for screenshots.
+        if let Some(px_down) = std::env::var("MEKU_SIDEBAR_SCROLL")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            for h in [&self.smooth.tree_h, &self.smooth.outline_h] {
+                h.set_offset(point(px(0.), px(-px_down)));
+            }
+        }
         self.update_slash(false, cx);
         self.pending_scroll = std::env::var("MEKU_ROW")
             .ok()
@@ -6564,5 +6573,48 @@ mod ui_tests {
         cx.update(|cx| crate::theme::set_setting("scrollbars", "auto-hide".into(), cx))
             .unwrap();
         assert_eq!(mode(cx), ScrollbarMode::Scrolling);
+    }
+
+    #[test]
+    fn scrolling_the_sidebar_keeps_its_content_size_and_moves_the_content() {
+        run_ui_test("tree_scroll", tree_scroll_body);
+    }
+
+    fn tree_scroll_body(cx: &mut TestAppContext) {
+        let (view, window) = boot_sized(cx, 1000.0, 500.0);
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..60 {
+            std::fs::write(dir.path().join(format!("Note {i:02}.md")), "x\n").unwrap();
+        }
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| view.update(cx, |s, cx| s.open_mekuto(&root, cx)));
+        step(cx, window, |_, _| {});
+        let metrics = |cx: &mut TestAppContext| {
+            view.read_with(&*cx, |s, _| {
+                let h = &s.smooth.tree_h;
+                (f32::from(h.max_offset().y), f32::from(h.offset().y))
+            })
+        };
+        let (max0, off0) = metrics(cx);
+        assert!(max0 > 100.0, "the tree overflows: {max0}");
+        assert_eq!(off0, 0.0);
+        for _ in 0..6 {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.scroll(
+                    "file-tree-scroll",
+                    gpui_kit::ScrollDelta::Lines(gpui_kit::point(0.0, -1.0)),
+                    cx,
+                );
+                w.render_frame(cx);
+            })
+            .unwrap();
+        }
+        let (max1, off1) = metrics(cx);
+        assert!(off1 < -20.0, "the tree scrolled: {off1}");
+        assert!(
+            (max1 - max0).abs() < 1.0,
+            "scrolling must not change the content size: {max0} -> {max1}"
+        );
     }
 }
