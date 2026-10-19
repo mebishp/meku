@@ -6328,4 +6328,33 @@ mod ui_tests {
             times[30], times[56], times[59]
         );
     }
+
+    #[test]
+    fn caret_advances_over_a_typed_trailing_space() {
+        run_ui_test("space_caret", space_caret_body);
+    }
+
+    fn space_caret_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "\n");
+        focus_doc_for(cx, &view, window);
+        move_doc_caret(cx, &view, 0);
+        let mut xs = Vec::new();
+        for c in ["h", "i", " ", " ", "x"] {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.input(c, cx);
+                w.render_frame(cx);
+                let x = w
+                    .try_find("doc-caret")
+                    .map_or(-1.0, |c| f32::from(c.bounds().origin.x));
+                xs.push(x);
+            })
+            .unwrap();
+        }
+        eprintln!("caret xs {xs:?}");
+        assert!(
+            xs.windows(2).all(|p| p[1] > p[0]),
+            "caret moves right on every key: {xs:?}"
+        );
+    }
 }

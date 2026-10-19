@@ -1044,6 +1044,16 @@ fn classify(
         });
     }
 
+    // Trailing spaces are not content to the parser (a hard break), so it
+    // would hide them, and a typed space would not show until the next letter.
+    let line_end = src.start + line.trim_end_matches([' ', '\t']).len();
+    let from = specials
+        .iter()
+        .map(|(r, _)| r.end)
+        .fold(line_end, usize::max);
+    if from < src.end {
+        specials.push((from..src.end, Role::Plain));
+    }
     let runs = make_runs(src.clone(), spans, &specials);
     Row {
         src,
