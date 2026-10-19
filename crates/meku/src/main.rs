@@ -6525,4 +6525,44 @@ mod ui_tests {
             cx.update(|cx| view.read_with(cx, |s, _| (s.buffers.len(), s.active_tab)));
         assert_eq!((loaded, active), (2, 7));
     }
+
+    #[test]
+    fn a_long_note_opens_scrolled_to_the_top_with_a_scrollbar() {
+        run_ui_test("sb_top", sb_top_body);
+    }
+
+    fn sb_top_body(cx: &mut TestAppContext) {
+        let body: String = (0..60)
+            .map(|i| format!("## Section {i}\n\nSome paragraph text for section {i}.\n\n"))
+            .collect();
+        let (view, window, _dir) = open_note_in(cx, 1100.0, 760.0, &body);
+        for _ in 0..4 {
+            step(cx, window, |_, _| {});
+        }
+        let t = view.read_with(&*cx, |s, _| {
+            let t = s.doc_list.logical_scroll_top();
+            (t.item_ix, f32::from(t.offset_in_item))
+        });
+        assert_eq!(t, (0, 0.0), "opens at the top");
+    }
+
+    #[test]
+    fn the_scrollbars_setting_sets_the_kit_scrollbar_mode() {
+        run_ui_test("scrollbar_mode", scrollbar_mode_body);
+    }
+
+    fn scrollbar_mode_body(cx: &mut TestAppContext) {
+        use gpui_kit::component::{Theme, scroll::ScrollbarMode};
+        let (_view, _window) = boot(cx);
+        let mode = |cx: &mut TestAppContext| cx.update(|cx| Theme::global(cx).scrollbar_mode);
+        cx.update(|cx| crate::theme::set_setting("scrollbars", "always".into(), cx))
+            .unwrap();
+        assert_eq!(mode(cx), ScrollbarMode::Always);
+        cx.update(|cx| crate::theme::set_setting("scrollbars", "hover".into(), cx))
+            .unwrap();
+        assert_eq!(mode(cx), ScrollbarMode::Hover);
+        cx.update(|cx| crate::theme::set_setting("scrollbars", "auto-hide".into(), cx))
+            .unwrap();
+        assert_eq!(mode(cx), ScrollbarMode::Scrolling);
+    }
 }

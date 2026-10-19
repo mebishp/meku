@@ -18,6 +18,7 @@ use std::time::Instant;
 use crate::icons::{Ico, icon};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
 use meku_buffer::OpenBuffer;
@@ -480,6 +481,7 @@ impl MekuShell {
                 &self.smooth.doc,
                 crate::smooth::for_list(&self.doc_list),
             ))
+            .vertical_scrollbar(&self.doc_list)
             .children(self.render_find_bar(cx))
             .pipe_fade(rel, cx)
     }

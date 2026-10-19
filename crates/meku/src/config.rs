@@ -129,6 +129,7 @@ const MODES: &[&str] = &["edit", "live", "read"];
 const WIDTHS: &[&str] = &["narrow", "comfortable", "wide", "full"];
 const REVEAL: &[&str] = &["selection", "caret-line", "never"];
 const LINKS: &[&str] = &["click", "ctrl-click"];
+const SCROLLBARS: &[&str] = &["always", "hover", "auto-hide"];
 
 /// Every setting. The settings page, the validator and the defaults all come
 /// from this table, so a new option is one line here plus its use.
@@ -141,6 +142,14 @@ pub const DEFS: &[Def] = &[
         "Picking one stops following the system.",
         Kind::Theme,
         Dv::S("Meku Light"),
+    ),
+    def(
+        "scrollbars",
+        Section::Appearance,
+        "Scroll bars",
+        "Always shown, shown while the pointer is over a scroll area, or only while scrolling.",
+        Kind::Choice(SCROLLBARS),
+        Dv::S("always"),
     ),
     def(
         "follow_system",

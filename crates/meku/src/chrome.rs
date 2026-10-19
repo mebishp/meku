@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
@@ -689,7 +690,8 @@ impl MekuShell {
                     .child(crate::smooth::wheel(
                         &self.smooth.tree,
                         crate::smooth::for_handle(&self.smooth.tree_h, false),
-                    )),
+                    ))
+                    .vertical_scrollbar(&self.smooth.tree_h),
             )
             .children(
                 theme::cfg(cx)
@@ -945,6 +947,7 @@ impl MekuShell {
                         &self.smooth.outline,
                         crate::smooth::for_handle(&self.smooth.outline_h, false),
                     ))
+                    .vertical_scrollbar(&self.smooth.outline_h)
                     .when_empty(empty, muted),
             );
         }

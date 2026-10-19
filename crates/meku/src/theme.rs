@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, ConfigState, Scope, ThemeSpec};
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Theme, ThemeConfig, ThemeRegistry};
 use gpui_kit::{App, Global, WindowAppearance};
 
@@ -377,6 +378,15 @@ pub fn apply(palette: Palette, cx: &mut App) {
     if let Some(config) = config {
         Theme::update(cx, |theme| theme.apply_config(&config));
     }
+    let mode = match cx
+        .try_global::<ConfigState>()
+        .map_or("always", |s| s.effective.str("scrollbars"))
+    {
+        "hover" => ScrollbarMode::Hover,
+        "auto-hide" => ScrollbarMode::Scrolling,
+        _ => ScrollbarMode::Always,
+    };
+    Theme::set_scrollbar_mode(mode, cx);
     cx.set_global(Active(palette));
     cx.refresh_windows();
 }
