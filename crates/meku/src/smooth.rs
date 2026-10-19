@@ -13,12 +13,16 @@ use std::time::Instant;
 
 use gpui_kit::*;
 
-/// Time constant of the glide: about 95% of a notch is covered in 3x this.
-const TAU_SECS: f32 = 0.07;
+/// Time constant of the glide: short, so it settles in about 100ms.
+/// Half of every notch is applied the moment it arrives, so the response
+/// is immediate and only the tail eases.
+const TAU_SECS: f32 = 0.03;
 /// Distance one wheel notch asks for, in line heights.
-const NOTCH_LINES: f32 = 2.5;
+const NOTCH_LINES: f32 = 3.0;
 /// Never queue more than this many pixels of unscrolled distance.
-const MAX_PENDING: f32 = 3000.0;
+const MAX_PENDING: f32 = 600.0;
+/// Share of a notch applied instantly.
+const INSTANT: f32 = 0.5;
 
 /// What a smooth layer drives: move the content by `delta` (positive scrolls
 /// toward the end) and report whether anything actually moved.
@@ -80,14 +84,29 @@ pub(crate) fn wheel(state: &GlideState, scroller: Scroller) -> impl IntoElement 
                     return; // touchpad: exact pixels, leave to the container
                 };
                 cx.stop_propagation();
-                let notch = f32::from(window.line_height()) * NOTCH_LINES;
+                // Whole pixels only: fractional offsets shimmer the text.
+                let notch = (f32::from(window.line_height()) * NOTCH_LINES).round();
+                let instant = {
+                    let mut g = state.borrow_mut();
+                    // Reversing direction cancels what is left of the old
+                    // glide, so the content turns around at once.
+                    let (wx, wy) = (-lines.x * notch, -lines.y * notch);
+                    if wx * g.pending.x < 0.0 {
+                        g.pending.x = 0.0;
+                    }
+                    if wy * g.pending.y < 0.0 {
+                        g.pending.y = 0.0;
+                    }
+                    let now = point((wx * INSTANT).round(), (wy * INSTANT).round());
+                    g.pending.x = (g.pending.x + wx - now.x).clamp(-MAX_PENDING, MAX_PENDING);
+                    g.pending.y = (g.pending.y + wy - now.y).clamp(-MAX_PENDING, MAX_PENDING);
+                    now
+                };
+                scroller(point(px(instant.x), px(instant.y)), cx);
+                window.refresh();
                 {
                     let mut g = state.borrow_mut();
-                    // Content moves opposite to the wheel: scrolling "up"
-                    // (positive wheel y) reveals earlier content.
-                    g.pending.x = (g.pending.x - lines.x * notch).clamp(-MAX_PENDING, MAX_PENDING);
-                    g.pending.y = (g.pending.y - lines.y * notch).clamp(-MAX_PENDING, MAX_PENDING);
-                    if g.running {
+                    if g.running || (g.pending.x == 0.0 && g.pending.y == 0.0) {
                         return;
                     }
                     g.running = true;
@@ -112,14 +131,18 @@ fn advance(g: &mut Glide, now: Instant) -> (Point<f32>, bool) {
         .clamp(0.001, 0.05);
     g.last = Some(now);
     let k = 1.0 - (-dt / TAU_SECS).exp();
-    let mut d = point(g.pending.x * k, g.pending.y * k);
-    // Finish instead of creeping through sub-pixel steps.
-    if d.x.abs() < 0.4 && d.y.abs() < 0.4 {
-        d = g.pending;
-    }
+    // Whole pixels, at least one while anything remains, never past the end.
+    let part = |p: f32| {
+        if p.abs() < 1.0 {
+            return p;
+        }
+        let step = (p * k).round();
+        if step == 0.0 { p.signum() } else { step }
+    };
+    let d = point(part(g.pending.x), part(g.pending.y));
     g.pending.x -= d.x;
     g.pending.y -= d.y;
-    (d, g.pending.x.abs() < 0.01 && g.pending.y.abs() < 0.01)
+    (d, g.pending.x.abs() < 0.5 && g.pending.y.abs() < 0.5)
 }
 
 /// One animation frame: move a fraction of the remaining distance, then ask
@@ -179,7 +202,8 @@ mod tests {
             now += Duration::from_millis(16);
             let (d, done) = advance(&mut g, now);
             if !done {
-                assert!(d.y <= prev + 0.001, "steps shrink as the glide settles");
+                assert!(d.y <= prev + 1.0, "steps shrink as the glide settles");
+                assert_eq!(d.y, d.y.round(), "whole pixels only");
             }
             prev = d.y;
             total += d.y;
@@ -193,7 +217,7 @@ mod tests {
             "all of it is delivered: {total}"
         );
         assert!(
-            (8..60).contains(&steps),
+            (2..40).contains(&steps),
             "spread over several frames, not one: {steps}"
         );
     }

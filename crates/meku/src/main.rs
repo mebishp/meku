@@ -6238,6 +6238,9 @@ mod ui_tests {
         })
         .unwrap();
         let first = top(cx);
-        assert_eq!(first, (0, 0.0), "a notch does not jump the list");
+        assert!(
+            first.0 == 0 && first.1 > 0.0 && first.1 < 3.0 * 72.0,
+            "a notch responds at once but leaves the tail to the glide: {first:?}"
+        );
     }
 }
