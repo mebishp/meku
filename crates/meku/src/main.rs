@@ -351,7 +351,7 @@ impl MekuShell {
             return;
         };
         if stem == current {
-            if typed != stem {
+            if force && typed != stem {
                 self.title_resync.push(rel.to_path_buf());
                 cx.notify();
             }
@@ -364,16 +364,28 @@ impl MekuShell {
                 self.explorer.refresh();
                 self.explorer.reveal(&new_rel);
                 self.notice = None;
-                if typed != stem {
+                // Normalize the text (stripped characters, trailing space)
+                // only on Enter/blur, never under the caret while typing.
+                if force && typed != stem {
                     self.title_resync.push(new_rel);
                 }
             }
             Err(e) => {
                 self.notice = Some(e.to_string());
-                self.title_resync.push(rel.to_path_buf());
+                if force {
+                    self.title_resync.push(rel.to_path_buf());
+                }
             }
         }
         cx.notify();
+    }
+
+    /// Commit a title edit that is still waiting for its idle timer — called
+    /// whenever focus or the active note is about to change.
+    pub(crate) fn flush_title(&mut self, cx: &mut Context<Self>) {
+        if let Some((rel, _)) = self.title_pending.clone() {
+            self.commit_title(&rel, true, cx);
+        }
     }
 
     /// Create `Untitled.md` (`Untitled 2.md`, ...) — an empty note whose
@@ -421,6 +433,7 @@ impl MekuShell {
     }
 
     fn open_file_inner(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        self.flush_title(cx);
         if let Some(ix) = self.tabs.iter().position(|t| t.rel.as_deref() == Some(rel)) {
             self.active_tab = ix;
             self.save_session();
@@ -467,10 +480,15 @@ impl MekuShell {
     }
 
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.flush_title(cx);
         if self.tabs.is_empty() {
             return;
         }
-        self.tabs.remove(index);
+        let closed = self.tabs.remove(index);
+        if let Some(rel) = closed.rel {
+            self.title_inputs.remove(&rel);
+            self.title_subs.remove(&rel);
+        }
         if self.tabs.is_empty() {
             self.tabs.push(EditorTab {
                 rel: None,
@@ -1023,6 +1041,7 @@ impl MekuShell {
     // -- saving ----------------------------------------------------------
 
     fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        self.flush_title(cx);
         if let Some(rel) = self.tabs.get(self.active_tab).and_then(|t| t.rel.clone()) {
             self.save_buffer(&rel, cx);
         }
@@ -1338,13 +1357,23 @@ impl MekuShell {
         }
     }
 
+    /// `new` plus `suffix`, without the trailing separator `join("")` adds
+    /// (a file moved as itself has an empty suffix).
+    fn join_suffix(new: &Path, suffix: &Path) -> PathBuf {
+        if suffix.as_os_str().is_empty() {
+            new.to_path_buf()
+        } else {
+            new.join(suffix)
+        }
+    }
+
     fn retarget_tabs(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
         for tab in &mut self.tabs {
             if let Some(rel) = &tab.rel
                 && (rel == old || rel.starts_with(old))
             {
                 let suffix = rel.strip_prefix(old).unwrap_or(Path::new(""));
-                tab.rel = Some(new.join(suffix));
+                tab.rel = Some(Self::join_suffix(new, suffix));
                 tab.title = Self::tab_title(&tab.rel.clone().unwrap());
             }
         }
@@ -1356,7 +1385,7 @@ impl MekuShell {
                 && let Some(entity) = self.buffers.remove(&key)
             {
                 let suffix = key.strip_prefix(old).unwrap_or(Path::new(""));
-                let moved = new.join(suffix);
+                let moved = Self::join_suffix(new, suffix);
                 entity.update(cx, |buffer, _| buffer.rel = moved.clone());
                 self.buffers.insert(moved.clone(), entity);
                 if let Some(input) = self.title_inputs.remove(&key) {
@@ -1599,6 +1628,7 @@ impl MekuShell {
             .on_click(move |index: &usize, _window, cx| {
                 let index = *index;
                 bar_entity.update(cx, |view, cx| {
+                    view.flush_title(cx);
                     view.active_tab = index;
                     view.save_session();
                     cx.notify();
@@ -4124,5 +4154,133 @@ mod ui_tests {
             heading.size.width.as_f32() >= body.size.width.as_f32(),
             "heading caret is at least as wide as the body caret"
         );
+    }
+    // -- inline title on existing notes ----------------------------------
+
+    fn dir_files(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn existing_note_can_be_renamed_repeatedly_through_its_title() {
+        run_ui_test("title_existing", title_existing_body);
+    }
+
+    fn title_existing_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "hello body\n");
+        let rel_str = |cx: &mut TestAppContext| -> String {
+            view.read_with(&*cx, |s, _| s.doc_rel())
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        };
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("doc-title", cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| window.press("backspace", cx))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        assert_eq!(dir_files(dir.path()), ["do.md"]);
+        assert_eq!(rel_str(cx), "do.md", "no trailing separator after a rename");
+        // Enter belongs to the title: the body is untouched.
+        assert_eq!(
+            buffer_text(cx, &view, &PathBuf::from("do.md")).0,
+            "hello body\n"
+        );
+
+        // Second rename on the same note (this used to fail).
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("doc-title", cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| window.press("backspace", cx))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| window.input("ne", cx))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        assert_eq!(dir_files(dir.path()), ["dne.md"]);
+        assert_eq!(rel_str(cx), "dne.md");
+
+        // The renamed note still saves to its new path.
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                let rel = shell.doc_rel().unwrap();
+                shell.buffers[&rel].update(cx, |b, _| b.insert("more "));
+                shell.save_buffer(&rel, cx);
+            })
+        });
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dne.md")).unwrap(),
+            "more hello body\n"
+        );
+    }
+
+    #[test]
+    fn clicking_into_the_body_commits_a_pending_title_edit() {
+        run_ui_test("title_flush", title_flush_body);
+    }
+
+    fn title_flush_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "hello body\n");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("doc-title", cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| window.press("backspace", cx))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.click(("doc-row", 0usize), cx)
+        })
+        .unwrap();
+        assert_eq!(dir_files(dir.path()), ["do.md"]);
+        assert!(view.read_with(&*cx, |s, _| s.title_pending.is_none()));
+    }
+
+    #[test]
+    fn idle_title_commit_does_not_rewrite_the_text_being_typed() {
+        run_ui_test("title_idle", title_idle_body);
+    }
+
+    fn title_idle_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "x\n");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("doc-title", cx);
+        })
+        .unwrap();
+        // "doc " — trailing space mid-edit
+        cx.update_window(window, |_, window, cx| window.input(" ", cx))
+            .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                if let Some((_, at)) = shell.title_pending.as_mut() {
+                    *at -= std::time::Duration::from_secs(2);
+                }
+                shell.autosave(cx);
+            })
+        });
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        assert_eq!(
+            title_value(cx, &view, "doc.md"),
+            "doc ",
+            "typing continues past a pause"
+        );
+        assert_eq!(dir_files(dir.path()), ["doc.md"], "same stem: no rename");
     }
 }

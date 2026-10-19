@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme, Sizable as _, v_flex};
+use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::*;
 use meku_markdown::InlineStyle;
 use meku_markdown::highlight::{Tok, highlight};
@@ -185,6 +185,14 @@ impl MekuShell {
         };
         self.doc_models.insert(rel.to_path_buf(), model.clone());
         Some(model)
+    }
+
+    /// True while the inline title field has keyboard focus: document key
+    /// bindings (Enter, arrows, ...) must not also act on the body then.
+    pub(crate) fn title_focused(&self, window: &Window, cx: &App) -> bool {
+        self.title_inputs
+            .values()
+            .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// Input holds the caret solid (and visible) before blinking resumes.
@@ -391,6 +399,7 @@ impl MekuShell {
             return;
         }
         self.touch_caret();
+        self.flush_title(cx);
         let (Some(rel), Some(src)) = (self.doc_rel(), self.row_source(ix, pos)) else {
             return;
         };
@@ -496,7 +505,7 @@ impl MekuShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.modal_open() || self.tab_mode() == Mode::Read {
+        if self.modal_open() || self.tab_mode() == Mode::Read || self.title_focused(window, cx) {
             return;
         }
         self.touch_caret();
@@ -860,22 +869,25 @@ fn selection_for(row: &Row, selection: &Range<usize>) -> Option<Range<usize>> {
 /// text. Editing it renames the file (see `MekuShell::commit_title`).
 fn title_element(input: &Entity<InputState>, base: Pixels) -> AnyElement {
     let size = base * 2.0;
+    // `Input` sizes itself from a small preset (24px tall for custom sizes),
+    // which clips a 32px title; refine its style directly instead.
+    let field = Input::new(input)
+        .appearance(false)
+        .bordered(false)
+        .focus_bordered(false);
+    let field = gpui_kit::Styled::h(field, size * 1.45)
+        .text_size(size)
+        .line_height(relative(1.3))
+        .font_weight(FontWeight::BOLD);
     div()
         .id("doc-title")
         .test_support()
         .w_full()
-        .mb(base * 0.75)
-        .font_weight(FontWeight::BOLD)
+        .mb(base * 0.5)
         // The input pads 8px on each side; pull it back so the title text
         // lines up with the document column.
         .ml(px(-8.))
-        .child(
-            Input::new(input)
-                .with_size(gpui_kit::component::Size::Size(size / 0.875))
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false),
-        )
+        .child(field)
         .into_any_element()
 }
 
