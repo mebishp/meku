@@ -18,7 +18,7 @@ use std::time::Instant;
 use crate::icons::{Ico, icon};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarHandle};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
 use meku_buffer::OpenBuffer;
@@ -496,7 +496,7 @@ impl MekuShell {
                 &self.smooth.doc,
                 crate::smooth::for_list(&self.doc_list),
             ))
-            .vertical_scrollbar(&self.doc_list)
+            .vertical_scrollbar(&DocBar(self.doc_list.clone()))
             .children(self.render_find_bar(cx))
             .pipe_fade(rel, cx)
     }
@@ -1457,6 +1457,44 @@ fn column_em(cx: &App) -> f32 {
 }
 
 const COLUMN_EM: f32 = 37.5;
+
+/// The document list as the scroll bar sees it. Row heights are estimates
+/// until drawn, so a thumb dragged to the very end maps to a point short of
+/// the real end; reaching the end of the bar goes to the last row instead.
+#[derive(Clone)]
+pub(crate) struct DocBar(pub(crate) ListState);
+
+impl ScrollbarHandle for DocBar {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        self.0.viewport_bounds()
+    }
+
+    fn offset(&self) -> Point<Pixels> {
+        ScrollbarHandle::offset(&self.0)
+    }
+
+    fn set_offset(&self, offset: Point<Pixels>) {
+        let room = self.0.max_offset_for_scrollbar().y;
+        if room > px(0.) && -offset.y >= room - px(2.) {
+            self.0
+                .scroll_to_reveal_item(self.0.item_count().saturating_sub(1));
+        } else {
+            ScrollbarHandle::set_offset(&self.0, offset);
+        }
+    }
+
+    fn content_size(&self) -> Size<Pixels> {
+        ScrollbarHandle::content_size(&self.0)
+    }
+
+    fn start_drag(&self) {
+        ScrollbarHandle::start_drag(&self.0);
+    }
+
+    fn end_drag(&self) {
+        ScrollbarHandle::end_drag(&self.0);
+    }
+}
 
 /// Rough height of an average row, in pixels, for the scroll bar's first
 /// guess (measured on typical notes: blank 0.67 lines, text 1, items 1.15,

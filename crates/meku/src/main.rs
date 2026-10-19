@@ -6668,21 +6668,21 @@ mod ui_tests {
     fn sb_drag_body(cx: &mut TestAppContext) {
         use gpui_kit::component::scroll::ScrollbarHandle;
         let body: String = (0..5000)
-            .map(|i| format!("Line {i} of a long note\n"))
+            .map(|i| format!("Line {i} {}\n", "wrapping words ".repeat(30)))
             .collect();
         let (view, window, _dir) = open_note_in(cx, 1100.0, 700.0, &body);
         for _ in 0..3 {
             step(cx, window, |_, _| {});
         }
-        let list = view.read_with(&*cx, |s, _| s.doc_list.clone());
+        let list = view.read_with(&*cx, |s, _| crate::document::DocBar(s.doc_list.clone()));
         let content = list.content_size().height;
-        let view_h = list.viewport_bounds().size.height;
+        let view_h = list.0.viewport_bounds().size.height;
         list.start_drag();
         // Thumb dragged to the middle of the track.
         list.set_offset(gpui_kit::point(gpui_kit::px(0.), -(content - view_h) / 2.0));
         list.end_drag();
         step(cx, window, |_, _| {});
-        let mid = list.logical_scroll_top().item_ix;
+        let mid = list.0.logical_scroll_top().item_ix;
         assert!(
             (2000..3000).contains(&mid),
             "the middle of the bar is the middle of the note: row {mid}"
@@ -6691,7 +6691,7 @@ mod ui_tests {
         list.set_offset(gpui_kit::point(gpui_kit::px(0.), -(content - view_h)));
         list.end_drag();
         step(cx, window, |_, _| {});
-        let end = list.logical_scroll_top().item_ix;
+        let end = list.0.logical_scroll_top().item_ix;
         assert!(
             end > 4900,
             "the end of the bar is the end of the note: row {end}"
