@@ -55,6 +55,7 @@ pub(crate) enum Command {
     CloseTab,
     ToggleSidebar,
     CycleMode,
+    FormatTable,
     FindInNote,
     ReplaceInNote,
     SearchVault,
@@ -75,6 +76,7 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::CloseTab, "Close tab", "Ctrl+W"),
     (Command::ToggleSidebar, "Toggle sidebar", "Ctrl+B"),
     (Command::CycleMode, "Cycle Edit / Live / Read", "Ctrl+E"),
+    (Command::FormatTable, "Format table", ""),
     (Command::FindInNote, "Find in note", "Ctrl+F"),
     (Command::ReplaceInNote, "Find and replace in note", "Ctrl+H"),
     (Command::SearchVault, "Search in all notes", "Ctrl+Shift+F"),
@@ -398,6 +400,18 @@ impl MekuShell {
                     && let Some(tab) = self.tabs.get_mut(self.active_tab)
                 {
                     tab.mode = tab.mode.next();
+                    cx.notify();
+                }
+            }
+            Command::FormatTable => {
+                if let Some(rel) = self.doc_rel()
+                    && let Some(buffer) = self.buffers.get(&rel).cloned()
+                {
+                    let done = buffer.update(cx, |b, _| b.table_format());
+                    if !done {
+                        self.notice = Some("Put the caret inside a table first".into());
+                    }
+                    self.doc_note_edit(&rel);
                     cx.notify();
                 }
             }

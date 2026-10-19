@@ -962,6 +962,9 @@ impl OpenBuffer {
             self.replace(r, "\n", false);
             return;
         }
+        if self.table_enter() {
+            return;
+        }
         let (line_start, line) = self.line_body();
         let Some(marker) = parse_marker(&line) else {
             self.insert("\n");
@@ -1288,6 +1291,9 @@ impl OpenBuffer {
     /// nests one level; a selection indents every line it touches. Inside
     /// code fences (`code`) a level is four spaces and lists are ignored.
     pub fn indent(&mut self, code: bool) {
+        if !code && self.selected_lines().len() == 1 && self.table_tab(true) {
+            return;
+        }
         let collapsed = self.selection().start == self.selection().end;
         let on_item = !code && collapsed && parse_marker(&self.line_body().1).is_some();
         if collapsed && !on_item {
@@ -1343,6 +1349,9 @@ impl OpenBuffer {
     /// `Shift+Tab`: outdent the target lines by one level (a tab or up to
     /// the line's step in spaces), then straighten any ordered runs.
     pub fn outdent(&mut self, code: bool) {
+        if !code && self.selected_lines().len() == 1 && self.table_tab(false) {
+            return;
+        }
         let lines = if code {
             self.selected_lines()
         } else {
@@ -1698,6 +1707,206 @@ impl OpenBuffer {
         self.anchor = anchor.min(self.text.len());
         self.marked = None;
         self.coalescing = false;
+    }
+
+    // -- tables -----------------------------------------------------------------
+
+    /// Lines `start..end` of the pipe table holding line `idx`, if any: from
+    /// the header through the last pipe line below the delimiter row.
+    fn table_lines(&self, idx: usize) -> Option<Range<usize>> {
+        let total = self.text.len_lines(LineType::LF);
+        let piped = |i: usize| {
+            let l = self.line_string(i);
+            l.contains('|') && !blank_tail(&l)
+        };
+        if !piped(idx) {
+            return None;
+        }
+        let mut lo = idx;
+        while lo > 0 && piped(lo - 1) {
+            lo -= 1;
+        }
+        let mut hi = idx + 1;
+        while hi < total && piped(hi) {
+            hi += 1;
+        }
+        // The table starts at the header right above a delimiter row.
+        (lo + 1..hi).find_map(|d| {
+            let (head, delim) = (self.line_string(d - 1), self.line_string(d));
+            (meku_table::starts_table(&head, &delim) && idx >= d - 1).then_some(d - 1..hi)
+        })
+    }
+
+    /// Cell the caret is in on `line` (nearest by position when it sits on a
+    /// pipe or in padding), and its offset inside the cell's content.
+    fn caret_cell(&self, line: &str, col: usize) -> (usize, usize) {
+        let cells = meku_table::split_cells(line);
+        let mut best = (0usize, 0usize);
+        for (i, r) in cells.iter().enumerate() {
+            if col >= r.start {
+                best = (i, (col - r.start).min(r.end - r.start));
+            }
+        }
+        best
+    }
+
+    /// Rewrite the table at `block` aligned, putting the caret at `cell`
+    /// (optionally selecting its content) on `row`. One undo step.
+    fn rewrite_table(
+        &mut self,
+        block: Range<usize>,
+        row: usize,
+        cell: usize,
+        offset: usize,
+        select: bool,
+    ) {
+        let old: Vec<String> = block.clone().map(|i| self.line_string(i)).collect();
+        let refs: Vec<&str> = old.iter().map(String::as_str).collect();
+        let new = meku_table::format_table(&refs);
+        let start = self.line_span(block.start).start;
+        let end = start + old.iter().map(|l| l.len() + 1).sum::<usize>() - 1;
+        let joined = new.join("\n");
+        // Line starts in the new text for caret placement.
+        let mut at = start;
+        let mut starts = Vec::new();
+        for l in &new {
+            starts.push(at);
+            at += l.len() + 1;
+        }
+        let r = row.min(new.len() - 1);
+        let cells = meku_table::split_cells(&new[r]);
+        let c = cell.min(cells.len().saturating_sub(1));
+        let (cs, ce) = cells.get(c).map_or((0, 0), |x| (x.start, x.end));
+        let (caret, anchor) = if select {
+            (starts[r] + ce, starts[r] + cs)
+        } else {
+            let p = starts[r] + cs + offset.min(ce - cs);
+            (p, p)
+        };
+        if joined == old.join("\n") {
+            self.caret = caret;
+            self.anchor = anchor;
+            self.coalescing = false;
+            return;
+        }
+        self.edit_region(start..end, &joined, caret, anchor);
+    }
+
+    /// `Tab` / `Shift+Tab` inside a table: align the table and move to the
+    /// next / previous cell (selecting its content). Past the last cell a new
+    /// row is appended. Returns false when the caret is not in a table.
+    pub fn table_tab(&mut self, forward: bool) -> bool {
+        let line = self.caret_line();
+        let Some(block) = self.table_lines(line) else {
+            return false;
+        };
+        let body = self.line_string(line);
+        let col = self.caret - self.line_span(line).start;
+        let (cell, _) = self.caret_cell(&body, col);
+        let cols = meku_table::split_cells(&self.line_string(block.start)).len();
+        let delim_row = block.start + 1;
+        let (mut row, mut c) = (line, cell);
+        if forward {
+            if c + 1 < cols {
+                c += 1;
+            } else {
+                row += 1;
+                c = 0;
+                if row == delim_row {
+                    row += 1;
+                }
+            }
+        } else if c > 0 {
+            c -= 1;
+        } else if row > block.start {
+            row -= 1;
+            if row == delim_row {
+                row -= 1;
+            }
+            c = cols - 1;
+        }
+        if row >= block.end {
+            // Append an empty row, then land in its first cell.
+            let mut lines: Vec<String> = block.clone().map(|i| self.line_string(i)).collect();
+            lines.push(format!("|{}", " |".repeat(cols)));
+            let start = self.line_span(block.start).start;
+            let end = start
+                + lines[..lines.len() - 1]
+                    .iter()
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>()
+                - 1;
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let formatted = meku_table::format_table(&refs);
+            let joined = formatted.join("\n");
+            let last_start = start
+                + formatted[..formatted.len() - 1]
+                    .iter()
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>();
+            let cells = meku_table::split_cells(formatted.last().unwrap());
+            let at = last_start + cells.first().map_or(0, |r| r.start);
+            self.edit_region(start..end, &joined, at, at);
+            return true;
+        }
+        self.rewrite_table(block.clone(), row - block.start, c, 0, true);
+        true
+    }
+
+    /// `Enter` in a table: a new row below (an all-empty last row instead
+    /// ends the table). Returns false when the caret is not in a table.
+    pub fn table_enter(&mut self) -> bool {
+        let line = self.caret_line();
+        let Some(block) = self.table_lines(line) else {
+            return false;
+        };
+        let cols = meku_table::split_cells(&self.line_string(block.start)).len();
+        let body = self.line_string(line);
+        let is_last = line + 1 == block.end;
+        let empty_row = meku_table::split_cells(&body)
+            .iter()
+            .all(|r| body[r.clone()].is_empty());
+        if is_last && empty_row && line > block.start + 1 {
+            // Leave the table: the empty row becomes a blank line to type on.
+            let span = self.line_span(line);
+            let at = span.start;
+            self.edit_region(at..at + body.len(), "", at, at);
+            return true;
+        }
+        let delim_row = block.start + 1;
+        let after = if line <= delim_row { delim_row } else { line };
+        let at = self.line_span(after).end;
+        let new_row = format!("|{}", " |".repeat(cols));
+        let insert = if self.text.slice(..at).to_string().ends_with('\n') {
+            format!("{new_row}\n")
+        } else {
+            format!("\n{new_row}")
+        };
+        self.push_undo();
+        self.redo.clear();
+        self.apply_edit(at..at, &insert);
+        self.caret = at;
+        self.anchor = at;
+        self.coalescing = false;
+        // Align and put the caret in the new row's first cell.
+        let new_line = after + 1;
+        let block = self.table_lines(new_line).unwrap_or(block);
+        self.rewrite_table(block.clone(), new_line - block.start, 0, 0, false);
+        true
+    }
+
+    /// Align the table under the caret (palette command). Returns false
+    /// outside tables.
+    pub fn table_format(&mut self) -> bool {
+        let line = self.caret_line();
+        let Some(block) = self.table_lines(line) else {
+            return false;
+        };
+        let body = self.line_string(line);
+        let col = self.caret - self.line_span(line).start;
+        let (cell, offset) = self.caret_cell(&body, col);
+        self.rewrite_table(block.clone(), line - block.start, cell, offset, false);
+        true
     }
 
     /// Flip the task box whose `[ ] ` / `[x] ` starts at byte `at` (a
@@ -3036,5 +3245,108 @@ mod tests {
         assert_eq!(b.text_string(), "aa bb aa cc aa\n", "one undo step");
         b.replace_ranges(&[]);
         assert_eq!(b.text_string(), "aa bb aa cc aa\n");
+    }
+
+    // -- tables ---------------------------------------------------------------
+
+    const TABLE: &str = "intro\n|a|b|\n|-|-|\n|1|2|\n\nafter\n";
+
+    #[test]
+    fn tab_aligns_and_walks_cells() {
+        let mut b = buf(TABLE);
+        b.move_caret(7, false); // inside "a"
+        assert!(b.table_tab(true));
+        assert_eq!(
+            b.text_string(),
+            "intro\n| a   | b   |\n| --- | --- |\n| 1   | 2   |\n\nafter\n",
+            "table aligned"
+        );
+        assert_eq!(b.selected_text(), "b", "next cell selected");
+        assert!(b.table_tab(true));
+        assert_eq!(
+            b.selected_text(),
+            "1",
+            "wraps to the next body row, skipping the delimiter"
+        );
+        assert!(b.table_tab(false));
+        assert_eq!(
+            b.selected_text(),
+            "b",
+            "Shift+Tab goes back over the delimiter"
+        );
+        assert!(b.table_tab(false));
+        assert_eq!(b.selected_text(), "a");
+        assert!(b.table_tab(false));
+        assert_eq!(b.selected_text(), "a", "stops at the first cell");
+    }
+
+    #[test]
+    fn tab_past_the_last_cell_adds_a_row() {
+        let mut b = buf("| a | b |\n|---|---|\n| 1 | 2 |\n");
+        b.move_caret(27, false); // after "2"
+        assert!(b.table_tab(true));
+        assert_eq!(
+            b.text_string(),
+            "| a   | b   |\n| --- | --- |\n| 1   | 2   |\n|     |     |\n"
+        );
+        assert_eq!(b.caret(), 48, "caret in the new row's first cell");
+        b.undo();
+        assert_eq!(
+            b.text_string(),
+            "| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "one undo step"
+        );
+    }
+
+    #[test]
+    fn tab_outside_a_table_is_ignored() {
+        let mut b = buf("plain | text\nmore\n");
+        assert!(!b.table_tab(true));
+        assert!(!b.table_enter());
+        assert!(!b.table_format());
+        assert_eq!(b.text_string(), "plain | text\nmore\n");
+    }
+
+    #[test]
+    fn enter_in_a_table_adds_a_row_and_empty_row_leaves() {
+        let mut b = buf("| a | b |\n|---|---|\n| 1 | 2 |\n");
+        b.move_caret(22, false); // in the body row
+        b.smart_enter();
+        assert_eq!(
+            b.text_string(),
+            "| a   | b   |\n| --- | --- |\n| 1   | 2   |\n|     |     |\n"
+        );
+        // Enter on the empty last row ends the table.
+        b.smart_enter();
+        assert_eq!(
+            b.text_string(),
+            "| a   | b   |\n| --- | --- |\n| 1   | 2   |\n\n"
+        );
+    }
+
+    #[test]
+    fn enter_in_the_header_inserts_below_the_delimiter() {
+        let mut b = buf("| a | b |\n|---|---|\n| 1 | 2 |\n");
+        b.move_caret(3, false);
+        b.smart_enter();
+        let lines: Vec<String> = b.text_string().lines().map(String::from).collect();
+        assert_eq!(lines[1], "| --- | --- |");
+        assert_eq!(
+            lines[2], "|     |     |",
+            "new row sits right under the delimiter"
+        );
+        assert_eq!(lines[3], "| 1   | 2   |");
+    }
+
+    #[test]
+    fn format_keeps_the_caret_in_its_cell() {
+        let mut b = buf("|Name|Score|\n|-|-:|\n|Ada|7|\n");
+        b.move_caret(23, false); // after "Ad" in "Ada"
+        assert!(b.table_format());
+        assert_eq!(
+            b.text_string(),
+            "| Name | Score |\n| ---- | ----: |\n| Ada  |     7 |\n"
+        );
+        assert_eq!(b.caret(), 38, "still after 'Ad' of Ada");
     }
 }

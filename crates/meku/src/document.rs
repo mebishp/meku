@@ -9,6 +9,7 @@
 //! platform text services reach the same caret as keyboard actions do.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -16,14 +17,15 @@ use std::time::Instant;
 
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme, v_flex};
+use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
 use meku_markdown::InlineStyle;
 use meku_markdown::highlight::{Tok, highlight};
 use meku_markdown::live::{
-    Display, LinkTarget, Row, RowKind, build_rows, classify_link, heading_slug, link_at, project,
-    row_at,
+    Display, LinkTarget, Row, RowKind, TableRole, build_rows, classify_link, heading_slug, link_at,
+    project, row_at,
 };
+use meku_table::Align;
 
 use crate::MekuShell;
 use crate::Mode;
@@ -299,6 +301,8 @@ impl MekuShell {
         let views = self.doc_views.clone();
         let caret_on = self.caret_on;
         let wrap_cell = self.doc_wrap.clone();
+        let tables = self.doc_tables.clone();
+        let version = model.version;
         let col_width = wrap_cell.get();
         let hover_link = self.hover_link;
         let find_all: Rc<Vec<(Range<usize>, bool)>> = Rc::new(self.find_highlights(rel));
@@ -332,6 +336,9 @@ impl MekuShell {
                     &find_all[lo..hi]
                 },
                 col_width,
+                &rows,
+                &tables,
+                version,
                 &shell,
                 &views,
                 window,
@@ -951,6 +958,18 @@ impl MekuShell {
         cx.notify();
     }
 
+    /// Put the caret at `at` (a cell click): no scrolling, caret kept solid.
+    pub(crate) fn doc_set_caret(&mut self, at: usize, cx: &mut Context<Self>) {
+        self.touch_caret();
+        self.flush_title(cx);
+        if let Some(rel) = self.doc_rel()
+            && let Some(buffer) = self.buffers.get(&rel).cloned()
+        {
+            buffer.update(cx, |b, _| b.move_caret(at, false));
+        }
+        cx.notify();
+    }
+
     /// Scroll the row holding `offset` into view without moving the caret.
     pub(crate) fn scroll_to_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
         let Some(rel) = self.doc_rel() else {
@@ -1240,6 +1259,138 @@ fn caret_element(
         .bg(color)
 }
 
+/// Column widths per table (keyed by its header row), valid for one document
+/// version.
+pub(crate) type TableCache = Rc<RefCell<(u64, HashMap<usize, Rc<Vec<Pixels>>>)>>;
+
+/// Hidden-mode display of one table cell: its inline markup rendered.
+fn cell_display(cell: &str) -> Display {
+    let rows = build_rows(cell);
+    project(&rows[0], cell, false)
+}
+
+/// Widest cell of every column of the table starting at row `start`.
+fn table_col_widths(
+    start: usize,
+    rows: &[Row],
+    text: &str,
+    window: &mut Window,
+    cx: &App,
+) -> Vec<Pixels> {
+    let size = window.text_style().font_size.to_pixels(window.rem_size());
+    let mut widths: Vec<Pixels> = Vec::new();
+    for row in rows[start..]
+        .iter()
+        .take_while(|r| r.table.as_ref().is_some_and(|t| t.start == start))
+    {
+        let Some(t) = row.table.as_ref() else {
+            continue;
+        };
+        if t.role == TableRole::Delimiter {
+            continue;
+        }
+        let mut style = window.text_style().clone();
+        if t.role == TableRole::Header {
+            style.font_weight = FontWeight::BOLD;
+        }
+        for (c, range) in t.cells.iter().enumerate() {
+            let display = cell_display(&text[range.clone()]);
+            let width = if display.text.is_empty() {
+                px(0.)
+            } else {
+                let runs = text_runs(&display, &style, None, &[], false, &[], cx);
+                window
+                    .text_system()
+                    .shape_line(display.text.clone().into(), size, &runs, None)
+                    .width
+            };
+            if widths.len() <= c {
+                widths.resize(c + 1, px(0.));
+            }
+            widths[c] = widths[c].max(width);
+        }
+    }
+    // Keep one enormous cell from pushing the grid off the page.
+    widths
+        .iter()
+        .map(|w| (*w).clamp(px(24.), px(360.)))
+        .collect()
+}
+
+/// A hidden (non-caret) table line drawn as aligned cells.
+#[allow(clippy::too_many_arguments)]
+fn table_row_element(
+    row_div: impl ParentElement + Styled + IntoElement,
+    row: &Row,
+    next_in_table: bool,
+    text: &str,
+    widths: &[Pixels],
+    shell: &Entity<MekuShell>,
+    window: &mut Window,
+    cx: &App,
+) -> AnyElement {
+    let Some(t) = row.table.as_ref() else {
+        return row_div.into_any_element();
+    };
+    let pad_x = px(10.);
+    let total = widths.iter().fold(px(0.), |acc, w| acc + *w + pad_x * 2.0);
+    if t.role == TableRole::Delimiter {
+        // The header rule: the delimiter line itself is never shown.
+        return row_div
+            .h(px(1.))
+            .child(div().w(total).h(px(1.)).bg(cx.theme().border))
+            .into_any_element();
+    }
+    let mut style = window.text_style().clone();
+    if t.role == TableRole::Header {
+        style.font_weight = FontWeight::BOLD;
+    }
+    let size = window.text_style().font_size.to_pixels(window.rem_size());
+    let mut cells = h_flex().w(total);
+    if t.role == TableRole::Body {
+        let mut hairline = cx.theme().border;
+        hairline.a = 0.6;
+        if next_in_table {
+            cells = cells.border_b_1().border_color(hairline);
+        }
+    }
+    for (c, width) in widths.iter().enumerate() {
+        let range = t.cells.get(c);
+        let display = range.map(|r| cell_display(&text[r.clone()]));
+        let mut cell = div()
+            .w(*width + pad_x * 2.0)
+            .px(pad_x)
+            .py(px(6.))
+            .min_h(size * 1.6)
+            .flex();
+        cell = match t.aligns.get(c) {
+            Some(Align::Right) => cell.justify_end(),
+            Some(Align::Center) => cell.justify_center(),
+            _ => cell,
+        };
+        if let Some(display) = display {
+            let runs = text_runs(&display, &style, None, &[], false, &[], cx);
+            if !display.text.is_empty() {
+                cell = cell.child(StyledText::new(display.text.clone()).with_runs(runs));
+            }
+        }
+        if let Some(range) = range {
+            let at = range.start;
+            let shell = shell.clone();
+            cell = cell.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
+                shell.update(cx, |view, cx| {
+                    let focus = view.focus_handle.clone();
+                    window.focus(&focus, cx);
+                    view.doc_set_caret(at, cx);
+                });
+            });
+        }
+        cells = cells.child(cell);
+    }
+    row_div.child(cells).into_any_element()
+}
+
 /// One row of the document: its markup projection, styles, caret and pointer handling.
 #[allow(clippy::too_many_arguments)]
 fn row_element(
@@ -1254,6 +1405,9 @@ fn row_element(
     pointer: bool,
     find_hits: &[(Range<usize>, bool)],
     col_width: Pixels,
+    rows: &[Row],
+    tables: &TableCache,
+    version: u64,
     shell: &Entity<MekuShell>,
     views: &RowViews,
     window: &mut Window,
@@ -1304,6 +1458,37 @@ fn row_element(
         return el.into_any_element();
     }
 
+    if !reveal && let Some(table) = &row.table {
+        if let Some(slot) = views.borrow_mut().get_mut(ix) {
+            *slot = None;
+        }
+        let widths = {
+            let mut cache = tables.borrow_mut();
+            if cache.0 != version {
+                *cache = (version, HashMap::new());
+            }
+            cache
+                .1
+                .entry(table.start)
+                .or_insert_with(|| Rc::new(table_col_widths(table.start, rows, text, window, cx)))
+                .clone()
+        };
+        let next_in_table = rows
+            .get(ix + 1)
+            .and_then(|r| r.table.as_ref())
+            .is_some_and(|t| t.start == table.start);
+        return table_row_element(
+            row_div,
+            row,
+            next_in_table,
+            text,
+            &widths,
+            shell,
+            window,
+            cx,
+        );
+    }
+
     if row.kind == RowKind::Blank {
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
@@ -1340,7 +1525,7 @@ fn row_element(
     if matches!(row.kind, RowKind::Heading(_)) {
         base.font_weight = FontWeight::BOLD;
     }
-    if row.kind == RowKind::Code {
+    if matches!(row.kind, RowKind::Code | RowKind::Table) {
         base.font_family = cx.theme().mono_font_family.clone();
     }
     // Find matches on this row, in display coordinates.

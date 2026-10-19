@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.92"
 
 [dependencies]
+meku-table = { workspace = true }
 pulldown-cmark = { workspace = true }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"

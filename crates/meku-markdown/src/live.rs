@@ -13,6 +13,9 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use meku_table::Align;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
@@ -84,6 +87,27 @@ impl Row {
     }
 }
 
+/// Part a table line plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableRole {
+    Header,
+    /// The `|---|---|` line.
+    Delimiter,
+    Body,
+}
+
+/// A line that belongs to a GFM pipe table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableRow {
+    /// Row index of the table's header line (identifies the table).
+    pub start: usize,
+    pub role: TableRole,
+    /// Column alignments from the delimiter row (shared by the whole table).
+    pub aligns: Rc<Vec<Align>>,
+    /// Trimmed content of each cell, as absolute source ranges.
+    pub cells: Vec<Range<usize>>,
+}
+
 /// One source line and its classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -96,6 +120,8 @@ pub struct Row {
     pub list_depth: u8,
     /// Runs covering `src` exactly, in order.
     pub runs: Vec<Run>,
+    /// Set for the lines of a pipe table.
+    pub table: Option<TableRow>,
 }
 
 /// One visible span of display text and the source it came from.
@@ -339,7 +365,47 @@ pub fn build_rows(text: &str) -> Vec<Row> {
         }
         rows.push(row);
     }
+    mark_tables(text, &mut rows);
     rows
+}
+
+/// Turn header + delimiter (+ body) line groups into table rows.
+fn mark_tables(text: &str, rows: &mut [Row]) {
+    let line = |r: &Row| &text[r.src.clone()];
+    let is_text = |r: &Row| matches!(r.kind, RowKind::Text | RowKind::Item | RowKind::Quote);
+    let mut i = 0;
+    while i + 1 < rows.len() {
+        let (head, delim) = (&rows[i], &rows[i + 1]);
+        if is_text(head) && is_text(delim) && meku_table::starts_table(line(head), line(delim)) {
+            let aligns = Rc::new(meku_table::parse_aligns(line(delim)));
+            let mut end = i + 2;
+            while end < rows.len() && is_text(&rows[end]) && line(&rows[end]).contains('|') {
+                end += 1;
+            }
+            for (k, row) in rows[i..end].iter_mut().enumerate() {
+                let src = row.src.clone();
+                let cells = meku_table::split_cells(&text[src.clone()])
+                    .into_iter()
+                    .map(|r| src.start + r.start..src.start + r.end)
+                    .collect();
+                let role = match k {
+                    0 => TableRole::Header,
+                    1 => TableRole::Delimiter,
+                    _ => TableRole::Body,
+                };
+                *row = raw_row(src, RowKind::Table);
+                row.table = Some(TableRow {
+                    start: i,
+                    role,
+                    aligns: aligns.clone(),
+                    cells,
+                });
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Deepest list nesting shown (0-based): three levels, `•` `◦` `▪`.
@@ -374,6 +440,7 @@ fn classify(
             quote_depth: 0,
             list_depth: 0,
             runs: Vec::new(),
+            table: None,
         };
     }
     if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
@@ -382,9 +449,6 @@ fn classify(
     }
     if *in_fence {
         return raw_row(src, RowKind::Code);
-    }
-    if trimmed.starts_with('|') {
-        return raw_row(src, RowKind::Table);
     }
     if is_rule(trimmed) {
         return raw_row(src, RowKind::Rule);
@@ -449,6 +513,7 @@ fn classify(
         quote_depth,
         list_depth,
         runs,
+        table: None,
     }
 }
 
@@ -474,6 +539,7 @@ fn raw_row(src: Range<usize>, kind: RowKind) -> Row {
         quote_depth: 0,
         list_depth: 0,
         runs,
+        table: None,
     }
 }
 
@@ -851,14 +917,14 @@ mod tests {
 
     #[test]
     fn fenced_code_and_tables_are_always_raw() {
-        let text = "```rs\nlet x = 1;\n```\n| a | b |\n";
+        let text = "```rs\nlet x = 1;\n```\n| a | b |\n|---|---|\n";
         let rows = build_rows(text);
         assert_eq!(rows[0].kind, RowKind::Code);
         assert_eq!(rows[1].kind, RowKind::Code);
         assert_eq!(rows[2].kind, RowKind::Code);
         assert_eq!(rows[3].kind, RowKind::Table);
         assert_eq!(shown(text, 1, false), "let x = 1;");
-        assert_eq!(shown(text, 3, false), "| a | b |");
+        assert_eq!(shown(text, 3, true), "| a | b |");
     }
 
     #[test]
@@ -1017,5 +1083,48 @@ mod tests {
         assert_eq!(title_to_stem("  a   b  ").as_deref(), Some("a b"));
         assert_eq!(title_to_stem("..hidden.").as_deref(), Some("hidden"));
         assert_eq!(title_to_stem("///"), None);
+    }
+
+    #[test]
+    fn pipe_tables_are_grouped_with_roles_and_cells() {
+        let text = "intro\n| Name | Score |\n|:--|--:|\n| Ada | 42 |\n\n| lone | pipes |\n";
+        let rows = build_rows(text);
+        assert_eq!(rows[0].kind, RowKind::Text);
+        let t: Vec<_> = rows
+            .iter()
+            .map(|r| r.table.as_ref().map(|t| t.role))
+            .collect();
+        assert_eq!(
+            t,
+            vec![
+                None,
+                Some(TableRole::Header),
+                Some(TableRole::Delimiter),
+                Some(TableRole::Body),
+                None,
+                None,
+                None
+            ]
+        );
+        let head = rows[1].table.as_ref().unwrap();
+        assert_eq!(head.start, 1);
+        assert_eq!(head.aligns.as_slice(), &[Align::Left, Align::Right]);
+        let cells: Vec<&str> = head.cells.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(cells, ["Name", "Score"]);
+        assert_eq!(rows[3].table.as_ref().unwrap().start, 1, "same table id");
+        assert_eq!(
+            rows[5].kind,
+            RowKind::Text,
+            "pipes without a delimiter are prose"
+        );
+    }
+
+    #[test]
+    fn tables_need_matching_header_and_delimiter_and_skip_fences() {
+        assert!(build_rows("| a | b |\n|---|\n")[0].table.is_none());
+        let fenced = build_rows("```\n| a |\n|---|\n```\n");
+        assert!(fenced.iter().all(|r| r.table.is_none()));
+        let no_edges = build_rows("a | b\n--- | ---\n1 | 2\n");
+        assert_eq!(no_edges[2].table.as_ref().unwrap().role, TableRole::Body);
     }
 }

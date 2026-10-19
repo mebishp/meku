@@ -158,6 +158,7 @@ pub struct MekuShell {
     doc_views: document::RowViews,
     /// Width document rows wrap at (set while painting; used by the caret).
     doc_wrap: Rc<std::cell::Cell<Pixels>>,
+    doc_tables: document::TableCache,
     /// Scroll and measurement state of the document list.
     doc_list: ListState,
     /// File the list state currently describes.
@@ -218,6 +219,7 @@ impl MekuShell {
             doc_models: HashMap::new(),
             doc_views: Rc::new(RefCell::new(Vec::new())),
             doc_wrap: Rc::new(std::cell::Cell::new(px(0.))),
+            doc_tables: Rc::new(RefCell::new((u64::MAX, HashMap::new()))),
             doc_list: ListState::new(0, ListAlignment::Top, px(600.)),
             doc_list_rel: None,
             conflict: None,
@@ -4940,5 +4942,47 @@ mod ui_tests {
             "dog cat\ncat\n",
             "replace all is one undo step"
         );
+    }
+
+    // -- tables -------------------------------------------------------
+
+    #[test]
+    fn tab_and_enter_work_inside_tables() {
+        run_ui_test("table_keys", table_keys_body);
+    }
+
+    fn table_keys_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "|a|b|\n|-|-|\n|1|2|\n\nend\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 1);
+        step(cx, window, |w, cx| w.press("tab", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "| a   | b   |\n| --- | --- |\n| 1   | 2   |\n\nend\n",
+            "Tab aligns the table"
+        );
+        let selected = |cx: &mut TestAppContext| {
+            cx.update(|cx| view.read_with(cx, |s, cx| s.buffers[&rel].read(cx).selected_text()))
+        };
+        assert_eq!(selected(cx), "b", "and moves to the next cell");
+        step(cx, window, |w, cx| w.press("shift-tab", cx));
+        assert_eq!(selected(cx), "a");
+        // Enter on a body row adds a row below.
+        move_doc_caret(cx, &view, 36);
+        step(cx, window, |w, cx| w.press("enter", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "| a   | b   |\n| --- | --- |\n| 1   | 2   |\n|     |     |\n\nend\n"
+        );
+        // The rendered grid exists for rows the caret is not on.
+        step(cx, window, |_, _| {});
+        let rows = cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.doc_model(&rel, cx)
+                    .map(|m| m.rows.iter().filter(|r| r.table.is_some()).count())
+            })
+        });
+        assert_eq!(rows, Some(4));
     }
 }
