@@ -269,9 +269,21 @@ pub fn content_spans(text: &str) -> Vec<(Range<usize>, InlineStyle)> {
                     continue;
                 }
                 let bits = stack.iter().fold(0u8, |acc, b| acc | b);
-                let mut style = style_from_bits(bits);
+                let style = style_from_bits(bits);
                 if matches!(event, Event::Code(_)) {
-                    style = style.with(InlineStyle::CODE);
+                    // The span covers the backtick fences too; only the code
+                    // between them is content, the ticks are markup.
+                    let src = &text[range.clone()];
+                    let ticks = src.bytes().take_while(|&b| b == b'`').count();
+                    let inner = range.start + ticks..range.end.saturating_sub(ticks);
+                    if inner.start < inner.end {
+                        out.push((inner, style.with(InlineStyle::CODE)));
+                    }
+                    continue;
+                }
+                if matches!(event, Event::Text(_)) && !style.contains(InlineStyle::CODE) {
+                    split_highlights(text, range, style, &mut out);
+                    continue;
                 }
                 out.push((range, style));
             }
@@ -281,6 +293,47 @@ pub fn content_spans(text: &str) -> Vec<(Range<usize>, InlineStyle)> {
     out
 }
 
+/// Push `range` (a text span), carving out `==highlighted==` runs: the
+/// words get the highlight style, the `==` markers stay markup.
+fn split_highlights(
+    text: &str,
+    range: Range<usize>,
+    style: InlineStyle,
+    out: &mut Vec<(Range<usize>, InlineStyle)>,
+) {
+    let src = &text[range.clone()];
+    // `scan` finds candidates; `seg` is where un-emitted plain text begins.
+    let (mut scan, mut seg) = (0usize, 0usize);
+    while let Some(open) = src[scan..].find("==").map(|i| i + scan) {
+        let body_start = open + 2;
+        let Some(close) = src[body_start..].find("==").map(|i| i + body_start) else {
+            break;
+        };
+        let body = &src[body_start..close];
+        let valid = !body.is_empty()
+            && !body.starts_with(char::is_whitespace)
+            && !body.ends_with(char::is_whitespace)
+            && !body.starts_with('=');
+        if !valid {
+            // Not a highlight: keep looking after this `==`.
+            scan = body_start;
+            continue;
+        }
+        if seg < open {
+            out.push((range.start + seg..range.start + open, style));
+        }
+        out.push((
+            range.start + body_start..range.start + close,
+            style.with(InlineStyle::HIGHLIGHT),
+        ));
+        seg = close + 2;
+        scan = seg;
+    }
+    if seg < src.len() {
+        out.push((range.start + seg..range.end, style));
+    }
+}
+
 fn style_from_bits(bits: u8) -> InlineStyle {
     [
         InlineStyle::STRONG,
@@ -288,6 +341,7 @@ fn style_from_bits(bits: u8) -> InlineStyle {
         InlineStyle::STRIKE,
         InlineStyle::CODE,
         InlineStyle::LINK,
+        InlineStyle::HIGHLIGHT,
     ]
     .into_iter()
     .filter(|flag| bits & flag != 0)
@@ -1324,5 +1378,39 @@ mod tests {
         assert!(!rows[2].fence.as_ref().unwrap().open);
         assert_eq!(rows[4].fence.as_ref().unwrap().lang, "");
         assert!(rows[3].fence.is_none());
+    }
+
+    #[test]
+    fn inline_code_ticks_and_highlight_markers_are_markup() {
+        assert_eq!(shown("use `code` here", 0, false), "use code here");
+        assert_eq!(shown("use `code` here", 0, true), "use `code` here");
+        assert_eq!(
+            shown("a ``co`de`` b", 0, false),
+            "a co`de b",
+            "double-tick fence"
+        );
+        assert_eq!(
+            shown("see ==marked text== now", 0, false),
+            "see marked text now"
+        );
+        assert_eq!(
+            shown("see ==marked text== now", 0, true),
+            "see ==marked text== now"
+        );
+        let spans = content_spans("x ==hi== y");
+        assert!(
+            spans.iter().any(
+                |(r, s)| &"x ==hi== y"[r.clone()] == "hi" && s.contains(InlineStyle::HIGHLIGHT)
+            )
+        );
+        // Not highlights: spaces inside, lone markers, code.
+        assert_eq!(shown("a == b == c", 0, false), "a == b == c");
+        assert_eq!(shown("a ==b", 0, false), "a ==b");
+        assert_eq!(
+            shown("`==x==`", 0, false),
+            "==x==",
+            "inside code it is literal"
+        );
+        assert_eq!(shown("**==both==**", 0, false), "both");
     }
 }

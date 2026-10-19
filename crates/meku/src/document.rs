@@ -1158,6 +1158,20 @@ fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
         style.font_family = cx.theme().mono_font_family.clone();
         style.color = hex(crate::theme::active(cx).code);
     }
+    if bits.contains(InlineStyle::HIGHLIGHT) {
+        // Highlighter yellow: a bright one on light themes, a warm gold on dark.
+        let mut mark = if crate::theme::active(cx).dark {
+            hex(0xd9a520)
+        } else {
+            hex(0xffd84d)
+        };
+        mark.a = if crate::theme::active(cx).dark {
+            0.38
+        } else {
+            0.55
+        };
+        style.background_color = Some(mark);
+    }
     if bits.contains(InlineStyle::LINK) {
         style.color = cx.theme().link;
         style.underline = Some(UnderlineStyle {
