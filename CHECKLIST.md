@@ -284,3 +284,14 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 
 _Deferred past v0.1: links/backlinks/graph, vim, plugins/sync, export PDF/HTML, minimap, >100k-line mmap paging, tantivy, settings UI beyond ~10 keys._
 
+## Section 5 — `design-guidelines.md` adoption (spacing / layout only)
+
+_Fonts and colors are **excluded** by decision; only spacing, margins, layout, caret and copy are followed. Items judged to hurt the look or fight the row-per-line model are deliberately skipped._
+
+- [x] Reading column ≈68ch (37.5em), centered; 40px minimum side padding; 56px above the first line; 45% of the window as bottom scroll room
+- [x] Headings: space above 1.6em (H1–2) / 1.3em (H3+) and below 0.5em / 0.4em of the heading size (minus the blank row that already precedes it); first-row heading gets no extra top pad
+- [x] `---` renders as a centered 40px × 1px rule; list nesting 1.5em; list item gap 0.25em; blockquote indent 1.2em per level
+- [x] Caret width `max(1.5px, 0.125em)` snapped to whole pixels (scales with headings); stepped blink 530ms on / 530ms off, solid for 600ms after any key/click/drag; no blink in Read mode
+- [x] Window default 1100×760, minimum 640×420; "Outline" label in sentence case (no tracked-out all-caps); file-changed banner uses guideline copy (`Reload` / `Keep my version`)
+- [ ] Skipped on purpose: 1.7 line height (caret geometry depends on text metrics) · caret glide / marker fade (needs reserved marker slots) · drawn 5px bullets · per-line rounded code corners (seams) · slash menu, find bar, scrollbars, toasts, typewriter mode, overwrite caret (belong to their own builds)
+- Tests: column width/centering, 56px top offset, 40px narrow-window padding, caret width; `test(55+…)` + fmt/clippy green (2026-10-19). Not verified visually — needs a graphical session.

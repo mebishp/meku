@@ -164,6 +164,10 @@ pub struct MekuShell {
     _naming_sub: Option<Subscription>,
     pending_delete: Option<PathBuf>,
     notice: Option<String>,
+    /// Caret blink phase and the last keystroke/click (blink holds solid
+    /// for 600ms after input).
+    caret_on: bool,
+    caret_touch: Instant,
 }
 
 impl MekuShell {
@@ -192,8 +196,11 @@ impl MekuShell {
             _naming_sub: None,
             pending_delete: None,
             notice: None,
+            caret_on: true,
+            caret_touch: Instant::now(),
         };
         this.start_watcher_pump(cx);
+        this.start_caret_blink(cx);
         this
     }
 
@@ -210,6 +217,32 @@ impl MekuShell {
                 };
                 cx.update(|cx| {
                     view.update(cx, |shell, cx| shell.poll_watcher(cx));
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Stepped caret blink: 530ms on, 530ms off, held solid for 600ms after
+    /// any input. Only re-renders while a note is open outside Read mode.
+    fn start_caret_blink(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(530))
+                    .await;
+                let Some(view) = this.upgrade() else {
+                    break;
+                };
+                cx.update(|cx| {
+                    view.update(cx, |shell, cx| {
+                        if shell.doc_rel().is_none() || shell.tab_mode() == Mode::Read {
+                            return;
+                        }
+                        let held = shell.caret_touch.elapsed() < Duration::from_millis(600);
+                        shell.caret_on = held || !shell.caret_on;
+                        cx.notify();
+                    });
                 });
             }
         })
@@ -1368,7 +1401,7 @@ impl MekuShell {
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
-                    .child("OUTLINE"),
+                    .child("Outline"),
             )
             .child(
                 div()
@@ -1521,7 +1554,7 @@ impl MekuShell {
                     .flex_1()
                     .text_color(cx.theme().foreground)
                     .child(format!(
-                        "{} changed on disk. Load the disk version or keep your edits?",
+                        "{} changed outside the editor. Reload it, or keep your version.",
                         rel.display()
                     )),
             )
@@ -1530,7 +1563,7 @@ impl MekuShell {
                     .gap_2()
                     .child(
                         Button::new("conflict-keep")
-                            .label("Keep mine")
+                            .label("Keep my version")
                             .ghost()
                             .xsmall()
                             .on_click(move |_, _, cx| {
@@ -1539,7 +1572,7 @@ impl MekuShell {
                     )
                     .child(
                         Button::new("conflict-load")
-                            .label("Load disk")
+                            .label("Reload")
                             .primary()
                             .xsmall()
                             .on_click(move |_, _, cx| {
@@ -1885,10 +1918,11 @@ fn main() {
             KeyBinding::new("ctrl-v", DocPaste, Some("Meku")),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
         cx.spawn(async move |cx| {
             let mut options = TitleBar::window_options();
             options.window_bounds = Some(WindowBounds::Windowed(bounds));
+            options.window_min_size = Some(size(px(640.0), px(420.0)));
             options.app_id = Some("meku".to_string());
             cx.open_window(options, |window, cx| {
                 let view = cx.new(MekuShell::new);
@@ -3723,5 +3757,73 @@ mod ui_tests {
         })
         .unwrap();
         assert_eq!(buffer_text(cx, &view, &rel).0, "see [docs]()\n[a](c.md)\n");
+    }
+
+    // -- design guidelines: column, offsets, caret --------------------
+
+    #[test]
+    fn document_sits_in_a_centered_reading_column() {
+        run_ui_test("doc_column", doc_column_body);
+    }
+
+    fn doc_column_body(cx: &mut TestAppContext) {
+        let (_view, window, _dir) = open_note_in(cx, 1400.0, 800.0, "# T\n\nbody\n");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let scroll = window.find("md-scroll").bounds();
+            let row = window.find(("doc-row", 2usize)).bounds();
+            let width = row.size.width.as_f32();
+            assert!(
+                (500.0..=640.0).contains(&width),
+                "column should hold about 68ch, got {width}px"
+            );
+            let left = row.origin.x.as_f32() - scroll.origin.x.as_f32();
+            let right = scroll.right().as_f32() - row.right().as_f32();
+            assert!(
+                (left - right).abs() <= 1.5,
+                "column must be centered: left {left}, right {right}"
+            );
+            let first = window.find(("doc-row", 0usize)).bounds();
+            let top = first.origin.y.as_f32() - scroll.origin.y.as_f32();
+            assert!(top >= 56.0, "first line sits 56px down, got {top}");
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn narrow_window_keeps_forty_pixels_either_side() {
+        run_ui_test("doc_narrow", doc_narrow_body);
+    }
+
+    fn doc_narrow_body(cx: &mut TestAppContext) {
+        let (_view, window, _dir) = open_note_in(cx, 760.0, 600.0, "body\n");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let scroll = window.find("md-scroll").bounds();
+            let row = window.find(("doc-row", 0usize)).bounds();
+            let left = row.origin.x.as_f32() - scroll.origin.x.as_f32();
+            assert!(left >= 40.0, "side padding at least 40px, got {left}");
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn caret_width_follows_font_size() {
+        run_ui_test("caret_width", caret_width_body);
+    }
+
+    fn caret_width_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "# Big\n\nsmall\n");
+        let (body, _) = {
+            move_doc_caret(cx, &view, 8);
+            caret_bounds(cx, window)
+        };
+        move_doc_caret(cx, &view, 2);
+        let (heading, _) = caret_bounds(cx, window);
+        assert!(body.size.width.as_f32() >= 1.5, "body caret stays visible");
+        assert!(
+            heading.size.width.as_f32() >= body.size.width.as_f32(),
+            "heading caret is at least as wide as the body caret"
+        );
     }
 }

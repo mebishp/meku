@@ -186,6 +186,12 @@ impl MekuShell {
         Some(model)
     }
 
+    /// Input holds the caret solid (and visible) before blinking resumes.
+    pub(crate) fn touch_caret(&mut self) {
+        self.caret_on = true;
+        self.caret_touch = Instant::now();
+    }
+
     pub(crate) fn doc_note_edit(&mut self, rel: &Path) {
         self.last_edit.insert(rel.to_path_buf(), Instant::now());
     }
@@ -267,6 +273,7 @@ impl MekuShell {
         let text = model.text.clone();
         let hls = model.hl.clone();
         let views = self.doc_views.clone();
+        let caret_on = self.caret_on;
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
             // Edit reveals every row, Live only the caret's, Read none.
@@ -276,12 +283,13 @@ impl MekuShell {
                 Mode::Live => is_caret_row,
                 Mode::Read => false,
             };
-            row_element(
+            let base = window.text_style().font_size.to_pixels(window.rem_size());
+            let el = row_element(
                 ix,
                 row,
                 &text,
                 reveal,
-                is_caret_row.then_some(caret),
+                (is_caret_row && caret_on).then_some(caret),
                 match mode {
                     Mode::Read => None,
                     _ => selection_for(row, &selection),
@@ -292,7 +300,19 @@ impl MekuShell {
                 &views,
                 window,
                 cx,
-            )
+            );
+            // Centered reading column (about 68ch), 56px above the first line
+            // and 45% of the window below the last so the end can rise to
+            // the middle.
+            let mut item = div().w_full().flex().justify_center().px(px(24.));
+            if ix == 0 {
+                item = item.pt(px(56.));
+            }
+            if ix + 1 == rows.len() {
+                item = item.pb(window.viewport_size().height * 0.45);
+            }
+            item.child(div().w_full().max_w(base * COLUMN_EM).child(el))
+                .into_any_element()
         })
         .size_full();
 
@@ -358,6 +378,7 @@ impl MekuShell {
         if self.modal_open() {
             return;
         }
+        self.touch_caret();
         let (Some(rel), Some(src)) = (self.doc_rel(), self.row_source(ix, pos)) else {
             return;
         };
@@ -466,6 +487,7 @@ impl MekuShell {
         if self.modal_open() || self.tab_mode() == Mode::Read {
             return;
         }
+        self.touch_caret();
         let Some(rel) = self.doc_rel() else {
             return;
         };
@@ -822,6 +844,10 @@ fn selection_for(row: &Row, selection: &Range<usize>) -> Option<Range<usize>> {
     (start < end).then_some(start..end)
 }
 
+/// Reading column width in em of the body size: 68 characters at roughly
+/// 0.55em per average character.
+const COLUMN_EM: f32 = 37.5;
+
 fn heading_scale(kind: RowKind) -> f32 {
     match kind {
         RowKind::Heading(1) => 1.8,
@@ -1007,14 +1033,22 @@ fn caret_geometry(
 /// origin plus the shaped advance), so no window-space math is needed and the
 /// caret cannot drift away from its row. Deliberately not a `canvas`
 /// paint-quad: paint bounds live in window space and got the caret lost.
-fn caret_element(x: Pixels, y: Pixels, height: Pixels, color: Hsla) -> impl IntoElement {
+fn caret_element(
+    x: Pixels,
+    y: Pixels,
+    height: Pixels,
+    font_size: Pixels,
+    color: Hsla,
+) -> impl IntoElement {
+    // max(1.5px, 0.125em), snapped to whole pixels.
+    let width = px((f32::from(font_size) * 0.125).max(1.5).round());
     div()
         .id("doc-caret")
         .test_support()
         .absolute()
         .left(x)
         .top(y)
-        .w(px(2.))
+        .w(width)
         .h(height)
         .bg(color)
 }
@@ -1087,6 +1121,7 @@ fn row_element(
                 px(0.),
                 (row_h - base_font) / 2.0,
                 base_font,
+                base_font,
                 cx.theme().foreground,
             ));
         }
@@ -1094,8 +1129,8 @@ fn row_element(
     }
     if row.kind == RowKind::Rule && !reveal {
         return row_div
-            .py(px(10.))
-            .child(div().h(px(1.)).w_full().bg(cx.theme().border))
+            .py(base_font)
+            .child(div().h(px(1.)).w(px(40.)).mx_auto().bg(cx.theme().border))
             .into_any_element();
     }
 
@@ -1132,24 +1167,36 @@ fn row_element(
     // caret (row-local) lands exactly where the glyphs start.
     let mut text_x = px(0.);
     let mut text_y = px(0.);
-    if matches!(row.kind, RowKind::Heading(_)) {
-        el = el.pt(px(6.));
-        text_y = px(6.);
+    if let RowKind::Heading(level) = row.kind {
+        // Space above 1.6em (H1-2) / 1.3em (H3+) and below 0.5em / 0.4em of
+        // the heading size; the blank row before it already supplies the
+        // body-sized gap, so only the remainder is added here.
+        let (above, below) = if level <= 2 { (1.6, 0.5) } else { (1.3, 0.4) };
+        let pad_top = if ix == 0 {
+            px(0.)
+        } else {
+            (font_size * above - base_font * 1.1).max(px(0.))
+        };
+        el = el.pt(pad_top).pb(font_size * below);
+        text_y = pad_top;
     }
     if row.quote_depth > 0 {
         let depth = f32::from(row.quote_depth.min(4));
         el = el
             .border_l_2()
             .border_color(cx.theme().accent)
-            .pl(px(14.0 * depth));
+            .pl(base_font * (1.2 * depth));
         // Later padding refinements replace earlier ones (same as the style
         // system), so track by assignment, not accumulation.
-        text_x = px(14.0 * depth);
+        text_x = base_font * (1.2 * depth);
     }
     if !reveal && row.list_depth > 0 {
-        let indent = px(20.0 * f32::from(row.list_depth.min(8)));
+        let indent = base_font * (1.5 * f32::from(row.list_depth.min(8)));
         el = el.pl(indent);
         text_x = indent;
+    }
+    if row.kind == RowKind::Item {
+        el = el.pb(base_font * 0.25);
     }
     if row.kind == RowKind::Code {
         el = el.bg(cx.theme().sidebar).rounded_sm();
@@ -1164,6 +1211,7 @@ fn row_element(
             text_x + advance,
             text_y + y_offset,
             cheight,
+            font_size,
             cx.theme().foreground,
         ));
     }
@@ -1326,6 +1374,7 @@ impl EntityInputHandler for MekuShell {
         if self.modal_open() || self.tab_mode() == Mode::Read {
             return;
         }
+        self.touch_caret();
         let Some((rel, doc)) = self.doc_text(cx) else {
             return;
         };
@@ -1369,6 +1418,7 @@ impl EntityInputHandler for MekuShell {
         if self.modal_open() || self.tab_mode() == Mode::Read {
             return;
         }
+        self.touch_caret();
         let Some((rel, doc)) = self.doc_text(cx) else {
             return;
         };
