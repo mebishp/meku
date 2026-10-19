@@ -662,6 +662,46 @@ impl MekuShell {
         cx.notify();
     }
 
+    /// Headings of the active note as `(level, title, source offset)`, in
+    /// document order. Fenced `#` lines are `Code` rows, so never listed.
+    pub(crate) fn doc_outline(&mut self, cx: &App) -> Vec<(u8, String, usize)> {
+        let Some(rel) = self.doc_rel() else {
+            return Vec::new();
+        };
+        let Some(model) = self.doc_model(&rel, cx) else {
+            return Vec::new();
+        };
+        model
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let RowKind::Heading(level) = row.kind else {
+                    return None;
+                };
+                let line = &model.text[row.src.clone()];
+                let title = line.trim_start().trim_start_matches('#').trim();
+                let title = title.trim_end_matches('#').trim_end();
+                Some((level, title.to_string(), row.src.start))
+            })
+            .collect()
+    }
+
+    /// Move the caret to `offset` (a heading start) and scroll its row in.
+    pub(crate) fn doc_goto(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let Some(rel) = self.doc_rel() else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get(&rel).cloned() else {
+            return;
+        };
+        buffer.update(cx, |b, _| b.move_caret(offset, false));
+        if let Some(model) = self.doc_model(&rel, cx) {
+            self.doc_list
+                .scroll_to_reveal_item(row_at(&model.rows, offset));
+        }
+        cx.notify();
+    }
+
     /// Text and utf16 helpers for the input handler: the active note's text.
     fn doc_text(&self, cx: &App) -> Option<(PathBuf, Rc<str>)> {
         let rel = self.doc_rel()?;

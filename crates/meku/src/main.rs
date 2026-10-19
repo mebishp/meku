@@ -1302,6 +1302,7 @@ impl MekuShell {
                 .overflow_y_scroll()
                 .child(self.render_file_tree(cx)),
         )
+        .child(self.render_outline(cx))
         .child(
             div()
                 .px_3()
@@ -1311,6 +1312,69 @@ impl MekuShell {
                 .child("Meku v0.1"),
         )
         .into_any_element()
+    }
+
+    /// Heading tree of the active note; the heading holding the caret is
+    /// highlighted (follow-cursor) and a click jumps there.
+    fn render_outline(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let outline = self.doc_outline(cx);
+        let caret = self
+            .doc_rel()
+            .and_then(|rel| self.buffers.get(&rel))
+            .map(|b| b.read(cx).caret())
+            .unwrap_or(0);
+        let active = outline.iter().rposition(|(_, _, at)| *at <= caret);
+        let shell = cx.entity();
+        let muted = cx.theme().muted_foreground;
+        let rows: Vec<AnyElement> = outline
+            .into_iter()
+            .enumerate()
+            .map(|(i, (level, title, at))| {
+                let shell = shell.clone();
+                ListItem::new(format!("outline-{i}"))
+                    .selected(active == Some(i))
+                    .child(
+                        div()
+                            .pl(px((level.saturating_sub(1)) as f32 * 12.0 + 4.0))
+                            .text_sm()
+                            .child(if title.is_empty() {
+                                "(untitled)".to_string()
+                            } else {
+                                title
+                            }),
+                    )
+                    .on_click(move |_, window, cx| {
+                        shell.update(cx, |view, cx| {
+                            view.doc_goto(at, cx);
+                            window.focus(&view.focus_handle, cx);
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .flex_none()
+            .h(px(220.))
+            .border_t_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
+                    .child("OUTLINE"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .id("outline-scroll")
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .into_any_element()
     }
 
     fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3566,5 +3630,35 @@ mod ui_tests {
             "*word* ()\n",
             "empty pair removed"
         );
+    }
+
+    // -- Build 6: outline -----------------------------------------------
+
+    #[test]
+    fn outline_lists_headings_and_jumps() {
+        run_ui_test("outline", outline_body);
+    }
+
+    fn outline_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(
+            cx,
+            1200.0,
+            800.0,
+            "# One\ntext\n```\n# not a heading\n```\n## Two\n",
+        );
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        let outline = cx.update(|cx| view.update(cx, |shell, cx| shell.doc_outline(cx)));
+        assert_eq!(
+            outline,
+            vec![(1, "One".to_string(), 0), (2, "Two".to_string(), 35)],
+            "fenced hashes are code, not headings"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("outline-1", cx);
+        })
+        .unwrap();
+        assert_eq!(doc_caret(cx, &view, &rel), 35, "click jumps to the heading");
     }
 }

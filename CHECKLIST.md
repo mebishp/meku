@@ -128,7 +128,7 @@ Pipeline: `keystroke → OpenBuffer.apply_edit (<1ms) → debounce 80–120ms Ta
   - Grammar crates (latest available): `tree-sitter-rust 0.24` / `tree-sitter-(python|bash|javascript) 0.25` / `tree-sitter-md-025 0.5.6` (md grammar fork compiled against the unified tree-sitter 0.25 runtime); highlight queries come from the grammar crates themselves (`HIGHLIGHTS_QUERY`/`HIGHLIGHT_QUERY`), markdown block+inline wired via injection callback.
   - Tests guard: Read blocks typing + IME + no caret; mode cycle Edit→Live→Read→Edit via key AND buttons; scroll kept across Read/Edit; image drawn only when its row is hidden (Edit shows raw); rust fence keyword span from the model (`DocModel.hl`).
   - Caret is centered on the glyph box, not the line-box top: gpui paints glyphs with `padding_top = (line_height − ascent − descent)/2` (see `text_system/line.rs::paint_line`), so `caret_geometry` returns `(advance, padding_top, font_box)` and blank rows offset by `(row_h − font_size)/2`. Glyph-match test now asserts against the painted (padded) position via `line_layout_for_index` metrics.
-- [ ] **6. Search + palette + outline** — `Ctrl-P` finder, `Ctrl-Shift-P` palette, full-text (grep lib), heading tree + follow-cursor. → _commit_
+- [ ] **6. Search + palette + outline** _(outline landed 2026-10-19: sidebar OUTLINE section from the live row model — fenced `#` excluded, caret-following highlight, click-to-jump, headless-tested; remaining: Ctrl-P finder, Ctrl-Shift-P palette, full-text search)_ — — `Ctrl-P` finder, `Ctrl-Shift-P` palette, full-text (grep lib), heading tree + follow-cursor. → _commit_
   - Landed with Build 5.x (from the live-markdown feature file §2, suggested-build-order step 2): word/line navigation — `Ctrl+←/→` word jump (camelCase humps, punctuation runs as one stop, whitespace skipped), `Ctrl+Shift+←/→` extend, `Ctrl+Backspace`/`Ctrl+Delete` word deletes, `Ctrl+Shift+Backspace` delete-to-line-start (joins lines at line start), smart `Home` (first non-blank ⇄ column 0), `Ctrl+Home/End` doc start/end, `PageUp/PageDown` + Shift variants (±1 viewport of rows, column kept) — buffer logic in `meku-buffer` (`word_left/word_right/delete_*`, unit-tested incl. rope-chunk-crossing long doc), bindings + handlers + 5 headless UI tests. `test(32+27+38)`+`check`+`fmt`+`clippy` green. → _commit_
 - [ ] **7. Perf + polish** — virtualized lists everywhere, 120ms debounce audit, lazy images/grammars, benches green, RSS <120MB, docs + Linux packaging. → _commit_
 
@@ -161,7 +161,7 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [x] Shift+Arrow extends selection (existing, Build 4) + Ctrl+Shift+Left/Right extends by word
 - [ ] Word jump respects markdown syntax more granularly (link targets, fence strings)
 - [ ] Go to line (Ctrl+G)
-- [ ] Jump to heading from outline (builds with palette/outline)
+- [x] Jump to heading from outline (click an Outline entry → caret + scroll; landed with Build 6 outline)
 - [ ] Bookmarks / jump back (Alt+Left/Right)
 
 ### F3 Line Editing Shortcuts (§3) — **landed 2026-10-19**
