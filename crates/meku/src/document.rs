@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::*;
@@ -147,6 +148,9 @@ pub(crate) struct DocModel {
 pub(crate) struct RowView {
     pub(crate) layout: TextLayout,
     pub(crate) display: Display,
+    /// A checkbox control sits left of the text (hidden task rows): presses
+    /// there belong to the control, not the caret.
+    pub(crate) has_checkbox: bool,
 }
 
 /// Row views shared between the render pass and pointer handlers.
@@ -283,6 +287,7 @@ impl MekuShell {
         let hls = model.hl.clone();
         let views = self.doc_views.clone();
         let caret_on = self.caret_on;
+        let hover_link = self.hover_link;
         let title_input = self.title_inputs.get(rel).cloned();
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
@@ -306,6 +311,7 @@ impl MekuShell {
                 },
                 hls[ix].clone(),
                 images[ix].clone(),
+                hover_link == Some(ix),
                 &shell,
                 &views,
                 window,
@@ -400,6 +406,12 @@ impl MekuShell {
         }
         self.touch_caret();
         self.flush_title(cx);
+        if let Some(Some(view)) = self.doc_views.borrow().get(ix)
+            && view.has_checkbox
+            && pos.x < view.layout.bounds().left()
+        {
+            return; // the checkbox control handles this press
+        }
         let (Some(rel), Some(src)) = (self.doc_rel(), self.row_source(ix, pos)) else {
             return;
         };
@@ -415,30 +427,87 @@ impl MekuShell {
         &mut self,
         ix: usize,
         pos: Point<Pixels>,
+        ctrl: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.modal_open() {
-            return false;
+        match self.link_under(ix, pos, ctrl, cx) {
+            Some((rel, target)) => match classify_link(&target, &rel) {
+                Some(target) => self.follow_link(target, cx),
+                None => false,
+            },
+            None => false,
         }
-        let (Some(rel), Some(src)) = (self.doc_rel(), self.row_source(ix, pos)) else {
-            return false;
-        };
-        let Some(model) = self.doc_models.get(&rel) else {
-            return false;
-        };
-        let Some(row) = model.rows.get(ix) else {
-            return false;
-        };
+    }
+
+    /// The link destination under `pos` in row `ix` when a click there
+    /// should follow it: always with Ctrl, otherwise whenever the row shows
+    /// rendered text (Read mode, or any row but the caret's in Live). On the
+    /// caret row and in Edit the raw source is being edited, so a plain
+    /// click just places the caret.
+    fn link_under(
+        &mut self,
+        ix: usize,
+        pos: Point<Pixels>,
+        ctrl: bool,
+        cx: &App,
+    ) -> Option<(PathBuf, String)> {
+        if self.modal_open() {
+            return None;
+        }
+        let rel = self.doc_rel()?;
+        let src = self.row_source(ix, pos)?;
+        let caret = self.buffers.get(&rel)?.read(cx).caret();
+        let model = self.doc_models.get(&rel)?;
+        let row = model.rows.get(ix)?;
         if row.kind == RowKind::Code {
-            return false;
+            return None;
+        }
+        let rendered = match self.tab_mode() {
+            Mode::Read => true,
+            Mode::Live => row_at(&model.rows, caret) != ix,
+            Mode::Edit => false,
+        };
+        if !(ctrl || rendered) {
+            return None;
+        }
+        // The pointer must really be over the text, not the padding beside it.
+        let views = self.doc_views.borrow();
+        if let Some(Some(view)) = views.get(ix)
+            && !view.layout.bounds().contains(&pos)
+        {
+            return None;
         }
         let line = &model.text[row.src.clone()];
-        let Some(link) = link_at(line, src.saturating_sub(row.src.start)) else {
-            return false;
+        let link = link_at(line, src.saturating_sub(row.src.start))?;
+        Some((rel, link.target))
+    }
+
+    /// Pointer moved over row `ix`: remember whether it is on a followable
+    /// link so the row can show the pointing hand.
+    pub(crate) fn doc_hover(
+        &mut self,
+        ix: usize,
+        pos: Point<Pixels>,
+        ctrl: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let over = self.link_under(ix, pos, ctrl, cx).is_some();
+        let next = over.then_some(ix);
+        if self.hover_link != next {
+            self.hover_link = next;
+            cx.notify();
+        }
+    }
+
+    /// Checkbox click: flip the task box at byte `at` of the active note.
+    pub(crate) fn toggle_task_at(&mut self, at: usize, cx: &mut Context<Self>) {
+        let Some(rel) = self.doc_rel() else {
+            return;
         };
-        match classify_link(&link.target, &rel) {
-            Some(target) => self.follow_link(target, cx),
-            None => false,
+        if let Some(buffer) = self.buffers.get(&rel).cloned() {
+            buffer.update(cx, |b, _| b.toggle_task_box(at));
+            self.doc_note_edit(&rel);
+            cx.notify();
         }
     }
 
@@ -1112,6 +1181,7 @@ fn row_element(
     selection: Option<Range<usize>>,
     colored: RowColors,
     image: Option<ImageSrc>,
+    pointer: bool,
     shell: &Entity<MekuShell>,
     views: &RowViews,
     window: &mut Window,
@@ -1129,8 +1199,7 @@ fn row_element(
             down_shell.update(cx, |view, cx| {
                 let focus = view.focus_handle.clone();
                 window.focus(&focus, cx);
-                let follow = ev.modifiers.control || view.tab_mode() == Mode::Read;
-                if follow && view.doc_follow_link(ix, ev.position, cx) {
+                if view.doc_follow_link(ix, ev.position, ev.modifiers.control, cx) {
                     return;
                 }
                 view.doc_pointer(ix, ev.position, ev.modifiers.shift, cx);
@@ -1139,8 +1208,17 @@ fn row_element(
         .on_mouse_move(move |ev: &MouseMoveEvent, _window, cx| {
             if ev.pressed_button == Some(MouseButton::Left) {
                 drag_shell.update(cx, |view, cx| view.doc_drag(ix, ev.position, cx));
+            } else {
+                drag_shell.update(cx, |view, cx| {
+                    view.doc_hover(ix, ev.position, ev.modifiers.control, cx)
+                });
             }
         });
+    let row_div = if pointer {
+        row_div.cursor_pointer()
+    } else {
+        row_div
+    };
 
     // Standalone image rows draw their picture when hidden; the caret row and
     // Edit mode show the raw text instead (unchanged flow below).
@@ -1210,6 +1288,7 @@ fn row_element(
         *slot = Some(RowView {
             layout: layout.clone(),
             display,
+            has_checkbox: !reveal && row.task().is_some(),
         });
     }
 
@@ -1245,6 +1324,40 @@ fn row_element(
         let indent = base_font * (1.5 * f32::from(row.list_depth.min(8)));
         el = el.pl(indent);
         text_x = indent;
+        // One faint guide per ancestor level makes nested items read as
+        // subsections of the item above.
+        for level in 1..=row.list_depth {
+            el = el.child(
+                div()
+                    .absolute()
+                    .top(px(0.))
+                    .bottom(px(0.))
+                    .left(base_font * (1.5 * f32::from(level - 1) + 0.3))
+                    .w(px(1.))
+                    .bg(cx.theme().border),
+            );
+        }
+    }
+    // Tasks: a real checkbox control in the gap before the text.
+    if !reveal && let Some((checked, task_src)) = row.task() {
+        let box_size = px(16.);
+        let gap = base_font * 1.6;
+        let line_h =
+            window.text_style().line_height_in_pixels(window.rem_size()) * heading_scale(row.kind);
+        let toggle_shell = shell.clone();
+        let at = task_src.start;
+        el = el.pl(text_x + gap).child(
+            div()
+                .absolute()
+                .left(text_x)
+                .top(text_y + ((line_h - box_size) / 2.0).max(px(0.)))
+                .child(Checkbox::new(("task-box", ix)).checked(checked).on_click(
+                    move |_, _, cx| {
+                        toggle_shell.update(cx, |view, cx| view.toggle_task_at(at, cx));
+                    },
+                )),
+        );
+        text_x += gap;
     }
     if row.kind == RowKind::Item {
         el = el.pb(base_font * 0.25);

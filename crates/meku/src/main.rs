@@ -169,6 +169,8 @@ pub struct MekuShell {
     /// for 600ms after input).
     caret_on: bool,
     caret_touch: Instant,
+    /// Row whose rendered link the pointer is over (pointing-hand cursor).
+    hover_link: Option<usize>,
     /// The inline title above each open note's body (not part of the
     /// markdown): shows the file stem, and editing it renames the file.
     title_inputs: HashMap<PathBuf, Entity<InputState>>,
@@ -212,6 +214,7 @@ impl MekuShell {
             notice: None,
             caret_on: true,
             caret_touch: Instant::now(),
+            hover_link: None,
             title_inputs: HashMap::new(),
             title_subs: HashMap::new(),
             title_pending: None,
@@ -4345,5 +4348,109 @@ mod ui_tests {
             "typing continues past a pause"
         );
         assert_eq!(dir_files(dir.path()), ["doc.md"], "same stem: no rename");
+    }
+
+    // -- subsections, checkboxes, easy links --------------------------
+
+    #[test]
+    fn tab_nests_to_three_levels_and_stops() {
+        run_ui_test("tab_levels", tab_levels_body);
+    }
+
+    fn tab_levels_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "- a\n- b\n- c\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        let press = |cx: &mut TestAppContext, key: &'static str| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.press(key, cx);
+            })
+            .unwrap();
+        };
+        // b becomes a child of a (level 2) ...
+        move_doc_caret(cx, &view, 6);
+        press(cx, "tab");
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- a\n  - b\n- c\n");
+        // ... c follows it down to level 2, then level 3, and stops there.
+        move_doc_caret(cx, &view, 12);
+        press(cx, "tab");
+        press(cx, "tab");
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- a\n  - b\n    - c\n");
+        press(cx, "tab");
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "- a\n  - b\n    - c\n",
+            "a fourth level is refused"
+        );
+        press(cx, "shift-tab");
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- a\n  - b\n  - c\n");
+    }
+
+    #[test]
+    fn clicking_a_rendered_checkbox_toggles_the_task() {
+        run_ui_test("checkbox_click", checkbox_click_body);
+    }
+
+    fn checkbox_click_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "intro\n- [ ] a\n- [x] b\n");
+        let rel = PathBuf::from("doc.md");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("task-box", 1usize), cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "intro\n- [x] a\n- [x] b\n");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("task-box", 2usize), cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "intro\n- [x] a\n- [ ] b\n");
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            0,
+            "clicking a box leaves the caret"
+        );
+        assert!(
+            buffer_text(cx, &view, &rel).1,
+            "toggle marks the note dirty"
+        );
+    }
+
+    #[test]
+    fn plain_click_follows_rendered_links_but_edits_the_caret_row() {
+        run_ui_test("plain_link_click", plain_link_click_body);
+    }
+
+    fn plain_link_click_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "intro\n[go](other.md)\n");
+        std::fs::write(dir.path().join("other.md"), "# other\n").unwrap();
+        let rel = PathBuf::from("doc.md");
+        let at = gpui_kit::point(px(10.), px(8.));
+        // Caret on the link's own row: the source is shown, a click edits.
+        move_doc_caret(cx, &view, 8);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click_at(("doc-row", 1usize), at, cx);
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.doc_rel()),
+            Some(rel.clone()),
+            "raw row: no navigation"
+        );
+        // Caret elsewhere: the link is rendered text and one plain click opens it.
+        move_doc_caret(cx, &view, 0);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click_at(("doc-row", 1usize), at, cx);
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.doc_rel()),
+            Some(PathBuf::from("other.md")),
+            "plain click follows a rendered link"
+        );
     }
 }

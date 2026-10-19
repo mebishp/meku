@@ -5,7 +5,8 @@
 //!
 //! - **reveal** (the caret's row): every source byte is shown, markup dimmed.
 //! - **hidden** (every other row): markup disappears, headings and quotes keep
-//!   only their content, list bullets become `•`, task boxes become `☐`/`☑`.
+//!   only their content, list bullets become `•`/`◦`/`▪` by nesting level,
+//!   task boxes disappear (the editor draws a checkbox control for them).
 //!
 //! [`Display`] keeps an exact source <-> display mapping in both modes, so the
 //! caret and pointer land on the same character the user sees.
@@ -70,6 +71,17 @@ pub struct Run {
     /// Markup (syntax characters) as opposed to content.
     pub markup: bool,
     pub role: Role,
+}
+
+impl Row {
+    /// The task checkbox of this row: its checked state and the bytes of
+    /// `[ ] ` / `[x] ` (trailing space included).
+    pub fn task(&self) -> Option<(bool, Range<usize>)> {
+        self.runs.iter().find_map(|run| match run.role {
+            Role::Task(checked) => Some((checked, run.src.clone())),
+            _ => None,
+        })
+    }
 }
 
 /// One source line and its classification.
@@ -309,13 +321,42 @@ pub fn build_rows(text: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut in_fence = false;
     let mut offset = 0usize;
+    // Indents of the open list levels, outermost first.
+    let mut levels: Vec<usize> = Vec::new();
     for line in text.split('\n') {
         let start = offset;
         let end = start + line.len();
         offset = end + 1;
-        rows.push(classify(text, start..end, &mut in_fence, &spans));
+        let mut row = classify(text, start..end, &mut in_fence, &spans);
+        let indent = line.len() - line.trim_start().len();
+        match row.kind {
+            RowKind::Item => row.list_depth = nest_depth(&mut levels, indent),
+            // Blank lines keep a loose list going; flush-left prose, headings
+            // and the like end it. Indented continuation lines belong to it.
+            RowKind::Blank => {}
+            _ if indent == 0 => levels.clear(),
+            _ => {}
+        }
+        rows.push(row);
     }
     rows
+}
+
+/// Deepest list nesting shown (0-based): three levels, `•` `◦` `▪`.
+pub const MAX_LIST_DEPTH: u8 = 2;
+
+/// Nesting level of an item indented `indent` columns, given the indents of
+/// the levels still open above it (updated). An item is one level deeper than
+/// the nearest shallower open item, whatever the exact indent step was, so
+/// 2-space bullets and 3-space ordered lists nest the same way.
+pub fn nest_depth(levels: &mut Vec<usize>, indent: usize) -> u8 {
+    while levels.last().is_some_and(|&top| top > indent) {
+        levels.pop();
+    }
+    if levels.last().is_none_or(|&top| top < indent) {
+        levels.push(indent);
+    }
+    (levels.len() - 1).min(usize::from(MAX_LIST_DEPTH)) as u8
 }
 
 fn classify(
@@ -599,10 +640,15 @@ pub fn project(row: &Row, text: &str, reveal: bool) -> Display {
         } else {
             match run.role {
                 Role::Lead => "",
-                Role::Bullet => "• ",
+                Role::Bullet => match row.list_depth {
+                    0 => "• ",
+                    1 => "◦ ",
+                    _ => "▪ ",
+                },
                 Role::Ordered => raw,
-                Role::Task(true) => "☑ ",
-                Role::Task(false) => "☐ ",
+                // The checkbox is a real control drawn by the editor in the
+                // gap before the text, so it adds no text here.
+                Role::Task(_) => "",
                 Role::Plain if run.markup => "",
                 Role::Plain => raw,
             }
@@ -750,17 +796,49 @@ mod tests {
     }
 
     #[test]
-    fn task_boxes_become_checkbox_glyphs() {
-        assert_eq!(shown("- [ ] todo", 0, false), "☐ todo");
-        assert_eq!(shown("- [x] done", 0, false), "☑ done");
+    fn task_boxes_leave_room_for_the_checkbox_control() {
+        assert_eq!(shown("- [ ] todo", 0, false), "todo");
+        assert_eq!(shown("- [x] done", 0, false), "done");
         assert_eq!(shown("- [ ] todo", 0, true), "- [ ] todo");
+        let rows = build_rows("- [x] done\n- [ ] todo\ntext");
+        assert_eq!(rows[0].task(), Some((true, 2..6)));
+        assert_eq!(rows[1].task(), Some((false, 13..17)));
+        assert_eq!(rows[2].task(), None);
+    }
+
+    #[test]
+    fn nesting_is_by_level_and_capped_at_three() {
+        let depths = |t: &str| -> Vec<u8> {
+            build_rows(t)
+                .iter()
+                .filter(|r| r.kind == RowKind::Item)
+                .map(|r| r.list_depth)
+                .collect()
+        };
+        assert_eq!(
+            depths("- a\n  - b\n    - c\n      - d\n- e\n"),
+            [0, 1, 2, 2, 0]
+        );
+        // Ordered lists nest by three, bullets by two — same levels.
+        assert_eq!(depths("1. a\n   - b\n      - c\n2. d\n"), [0, 1, 2, 0]);
+        // A blank line keeps the list, prose ends it.
+        assert_eq!(depths("- a\n\n  - b\ntext\n  - c\n"), [0, 1, 0]);
+        assert_eq!(depths("- a\n    - b\n  - c\n"), [0, 1, 1]);
+    }
+
+    #[test]
+    fn bullet_glyph_follows_the_level() {
+        let t = "- a\n  - b\n    - c\n";
+        assert_eq!(shown(t, 0, false), "• a");
+        assert_eq!(shown(t, 1, false), "◦ b");
+        assert_eq!(shown(t, 2, false), "▪ c");
     }
 
     #[test]
     fn nested_items_record_depth_and_hide_indent_off_caret() {
         let rows = build_rows("- a\n  - b\n");
         assert_eq!(rows[1].list_depth, 1);
-        assert_eq!(shown("- a\n  - b\n", 1, false), "• b");
+        assert_eq!(shown("- a\n  - b\n", 1, false), "◦ b");
     }
 
     #[test]

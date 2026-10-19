@@ -42,6 +42,10 @@ pub enum CaseKind {
 /// One rewritten line: `(old start, old len, new start, (cut_at, removed, added))`.
 type LineSplice = (usize, usize, usize, (usize, usize, usize));
 
+/// Deepest list nesting level (0-based): bullets and tasks stop at three
+/// levels. Matches `meku_markdown::live::MAX_LIST_DEPTH`.
+const MAX_LIST_DEPTH: usize = 2;
+
 /// Target of [`OpenBuffer::convert_list`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListKind {
@@ -1209,6 +1213,69 @@ impl OpenBuffer {
         first..end
     }
 
+    /// Uncapped nesting depth of every list item from the start of its block
+    /// through `lines.end`, as `(line, depth)`, optionally with the target
+    /// `lines` indented one level. Mirrors the renderer's rule: an item is
+    /// one level below the nearest shallower open item.
+    fn item_depths(&self, lines: &Range<usize>, bump: bool) -> Vec<(usize, usize)> {
+        let is_item = |body: &str| {
+            matches!(
+                parse_marker(body).map(|m| m.kind),
+                Some(MarkerKind::Bullet(_) | MarkerKind::Task(_) | MarkerKind::Ordered(..))
+            )
+        };
+        // Back up over the list block the lines belong to.
+        let mut start = lines.start;
+        while start > 0 {
+            let body = self.line_string(start - 1);
+            let flush = body.len() == body.trim_start().len();
+            if !blank_tail(&body) && flush && !is_item(&body) {
+                break;
+            }
+            start -= 1;
+        }
+        let mut levels: Vec<usize> = Vec::new();
+        let mut out = Vec::new();
+        for i in start..lines.end {
+            let body = self.line_string(i);
+            if blank_tail(&body) {
+                continue;
+            }
+            let mut indent = body.len() - body.trim_start().len();
+            if bump && i >= lines.start {
+                indent += Self::indent_step(&body);
+            }
+            if !is_item(&body) {
+                if indent == 0 {
+                    levels.clear();
+                }
+                continue;
+            }
+            while levels.last().is_some_and(|&top| top > indent) {
+                levels.pop();
+            }
+            if levels.last().is_none_or(|&top| top < indent) {
+                levels.push(indent);
+            }
+            if i >= lines.start {
+                out.push((i, levels.len() - 1));
+            }
+        }
+        out
+    }
+
+    /// Whether `Tab` may indent `lines`: the head item must really move one
+    /// level deeper (it needs a sibling above to nest under) and nothing may
+    /// end up past [`MAX_LIST_DEPTH`]. Non-list lines never block.
+    fn indent_fits(&self, lines: &Range<usize>) -> bool {
+        let before = self.item_depths(lines, false);
+        let after = self.item_depths(lines, true);
+        let Some(((_, was), (_, now))) = before.first().zip(after.first()) else {
+            return true;
+        };
+        *now == was + 1 && after.iter().all(|(_, d)| *d <= MAX_LIST_DEPTH)
+    }
+
     /// `Tab`: indent. A collapsed caret on prose/code just inserts a level
     /// at the caret; on a list item the whole item (children included)
     /// nests one level; a selection indents every line it touches. Inside
@@ -1225,6 +1292,9 @@ impl OpenBuffer {
         } else {
             self.indent_target()
         };
+        if !code && !self.indent_fits(&lines) {
+            return; // already three levels deep
+        }
         let was_ordered: Vec<bool> = (lines.start..lines.end)
             .map(|i| self.ordered_info(i).is_some())
             .collect();
@@ -1585,6 +1655,23 @@ impl OpenBuffer {
         });
         let idx = self.caret_line();
         self.renumber_ordered_from(idx);
+    }
+
+    /// Flip the task box whose `[ ] ` / `[x] ` starts at byte `at` (a
+    /// checkbox click). Caret and selection stay where they are; one undo
+    /// step. No-op when the bytes there are not a task box.
+    pub fn toggle_task_box(&mut self, at: usize) {
+        if at + 3 > self.text.len() {
+            return;
+        }
+        let head = self.text.slice(at..at + 3).to_string();
+        let flipped = match head.as_str() {
+            "[ ]" => "[x]",
+            "[x]" | "[X]" => "[ ]",
+            _ => return,
+        };
+        let (caret, anchor) = (self.caret, self.anchor);
+        self.edit_region(at..at + 3, flipped, caret, anchor);
     }
 
     /// Flip `[ ]`/`[x]` on every selected task line; bullets and plain
@@ -2822,5 +2909,61 @@ mod tests {
             "https://new.dev\n",
             "URL over URL replaces"
         );
+    }
+
+    #[test]
+    fn tab_stops_at_three_levels() {
+        let mut b = buf("- a\n  - b\n    - c\n");
+        b.move_caret(15, false); // inside "c" (level 3 already)
+        b.indent(false);
+        assert_eq!(b.text_string(), "- a\n  - b\n    - c\n", "no fourth level");
+        // A parent with children is refused when a child would overflow.
+        let mut b = buf("- a\n- b\n  - c\n    - d\n");
+        b.move_caret(6, false); // inside "b": b->L2, c->L3, d->L4
+        b.indent(false);
+        assert_eq!(b.text_string(), "- a\n- b\n  - c\n    - d\n");
+        // Without the deepest child it nests fine.
+        let mut b = buf("- a\n- b\n  - c\n");
+        b.move_caret(6, false);
+        b.indent(false);
+        assert_eq!(b.text_string(), "- a\n  - b\n    - c\n");
+        // Tasks and ordered lists obey the same cap.
+        let mut b = buf("- [ ] a\n  - [ ] b\n    - [ ] c\n");
+        b.move_caret(28, false);
+        b.indent(false);
+        assert_eq!(b.text_string(), "- [ ] a\n  - [ ] b\n    - [ ] c\n");
+        let mut b = buf("1. a\n   1. b\n      1. c\n");
+        b.move_caret(20, false);
+        b.indent(false);
+        assert_eq!(b.text_string(), "1. a\n   1. b\n      1. c\n");
+    }
+
+    #[test]
+    fn first_item_cannot_nest_but_a_later_sibling_can() {
+        let mut b = buf("- a\n- b\n");
+        b.move_caret(1, false);
+        b.indent(false);
+        assert_eq!(b.text_string(), "- a\n- b\n", "nothing above to nest under");
+        let mut b = buf("- a\n- b\n");
+        b.move_caret(5, false);
+        b.indent(false);
+        assert_eq!(b.text_string(), "- a\n  - b\n");
+        b.outdent(false);
+        assert_eq!(b.text_string(), "- a\n- b\n");
+    }
+
+    #[test]
+    fn checkbox_click_flips_without_moving_the_caret() {
+        let mut b = buf("- [ ] a\n- [x] b\n");
+        b.move_caret(7, false);
+        b.toggle_task_box(2);
+        assert_eq!(b.text_string(), "- [x] a\n- [x] b\n");
+        assert_eq!(b.caret(), 7);
+        b.toggle_task_box(10);
+        assert_eq!(b.text_string(), "- [x] a\n- [ ] b\n");
+        b.toggle_task_box(0); // not a box
+        assert_eq!(b.text_string(), "- [x] a\n- [ ] b\n");
+        b.undo();
+        assert_eq!(b.text_string(), "- [x] a\n- [x] b\n", "one undo step");
     }
 }
