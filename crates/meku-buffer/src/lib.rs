@@ -320,6 +320,13 @@ impl OpenBuffer {
         self.text.len()
     }
 
+    /// Byte offset where line `idx` (0-based) starts; lines past the end
+    /// clamp to the last line.
+    pub fn line_start(&self, idx: usize) -> usize {
+        let last = self.text.len_lines(LineType::LF).saturating_sub(1);
+        self.text.line_to_byte_idx(idx.min(last), LineType::LF)
+    }
+
     pub fn line_count(&self) -> usize {
         self.text.len_lines(LineType::LF)
     }
@@ -1903,6 +1910,16 @@ mod tests {
         b.apply_edit(0..0, "y");
         b.mark_saved(UNIX_EPOCH);
         assert_eq!(b.disk_hash, Some(hash_text("yx\n")));
+    }
+
+    #[test]
+    fn line_start_maps_and_clamps() {
+        let b = buf("ab\ncd\n\nef");
+        assert_eq!(b.line_start(0), 0);
+        assert_eq!(b.line_start(1), 3);
+        assert_eq!(b.line_start(2), 6);
+        assert_eq!(b.line_start(3), 7);
+        assert_eq!(b.line_start(99), 7, "clamped to the last line");
     }
 
     #[test]

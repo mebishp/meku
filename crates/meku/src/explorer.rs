@@ -45,6 +45,40 @@ impl Explorer {
         self.vault.is_some()
     }
 
+    /// Fuzzy-matched note paths for the file finder (all notes, including
+    /// those inside collapsed folders).
+    pub fn fuzzy_files(&self, query: &str, limit: usize) -> Vec<PathBuf> {
+        self.index.fuzzy_match(query, limit)
+    }
+
+    /// Case-insensitive substring search over every note's text. Returns at
+    /// most `limit` hits as `(note, 0-based line, line text)`; unreadable and
+    /// very large files are skipped.
+    pub fn search_text(&self, query: &str, limit: usize) -> Vec<(PathBuf, usize, String)> {
+        let needle = query.to_lowercase();
+        let mut hits = Vec::new();
+        if needle.is_empty() {
+            return hits;
+        }
+        for file in &self.files {
+            if std::fs::metadata(&file.abs).is_ok_and(|m| m.len() > 2_000_000) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&file.abs) else {
+                continue;
+            };
+            for (i, line) in text.lines().enumerate() {
+                if line.to_lowercase().contains(&needle) {
+                    hits.push((file.rel.clone(), i, line.trim().to_string()));
+                    if hits.len() >= limit {
+                        return hits;
+                    }
+                }
+            }
+        }
+        hits
+    }
+
     pub fn root(&self) -> Option<&Path> {
         self.vault.as_ref().map(|v| v.root.as_path())
     }
@@ -383,6 +417,29 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].label, "notes");
         assert_eq!(items[1].label, "top");
+    }
+
+    #[test]
+    fn search_finds_lines_across_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.md"), "alpha\nBeta line\n").unwrap();
+        std::fs::write(root.join("sub/b.md"), "nothing\nanother BETA\n").unwrap();
+        let mut explorer = Explorer::new();
+        let _ = explorer.open(root).unwrap();
+        let hits = explorer.search_text("beta", 10);
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits.iter()
+                .any(|(p, l, t)| p == Path::new("a.md") && *l == 1 && t == "Beta line")
+        );
+        assert_eq!(explorer.search_text("beta", 1).len(), 1, "limit respected");
+        assert!(explorer.search_text("", 5).is_empty());
+        assert_eq!(
+            explorer.fuzzy_files("bmd", 5),
+            vec![PathBuf::from("sub/b.md")]
+        );
     }
 
     #[test]

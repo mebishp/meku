@@ -1,5 +1,6 @@
 mod document;
 mod explorer;
+mod palette;
 mod theme;
 
 use std::cell::RefCell;
@@ -173,6 +174,10 @@ pub struct MekuShell {
     caret_touch: Instant,
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
+    palette: Option<palette::PaletteState>,
+    palette_request: Option<palette::PaletteKind>,
+    /// Command chosen in the palette, run on the next render (needs a window).
+    run_after: Option<palette::Command>,
     /// Row to scroll into view on the next render (startup/screenshot hook).
     pending_scroll: Option<(usize, u8)>,
     /// The inline title above each open note's body (not part of the
@@ -219,6 +224,9 @@ impl MekuShell {
             caret_on: true,
             caret_touch: Instant::now(),
             hover_link: None,
+            palette: None,
+            palette_request: None,
+            run_after: None,
             pending_scroll: None,
             title_inputs: HashMap::new(),
             title_subs: HashMap::new(),
@@ -274,6 +282,13 @@ impl MekuShell {
             .ok()
             .and_then(|v| v.parse().ok())
             .map(|row| (row, 3));
+        match std::env::var("MEKU_PALETTE").as_deref() {
+            Ok("files") => self.open_palette(palette::PaletteKind::Files, cx),
+            Ok("commands") => self.open_palette(palette::PaletteKind::Commands, cx),
+            Ok("themes") => self.open_palette(palette::PaletteKind::Themes, cx),
+            Ok("search") => self.open_palette(palette::PaletteKind::Search, cx),
+            _ => {}
+        }
         if std::env::var("MEKU_MODAL").as_deref() == Ok("folder") {
             self.begin_naming(NamingMode::NewFolder, PathBuf::new(), None, cx);
         }
@@ -1500,8 +1515,42 @@ impl MekuShell {
     }
 
     fn on_cancel_overlay(&mut self, _: &CancelOverlay, _: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(true, cx);
         self.cancel_naming(cx);
         self.cancel_delete(cx);
+    }
+
+    fn on_open_file_finder(
+        &mut self,
+        _: &palette::OpenFileFinder,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(palette::PaletteKind::Files, cx);
+    }
+    fn on_open_command_palette(
+        &mut self,
+        _: &palette::OpenCommandPalette,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(palette::PaletteKind::Commands, cx);
+    }
+    fn on_open_vault_search(
+        &mut self,
+        _: &palette::OpenVaultSearch,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(palette::PaletteKind::Search, cx);
+    }
+    fn on_open_go_to_line(
+        &mut self,
+        _: &palette::OpenGoToLine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(palette::PaletteKind::GotoLine, cx);
     }
 
     fn on_cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
@@ -1907,13 +1956,7 @@ impl MekuShell {
                 .justify_center()
                 // The scrim is its own layer; opacity on a parent would also
                 // fade the dialog card inside it.
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bg(cx.theme().foreground)
-                        .opacity(0.28),
-                )
+                .child(div().absolute().inset_0().bg(theme::scrim(cx)))
                 .child(
                     div()
                         .w(px(360.))
@@ -1976,13 +2019,7 @@ impl MekuShell {
                 .justify_center()
                 // The scrim is its own layer; opacity on a parent would also
                 // fade the dialog card inside it.
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bg(cx.theme().foreground)
-                        .opacity(0.28),
-                )
+                .child(div().absolute().inset_0().bg(theme::scrim(cx)))
                 .child(
                     div()
                         .w(px(360.))
@@ -2043,6 +2080,7 @@ impl Render for MekuShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_naming_input(window, cx);
         self.ensure_title_input(window, cx);
+        self.ensure_palette(window, cx);
         let focus = self.focus_handle.clone();
         if std::mem::take(&mut self.focus_doc) && self.naming.is_none() {
             window.focus(&focus, cx);
@@ -2059,6 +2097,10 @@ impl Render for MekuShell {
             .key_context("Meku")
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::on_cycle_theme))
+            .on_action(cx.listener(Self::on_open_file_finder))
+            .on_action(cx.listener(Self::on_open_command_palette))
+            .on_action(cx.listener(Self::on_open_vault_search))
+            .on_action(cx.listener(Self::on_open_go_to_line))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
@@ -2136,6 +2178,7 @@ impl Render for MekuShell {
         if let Some(modal) = self
             .render_naming_modal(cx)
             .or_else(|| self.render_delete_modal(cx))
+            .or_else(|| self.render_palette(cx))
         {
             root = root.child(modal);
         }
@@ -2182,6 +2225,12 @@ fn main() {
 
         cx.bind_keys([
             KeyBinding::new("ctrl-b", ToggleSidebar, Some("Meku")),
+            KeyBinding::new("ctrl-p", palette::OpenFileFinder, Some("Meku")),
+            KeyBinding::new("ctrl-shift-p", palette::OpenCommandPalette, Some("Meku")),
+            KeyBinding::new("ctrl-shift-f", palette::OpenVaultSearch, Some("Meku")),
+            KeyBinding::new("ctrl-g", palette::OpenGoToLine, Some("Meku")),
+            KeyBinding::new("up", palette::PaletteUp, Some("Palette")),
+            KeyBinding::new("down", palette::PaletteDown, Some("Palette")),
             KeyBinding::new("ctrl-alt-t", CycleTheme, Some("Meku")),
             KeyBinding::new("ctrl-t", NewTab, Some("Meku")),
             KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
@@ -2343,6 +2392,20 @@ mod ui_tests {
         cx.update(|cx| {
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleSidebar, Some("Meku")),
+                KeyBinding::new("ctrl-p", crate::palette::OpenFileFinder, Some("Meku")),
+                KeyBinding::new(
+                    "ctrl-shift-p",
+                    crate::palette::OpenCommandPalette,
+                    Some("Meku"),
+                ),
+                KeyBinding::new(
+                    "ctrl-shift-f",
+                    crate::palette::OpenVaultSearch,
+                    Some("Meku"),
+                ),
+                KeyBinding::new("ctrl-g", crate::palette::OpenGoToLine, Some("Meku")),
+                KeyBinding::new("up", crate::palette::PaletteUp, Some("Palette")),
+                KeyBinding::new("down", crate::palette::PaletteDown, Some("Palette")),
                 KeyBinding::new("ctrl-t", NewTab, Some("Meku")),
                 KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
                 KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
@@ -4534,6 +4597,182 @@ mod ui_tests {
             view.read_with(&*cx, |s, _| s.doc_rel()),
             Some(PathBuf::from("other.md")),
             "plain click follows a rendered link"
+        );
+    }
+
+    // -- palette ------------------------------------------------------
+
+    fn palette_items(cx: &mut TestAppContext, view: &Entity<MekuShell>) -> Vec<String> {
+        cx.update(|cx| {
+            view.read_with(cx, |shell, _| {
+                shell
+                    .palette
+                    .as_ref()
+                    .map(|p| p.items.iter().map(|i| i.label.clone()).collect())
+                    .unwrap_or_default()
+            })
+        })
+    }
+
+    fn step(
+        cx: &mut TestAppContext,
+        window: gpui_kit::AnyWindowHandle,
+        f: fn(&mut gpui_kit::Window, &mut gpui_kit::App),
+    ) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            f(window, cx);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn ctrl_p_finds_and_opens_notes() {
+        run_ui_test("palette_files", palette_files_body);
+    }
+
+    fn palette_files_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let dir = open_fixture(cx, &view);
+        focus_doc_for(cx, &view, window);
+        std::fs::write(dir.path().join("Zebra plan.md"), "stripes\n").unwrap();
+        cx.update(|cx| view.update(cx, |s, _| s.explorer.refresh()));
+        step(cx, window, |w, cx| w.press("ctrl-p", cx));
+        step(cx, window, |_, _| {});
+        assert!(
+            cx.update(|cx| view.read_with(cx, |s, _| s.palette.is_some())),
+            "Ctrl+P opens the file finder"
+        );
+        assert!(palette_items(cx, &view).len() >= 2, "lists every note");
+        step(cx, window, |w, cx| w.input("zeb", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(palette_items(cx, &view), vec!["Zebra plan".to_string()]);
+        step(cx, window, |w, cx| w.press("enter", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            cx.update(|cx| view.read_with(cx, |s, _| s.doc_rel())),
+            Some(PathBuf::from("Zebra plan.md"))
+        );
+        assert!(cx.update(|cx| view.read_with(cx, |s, _| s.palette.is_none())));
+    }
+
+    #[test]
+    fn palette_arrows_move_and_escape_closes() {
+        run_ui_test("palette_arrows", palette_arrows_body);
+    }
+
+    fn palette_arrows_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |w, cx| w.press("ctrl-shift-p", cx));
+        step(cx, window, |_, _| {});
+        let first = palette_items(cx, &view);
+        assert!(first.iter().any(|l| l == "Toggle sidebar"), "{first:?}");
+        let selected = |cx: &mut TestAppContext| {
+            cx.update(|cx| view.read_with(cx, |s, _| s.palette.as_ref().map(|p| p.selected)))
+        };
+        assert_eq!(selected(cx), Some(0));
+        step(cx, window, |w, cx| w.press("down", cx));
+        assert_eq!(selected(cx), Some(1), "Down moves the highlight");
+        step(cx, window, |w, cx| w.press("up", cx));
+        step(cx, window, |w, cx| w.press("up", cx));
+        assert_eq!(
+            selected(cx),
+            Some(first.len().min(10) - 1),
+            "Up wraps around"
+        );
+        // Filtering narrows the commands.
+        step(cx, window, |w, cx| w.input("sidebar", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(palette_items(cx, &view), vec!["Toggle sidebar".to_string()]);
+        step(cx, window, |w, cx| w.press("escape", cx));
+        step(cx, window, |_, _| {});
+        assert!(
+            cx.update(|cx| view.read_with(cx, |s, _| s.palette.is_none())),
+            "Esc closes"
+        );
+    }
+
+    #[test]
+    fn command_runs_and_theme_preview_restores_on_cancel() {
+        run_ui_test("palette_commands", palette_commands_body);
+    }
+
+    fn palette_commands_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        focus_doc_for(cx, &view, window);
+        // Run "Toggle sidebar" from the palette.
+        step(cx, window, |w, cx| w.press("ctrl-shift-p", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.input("toggle sid", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.press("enter", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |_, _| {});
+        assert!(
+            !cx.update(|cx| view.read_with(cx, |s, _| s.show_sidebar)),
+            "command ran"
+        );
+
+        // Theme picker previews on arrow and restores on Escape.
+        cx.update(|cx| crate::theme::apply(crate::theme::MEKU_LIGHT, cx));
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.open_palette(crate::palette::PaletteKind::Themes, cx)
+            })
+        });
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.press("down", cx)); // Meku Dark
+        assert_eq!(
+            cx.update(|cx| crate::theme::active(cx).name),
+            "Meku Dark",
+            "live preview"
+        );
+        step(cx, window, |w, cx| w.press("escape", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            cx.update(|cx| crate::theme::active(cx).name),
+            "Meku Light",
+            "cancel restores"
+        );
+    }
+
+    #[test]
+    fn go_to_line_and_vault_search_jump() {
+        run_ui_test("palette_goto", palette_goto_body);
+    }
+
+    fn palette_goto_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one\ntwo\nthree\nfour\n");
+        let rel = PathBuf::from("doc.md");
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |w, cx| w.press("ctrl-g", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.input("3", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.press("enter", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            8,
+            "caret on the start of line 3"
+        );
+
+        step(cx, window, |w, cx| w.press("ctrl-shift-f", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.input("four", cx));
+        step(cx, window, |_, _| {});
+        let hits = palette_items(cx, &view);
+        assert_eq!(hits, vec!["four".to_string()]);
+        step(cx, window, |w, cx| w.press("enter", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            14,
+            "search hit jumps to its line"
         );
     }
 }

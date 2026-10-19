@@ -201,6 +201,12 @@ pub fn active(cx: &App) -> Palette {
     cx.try_global::<Active>().map_or(MEKU_LIGHT, |a| a.0)
 }
 
+/// Backdrop behind dialogs and the palette: always darkens, more so on dark
+/// themes where a light scrim would wash the window out.
+pub fn scrim(cx: &App) -> gpui_kit::Hsla {
+    gpui_kit::hsla(0.0, 0.0, 0.0, if active(cx).dark { 0.5 } else { 0.3 })
+}
+
 // -- color math -------------------------------------------------------------
 
 fn channels(hex: u32) -> [f32; 3] {

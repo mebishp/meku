@@ -158,7 +158,7 @@ pub(crate) type RowViews = Rc<RefCell<Vec<Option<RowView>>>>;
 
 impl MekuShell {
     pub(crate) fn modal_open(&self) -> bool {
-        self.naming.is_some() || self.pending_delete.is_some()
+        self.naming.is_some() || self.pending_delete.is_some() || self.palette_open()
     }
 
     /// Relative path of the note shown by the active tab, when it has a buffer.
