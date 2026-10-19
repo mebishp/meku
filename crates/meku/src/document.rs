@@ -15,11 +15,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+use crate::icons::{Ico, icon};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
-use gpui_kit::component::{Icon, IconName};
+use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
 use meku_buffer::OpenBuffer;
 use meku_markdown::InlineStyle;
@@ -1536,6 +1535,9 @@ fn fence_row_element(
             .into_any_element();
     }
     let code = fence_block_text(ix, rows, text);
+    let theme_colors = cx.theme();
+    let (fg, muted) = (theme_colors.foreground, theme_colors.muted_foreground);
+    let (hover_bg, success) = (theme_colors.list_hover, theme_colors.success);
     let shell = shell.clone();
     let lang = fence.lang.clone();
     row_div
@@ -1561,10 +1563,24 @@ fn fence_row_element(
                     div()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
-                            Button::new(("copy-code", ix))
-                                .label(if copied { "Copied" } else { "Copy" })
-                                .ghost()
-                                .xsmall()
+                            h_flex()
+                                .id(("copy-code", ix))
+                                .test_support()
+                                .gap_1p5()
+                                .h(px(24.))
+                                .px_2()
+                                .items_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(if copied { success } else { muted })
+                                .hover(move |s| s.bg(hover_bg).text_color(fg))
+                                .child(icon(
+                                    if copied { Ico::Check } else { Ico::Copy },
+                                    px(14.),
+                                    if copied { success } else { muted },
+                                ))
+                                .child(if copied { "Copied" } else { "Copy" })
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                                     shell.update(cx, |view, cx| {
@@ -1592,17 +1608,18 @@ fn callout_color(kind: CalloutKind, cx: &App) -> Hsla {
     }
 }
 
-fn callout_icon(kind: CalloutKind) -> IconName {
+fn callout_icon(kind: CalloutKind) -> Ico {
     match kind {
-        CalloutKind::Note => IconName::FileText,
-        CalloutKind::Info => IconName::Info,
-        CalloutKind::Tip => IconName::Star,
-        CalloutKind::Success => IconName::CircleCheck,
-        CalloutKind::Question => IconName::CircleAlert,
-        CalloutKind::Warning => IconName::TriangleAlert,
-        CalloutKind::Danger | CalloutKind::Bug => IconName::CircleX,
-        CalloutKind::Example => IconName::SquareTerminal,
-        CalloutKind::Quote => IconName::FileText,
+        CalloutKind::Note => Ico::Notes,
+        CalloutKind::Info => Ico::Info,
+        CalloutKind::Tip => Ico::Idea,
+        CalloutKind::Success => Ico::CheckCircle,
+        CalloutKind::Question => Ico::HelpCircle,
+        CalloutKind::Warning => Ico::Warning,
+        CalloutKind::Danger => Ico::CloseCircle,
+        CalloutKind::Bug => Ico::Bug,
+        CalloutKind::Example => Ico::Terminal,
+        CalloutKind::Quote => Ico::Quote,
     }
 }
 
@@ -1986,11 +2003,7 @@ fn row_element(
                     .absolute()
                     .left(pad)
                     .top(text_y + ((line_h - icon_size) / 2.0).max(px(0.)))
-                    .child(
-                        Icon::new(callout_icon(c.kind))
-                            .size(icon_size)
-                            .text_color(color),
-                    ),
+                    .child(icon(callout_icon(c.kind), icon_size, color)),
             );
             text_x = pad + px(26.);
             // A title-less callout shows its kind as the title.

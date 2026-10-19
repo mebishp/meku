@@ -15,6 +15,9 @@ use crate::{MekuShell, Mode, NamingMode, theme};
 
 type ClickFn = Box<dyn Fn(&mut Window, &mut App)>;
 
+/// A welcome-screen row: label, icon, shortcut hint and what it does.
+type WelcomeAction = (&'static str, Ico, &'static str, ClickFn);
+
 /// A square icon-only button with a tooltip. `active` shows the pressed /
 /// selected look.
 pub(crate) fn icon_button(
@@ -92,9 +95,10 @@ impl MekuShell {
         // Breadcrumb: vault › folders › note.
         let theme_colors = cx.theme();
         let (fg, muted) = (theme_colors.foreground, theme_colors.muted_foreground);
-        let mut crumbs: Vec<(String, bool)> = Vec::new();
+        // Each crumb remembers the folder it stands for (revealed on click).
+        let mut crumbs: Vec<(String, bool, Option<PathBuf>)> = Vec::new();
         if self.explorer.is_open() {
-            crumbs.push((self.explorer.root_name(), false));
+            crumbs.push((self.explorer.root_name(), false, Some(PathBuf::new())));
         }
         if let Some(rel) = self.doc_rel() {
             let comps: Vec<String> = rel
@@ -102,7 +106,9 @@ impl MekuShell {
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .collect();
             let last = comps.len().saturating_sub(1);
+            let mut so_far = PathBuf::new();
             for (i, c) in comps.into_iter().enumerate() {
+                so_far.push(&c);
                 let name = if i == last {
                     c.trim_end_matches(".md")
                         .trim_end_matches(".markdown")
@@ -110,27 +116,79 @@ impl MekuShell {
                 } else {
                     c
                 };
-                crumbs.push((name, i == last));
+                crumbs.push((name, i == last, (i != last).then(|| so_far.clone())));
             }
         }
         if crumbs.is_empty() {
-            crumbs.push(("Meku".to_string(), true));
+            crumbs.push(("Meku".to_string(), true, None));
         }
+        let hover_bg = theme_colors.list_hover;
         let mut breadcrumb = h_flex().gap_1().items_center().min_w_0().text_sm();
         let total = crumbs.len();
-        for (i, (name, current)) in crumbs.into_iter().enumerate() {
+        for (i, (name, current, folder)) in crumbs.into_iter().enumerate() {
             if i > 0 {
                 breadcrumb = breadcrumb.child(icon(Ico::ChevronRight, px(12.), muted));
             }
-            breadcrumb = breadcrumb.child(
-                div()
-                    .truncate()
-                    .max_w(px(if i + 1 == total { 280. } else { 140. }))
-                    .text_color(if current { fg } else { muted })
-                    .when_weight(current)
-                    .child(name),
-            );
+            let mut crumb = div()
+                .id(format!("crumb-{i}"))
+                .test_support()
+                .truncate()
+                .max_w(px(if i + 1 == total { 280. } else { 140. }))
+                .px_1()
+                .rounded_sm()
+                .text_color(if current { fg } else { muted })
+                .when_weight(current)
+                .child(name);
+            if let Some(folder) = folder {
+                let crumb_shell = shell.clone();
+                crumb = crumb
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg).text_color(fg))
+                    .on_click(move |_, _, cx| {
+                        crumb_shell.update(cx, |v, cx| {
+                            // Show the folder in the sidebar tree.
+                            v.show_sidebar = true;
+                            v.explorer.reveal(&folder.join("x"));
+                            cx.notify();
+                        });
+                    });
+            }
+            breadcrumb = breadcrumb.child(crumb);
         }
+
+        let back_shell = shell.clone();
+        let forward_shell = shell.clone();
+        let (can_back, can_forward) = (self.can_nav(-1), self.can_nav(1));
+        let nav_buttons = h_flex()
+            .gap(px(1.))
+            .child(
+                div()
+                    .opacity(if can_back { 1.0 } else { 0.35 })
+                    .child(icon_button(
+                        "nav-back",
+                        Ico::Back,
+                        false,
+                        "Back (Alt+←)",
+                        cx,
+                        move |_, cx| {
+                            back_shell.update(cx, |v, cx| v.nav_step(-1, cx));
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .opacity(if can_forward { 1.0 } else { 0.35 })
+                    .child(icon_button(
+                        "nav-forward",
+                        Ico::Forward,
+                        false,
+                        "Forward (Alt+→)",
+                        cx,
+                        move |_, cx| {
+                            forward_shell.update(cx, |v, cx| v.nav_step(1, cx));
+                        },
+                    )),
+            );
 
         let mut right = h_flex().gap_1().items_center().flex_none();
         if self.doc_rel().is_some() {
@@ -203,6 +261,7 @@ impl MekuShell {
                             });
                         },
                     ))
+                    .child(nav_buttons)
                     .child(breadcrumb),
             )
             .child(right)
@@ -354,7 +413,55 @@ impl MekuShell {
                 } else {
                     el.hover(move |s| s.bg(hover_bg))
                 };
-                el.into_any_element()
+                let menu_shell = shell.clone();
+                let tab_rel = tab.rel.clone();
+                el.context_menu(move |menu, _window, _cx| {
+                    let mut menu = menu;
+                    {
+                        let s = menu_shell.clone();
+                        menu = menu.item(PopupMenuItem::new("Close").on_click(move |_, _, cx| {
+                            s.update(cx, |v, cx| v.close_tab(index, cx));
+                        }));
+                    }
+                    {
+                        let s = menu_shell.clone();
+                        menu = menu.item(PopupMenuItem::new("Close others").on_click(
+                            move |_, _, cx| {
+                                s.update(cx, |v, cx| v.close_other_tabs(index, cx));
+                            },
+                        ));
+                    }
+                    {
+                        let s = menu_shell.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new("Close all").on_click(move |_, _, cx| {
+                                s.update(cx, |v, cx| v.close_all_tabs(cx));
+                            }));
+                    }
+                    if let Some(rel) = tab_rel.clone() {
+                        menu = menu.item(PopupMenuItem::separator());
+                        let copy_rel = rel.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new("Copy path").on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_rel.to_string_lossy().to_string(),
+                                ));
+                            }));
+                        let s = menu_shell.clone();
+                        menu = menu.item(PopupMenuItem::new("Reveal in sidebar").on_click(
+                            move |_, _, cx| {
+                                let rel = rel.clone();
+                                s.update(cx, |v, cx| {
+                                    v.show_sidebar = true;
+                                    v.explorer.reveal(&rel);
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                })
+                .into_any_element()
             })
             .collect();
 
@@ -829,6 +936,114 @@ impl MekuShell {
         panel.into_any_element()
     }
 
+    // -- empty state -----------------------------------------------------------
+
+    /// What the editor area shows with no note open: the next useful actions.
+    pub(crate) fn render_welcome(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme_colors = cx.theme();
+        let (fg, muted) = (theme_colors.foreground, theme_colors.muted_foreground);
+        let hover = theme_colors.list_hover;
+        let open = self.explorer.is_open();
+        let shell = cx.entity();
+        let mut actions: Vec<WelcomeAction> = Vec::new();
+        if open {
+            let s = shell.clone();
+            actions.push((
+                "New note",
+                Ico::NotePlus,
+                "Ctrl T",
+                Box::new(move |_, cx| {
+                    s.update(cx, |v, cx| v.new_tab_action(cx));
+                }),
+            ));
+            let s = shell.clone();
+            actions.push((
+                "Open a note",
+                Ico::Search,
+                "Ctrl P",
+                Box::new(move |_, cx| {
+                    s.update(cx, |v, cx| {
+                        v.open_palette(crate::palette::PaletteKind::Files, cx)
+                    });
+                }),
+            ));
+        } else {
+            let s = shell.clone();
+            actions.push((
+                "Open a folder",
+                Ico::Folder,
+                "Ctrl O",
+                Box::new(move |window, cx| {
+                    s.update(cx, |v, cx| v.on_open_folder(&crate::OpenFolder, window, cx));
+                }),
+            ));
+        }
+        let s = shell.clone();
+        actions.push((
+            "Command palette",
+            Ico::Terminal,
+            "Ctrl Shift P",
+            Box::new(move |_, cx| {
+                s.update(cx, |v, cx| {
+                    v.open_palette(crate::palette::PaletteKind::Commands, cx)
+                });
+            }),
+        ));
+        let rows: Vec<AnyElement> = actions
+            .into_iter()
+            .enumerate()
+            .map(|(i, (label, ico, hint, on))| {
+                h_flex()
+                    .id(("welcome-action", i))
+                    .test_support()
+                    .w(px(300.))
+                    .h(px(38.))
+                    .px_3()
+                    .gap_3()
+                    .items_center()
+                    .justify_between()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .child(icon(ico, px(18.), muted))
+                            .child(div().text_sm().text_color(fg).child(label)),
+                    )
+                    .child(div().text_xs().text_color(muted).child(hint))
+                    .on_click(move |_, window, cx| on(window, cx))
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .child(icon(Ico::Journal, px(44.), theme::accent_alpha(cx, 0.9)))
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child("Meku"),
+                    )
+                    .child(div().text_sm().text_color(muted).child(if open {
+                        "Pick a note from the sidebar, or start a new one."
+                    } else {
+                        "Notes are plain markdown files in a folder."
+                    })),
+            )
+            .child(v_flex().gap_1().children(rows))
+            .into_any_element()
+    }
+
     // -- status bar --------------------------------------------------------------
 
     pub(crate) fn render_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -887,18 +1102,49 @@ impl MekuShell {
 
         let mut right = h_flex().gap_4().items_center();
         if let Some(words) = words {
+            let hover = cx.theme().list_hover;
+            let goto_shell = cx.entity();
+            let mode_shell = cx.entity();
             right = right
                 .child(format!(
                     "{words} {}",
                     if words == 1 { "word" } else { "words" }
                 ))
-                .child(format!("Ln {line}, Col {col}"))
+                .child(
+                    div()
+                        .id("status-position")
+                        .test_support()
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover).text_color(fg))
+                        .child(format!("Ln {line}, Col {col}"))
+                        .on_click(move |_, _, cx| {
+                            goto_shell.update(cx, |v, cx| {
+                                v.open_palette(crate::palette::PaletteKind::GotoLine, cx)
+                            });
+                        }),
+                )
                 .child(
                     h_flex()
+                        .id("status-mode")
+                        .test_support()
                         .gap_1p5()
+                        .px_1()
                         .items_center()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover).text_color(fg))
                         .child(icon(self.tab_mode().icon(), px(13.), muted))
-                        .child(self.tab_mode().label()),
+                        .child(self.tab_mode().label())
+                        .on_click(move |_, _, cx| {
+                            mode_shell.update(cx, |v, cx| {
+                                if let Some(tab) = v.tabs.get_mut(v.active_tab) {
+                                    tab.mode = tab.mode.next();
+                                }
+                                cx.notify();
+                            });
+                        }),
                 );
         }
         h_flex()

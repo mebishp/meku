@@ -32,6 +32,8 @@ actions!(
     [
         ToggleSidebar,
         CycleTheme,
+        NavBack,
+        NavForward,
         NewTab,
         CloseTab,
         NextTab,
@@ -194,6 +196,10 @@ pub struct MekuShell {
     caret_touch: Instant,
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
+    /// Notes visited, oldest first, and the position in them (back/forward).
+    nav_history: Vec<PathBuf>,
+    nav_pos: usize,
+    navigating: bool,
     /// Image shown in the zoom view, and its zoom (`None` = fit to window).
     lightbox: Option<document::ImageInfo>,
     lightbox_zoom: Option<f32>,
@@ -263,6 +269,9 @@ impl MekuShell {
             caret_on: true,
             caret_touch: Instant::now(),
             hover_link: None,
+            nav_history: Vec::new(),
+            nav_pos: 0,
+            navigating: false,
             lightbox: None,
             lightbox_zoom: None,
             image_dims: HashMap::new(),
@@ -549,6 +558,8 @@ impl MekuShell {
         self.flush_title(cx);
         if let Some(ix) = self.tabs.iter().position(|t| t.rel.as_deref() == Some(rel)) {
             self.active_tab = ix;
+            self.explorer.reveal(rel);
+            self.record_visit();
             self.save_session();
             cx.notify();
             return;
@@ -570,6 +581,8 @@ impl MekuShell {
                     mode: Mode::Live,
                 });
                 self.active_tab = self.tabs.len() - 1;
+                self.explorer.reveal(rel);
+                self.record_visit();
                 self.notice = None;
             }
             Err(e) => {
@@ -628,9 +641,62 @@ impl MekuShell {
         self.close_tab(self.active_tab, cx);
     }
 
+    /// Remember the visible note for back/forward.
+    pub(crate) fn record_visit(&mut self) {
+        let Some(rel) = self.doc_rel() else {
+            return;
+        };
+        if self.navigating || self.nav_history.get(self.nav_pos) == Some(&rel) {
+            return;
+        }
+        if !self.nav_history.is_empty() {
+            self.nav_history.truncate(self.nav_pos + 1);
+        }
+        self.nav_history.push(rel);
+        if self.nav_history.len() > 100 {
+            self.nav_history.remove(0);
+        }
+        self.nav_pos = self.nav_history.len() - 1;
+    }
+
+    pub(crate) fn can_nav(&self, delta: isize) -> bool {
+        let target = self.nav_pos as isize + delta;
+        target >= 0 && (target as usize) < self.nav_history.len()
+    }
+
+    /// Back (`-1`) / forward (`1`) through visited notes; reopens closed ones.
+    pub(crate) fn nav_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if !self.can_nav(delta) {
+            return;
+        }
+        self.nav_pos = (self.nav_pos as isize + delta) as usize;
+        let rel = self.nav_history[self.nav_pos].clone();
+        self.navigating = true;
+        self.open_file_inner(&rel, cx);
+        self.navigating = false;
+    }
+
+    pub(crate) fn close_other_tabs(&mut self, keep: usize, cx: &mut Context<Self>) {
+        self.flush_title(cx);
+        let Some(kept) = self.tabs.get(keep).cloned() else {
+            return;
+        };
+        self.tabs = vec![kept];
+        self.active_tab = 0;
+        self.save_session();
+        cx.notify();
+    }
+
+    pub(crate) fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
+        while !self.tabs.is_empty() && self.tabs.iter().any(|t| t.rel.is_some()) {
+            self.close_tab(0, cx);
+        }
+    }
+
     fn on_next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            self.record_visit();
             self.save_session();
             cx.notify();
         }
@@ -1603,6 +1669,13 @@ impl MekuShell {
         self.find_step(-1, cx);
     }
 
+    fn on_nav_back(&mut self, _: &NavBack, _: &mut Window, cx: &mut Context<Self>) {
+        self.nav_step(-1, cx);
+    }
+    fn on_nav_forward(&mut self, _: &NavForward, _: &mut Window, cx: &mut Context<Self>) {
+        self.nav_step(1, cx);
+    }
+
     fn on_cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
         let current = theme::active(cx).name;
         let at = theme::PRESETS
@@ -1640,7 +1713,7 @@ impl MekuShell {
                     .child(self.render_document(&rel, window, cx))
                     .into_any_element()
             }
-            _ => self.render_empty_state(&active.title, cx),
+            _ => self.render_welcome(cx),
         };
 
         // `min_w_0` + clipping keep a long tab strip from widening the pane
@@ -1651,28 +1724,6 @@ impl MekuShell {
             .overflow_hidden()
             .child(tab_strip)
             .child(v_flex().flex_1().min_h_0().min_w_0().child(body))
-    }
-
-    fn render_empty_state(&mut self, title: &str, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .text_color(cx.theme().muted_foreground)
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().foreground)
-                    .child(title.to_string()),
-            )
-            .child(if self.explorer.is_open() {
-                "Select a note in the explorer to start editing."
-            } else {
-                "Open a folder (Ctrl-O) or pass it on the command line."
-            })
-            .into_any_element()
     }
 
     fn render_conflict_banner(&mut self, rel: &Path, cx: &mut Context<Self>) -> AnyElement {
@@ -1877,6 +1928,8 @@ impl Render for MekuShell {
             .key_context("Meku")
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::on_cycle_theme))
+            .on_action(cx.listener(Self::on_nav_back))
+            .on_action(cx.listener(Self::on_nav_forward))
             .on_action(cx.listener(Self::on_open_find))
             .on_action(cx.listener(Self::on_open_replace))
             .on_action(cx.listener(Self::on_find_next))
@@ -2049,6 +2102,8 @@ fn main() {
             KeyBinding::new("up", palette::PaletteUp, Some("Palette")),
             KeyBinding::new("down", palette::PaletteDown, Some("Palette")),
             KeyBinding::new("ctrl-alt-t", CycleTheme, Some("Meku")),
+            KeyBinding::new("alt-left", NavBack, Some("Meku")),
+            KeyBinding::new("alt-right", NavForward, Some("Meku")),
             KeyBinding::new("ctrl-t", NewTab, Some("Meku")),
             KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
             KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
@@ -2226,6 +2281,8 @@ mod ui_tests {
         cx.update(|cx| {
             cx.bind_keys([
                 KeyBinding::new("ctrl-\\", ToggleSidebar, Some("Meku")),
+                KeyBinding::new("alt-left", crate::NavBack, Some("Meku")),
+                KeyBinding::new("alt-right", crate::NavForward, Some("Meku")),
                 KeyBinding::new("ctrl-p", crate::palette::OpenFileFinder, Some("Meku")),
                 KeyBinding::new(
                     "ctrl-shift-p",
@@ -5299,6 +5356,76 @@ mod ui_tests {
             std::fs::read(dir.path().join("attachments").join(&saved[0])).unwrap(),
             PNG_1X1,
             "the bytes are saved as pasted"
+        );
+    }
+
+    #[test]
+    fn back_and_forward_walk_visited_notes() {
+        run_ui_test("nav_history", nav_history_body);
+    }
+
+    fn nav_history_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "a\n");
+        std::fs::write(dir.path().join("b.md"), "b\n").unwrap();
+        std::fs::write(dir.path().join("c.md"), "c\n").unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.explorer.refresh();
+                s.open_file_inner(Path::new("b.md"), cx);
+                s.open_file_inner(Path::new("c.md"), cx);
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        let at = |cx: &mut TestAppContext| view.read_with(&*cx, |s, _| s.doc_rel().unwrap());
+        assert_eq!(at(cx), PathBuf::from("c.md"));
+        step(cx, window, |w, cx| w.press("alt-left", cx));
+        assert_eq!(at(cx), PathBuf::from("b.md"), "Alt+Left goes back");
+        step(cx, window, |w, cx| w.click("nav-back", cx));
+        assert_eq!(at(cx), PathBuf::from("doc.md"), "the back button too");
+        assert!(
+            !view.read_with(&*cx, |s, _| s.can_nav(-1)),
+            "nothing before the first note"
+        );
+        step(cx, window, |w, cx| w.press("alt-right", cx));
+        assert_eq!(at(cx), PathBuf::from("b.md"));
+        // Visiting something new drops the forward history.
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file_inner(Path::new("doc.md"), cx)));
+        assert!(!view.read_with(&*cx, |s, _| s.can_nav(1)));
+        // Closing a visited tab does not break going back to it.
+        cx.update(|cx| view.update(cx, |s, cx| s.close_all_tabs(cx)));
+        step(cx, window, |w, cx| w.press("alt-left", cx));
+        assert_eq!(at(cx), PathBuf::from("b.md"), "a closed note reopens");
+    }
+
+    #[test]
+    fn welcome_actions_and_status_items_are_clickable() {
+        run_ui_test("welcome_status", welcome_status_body);
+    }
+
+    fn welcome_status_body(cx: &mut TestAppContext) {
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        cx.update(|cx| view.update(cx, |s, cx| s.close_all_tabs(cx)));
+        step(cx, window, |w, cx| w.click(("welcome-action", 1usize), cx));
+        step(cx, window, |_, _| {});
+        assert!(
+            view.read_with(&*cx, |s, _| s.palette.is_some()),
+            "'Open a note' opens the finder"
+        );
+        cx.update(|cx| view.update(cx, |s, cx| s.close_palette(true, cx)));
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file_inner(Path::new("note.md"), cx)));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.click("status-mode", cx));
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.tab_mode()),
+            Mode::Read,
+            "status mode cycles Live → Read"
+        );
+        step(cx, window, |w, cx| w.click("status-position", cx));
+        step(cx, window, |_, _| {});
+        assert!(
+            view.read_with(&*cx, |s, _| s.palette.is_some()),
+            "Ln/Col opens go-to-line"
         );
     }
 }
