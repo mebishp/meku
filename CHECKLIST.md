@@ -374,3 +374,5 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] Mode switch is labelled Edit / Live / Read; footer terminal icon and "Meku" label removed; title-bar search icon only shows while the sidebar is hidden; empty Outline section hidden.
 - [x] Settings: scope sentence, subheads in Editor/Files, keyboard tab stops + focus styles on settings and chrome controls.
 - [x] Muted text on surface ≥4.5:1 in every preset (Solarized tweaked).
+- [x] Title bar: the mode switch became a three-dot menu (Edit / Live / Read with check, Find, Replace, Go to line, Shortcuts, Settings).
+- [x] Themes: `Ctrl+Alt+Z` / "Theme: undo last change" (a second press redoes); "Theme: copy as JSON" puts the active theme on the clipboard as a `themes` entry; "Theme: add from clipboard" validates it, adds it to the global themes and applies it.

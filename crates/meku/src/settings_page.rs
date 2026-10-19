@@ -174,6 +174,7 @@ impl MekuShell {
         let Some(scope) = self.settings.as_ref().map(|p| p.scope) else {
             return;
         };
+        theme::remember(cx);
         let result = theme::update_config(cx, |s| {
             s.env_theme = None;
             s.write(scope, "follow_system", Value::Bool(false))?;

@@ -65,6 +65,9 @@ pub(crate) enum Command {
     ThemePicker,
     ThemeFollowSystem,
     ThemeNext,
+    ThemeUndo,
+    ThemeCopy,
+    ThemeAdd,
     ToggleReduceMotion,
     ZoomIn,
     ZoomOut,
@@ -91,6 +94,9 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::ThemePicker, "Theme: choose…", ""),
     (Command::ThemeFollowSystem, "Theme: follow system", ""),
     (Command::ThemeNext, "Theme: next", "Ctrl+Alt+T"),
+    (Command::ThemeUndo, "Theme: undo last change", "Ctrl+Alt+Z"),
+    (Command::ThemeCopy, "Theme: copy as JSON", ""),
+    (Command::ThemeAdd, "Theme: add from clipboard", ""),
     (Command::ToggleReduceMotion, "Toggle reduce motion", ""),
     (Command::ZoomIn, "Zoom in", "Ctrl +"),
     (Command::ZoomOut, "Zoom out", "Ctrl -"),
@@ -132,6 +138,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Open note", "Ctrl P"),
     ("Command palette", "Ctrl Shift P"),
     ("Settings", "Ctrl ,"),
+    ("Undo theme change", "Ctrl Alt Z"),
     ("Search all notes", "Ctrl Shift F"),
     ("Find / replace in note", "Ctrl F  ·  Ctrl H"),
     ("Go to line", "Ctrl G"),
@@ -445,6 +452,49 @@ impl MekuShell {
         self.doc_goto(at, cx);
     }
 
+    /// Add the theme JSON on the clipboard to the global `themes` list and
+    /// switch to it; a bad theme is explained instead.
+    pub(crate) fn add_theme_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        let parsed = serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|e| format!("The clipboard is not valid JSON ({e})"))
+            .and_then(|v| crate::config::check_theme(&v).map(|spec| (v, spec)));
+        let (value, spec) = match parsed {
+            Ok(ok) => ok,
+            Err(e) => {
+                self.notice = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        let mut list: Vec<serde_json::Value> = theme::state(cx)
+            .global
+            .values
+            .get("themes")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        list.retain(|t| {
+            t.get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|n| !n.eq_ignore_ascii_case(&spec.name))
+        });
+        list.push(value);
+        let result =
+            theme::update_config(cx, |s| s.write_themes(crate::config::Scope::Global, list));
+        match result {
+            Ok(()) => {
+                theme::choose(&spec.name, cx);
+                self.notice = Some(format!("Added the theme “{}”", spec.name));
+            }
+            Err(e) => self.notice = Some(e),
+        }
+        cx.notify();
+    }
+
     pub(crate) fn run_command(
         &mut self,
         command: Command,
@@ -501,6 +551,18 @@ impl MekuShell {
             Command::ThemeNext => {
                 theme::cycle(cx);
             }
+            Command::ThemeUndo => {
+                self.notice = (!theme::undo(cx)).then(|| "No theme change to undo".to_string());
+                cx.notify();
+            }
+            Command::ThemeCopy => {
+                let json = theme::palette_json(&theme::active(cx));
+                let text = serde_json::to_string_pretty(&json).unwrap_or_default();
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.notice = Some("Theme copied. Paste it into a \"themes\" list, or use \"Theme: add from clipboard\".".into());
+                cx.notify();
+            }
+            Command::ThemeAdd => self.add_theme_from_clipboard(cx),
             Command::ZoomIn => theme::set_zoom(Some(1), cx),
             Command::ZoomOut => theme::set_zoom(Some(-1), cx),
             Command::ZoomReset => theme::set_zoom(None, cx),

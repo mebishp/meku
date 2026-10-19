@@ -643,6 +643,7 @@ pub fn init(root: Option<&std::path::Path>, cx: &mut App) {
 /// Change theme from the UI and remember it.
 pub fn choose(name: &str, cx: &mut App) {
     if let Some(palette) = find(name, cx) {
+        remember(cx);
         update_config(cx, |s| {
             s.env_theme = None;
             let scope = scope_for(s, "theme");
@@ -651,6 +652,64 @@ pub fn choose(name: &str, cx: &mut App) {
             let _ = s.write(scope, "follow_system", false.into());
         });
     }
+}
+
+/// The theme (and follow-system flag) in force before the last change, so
+/// one command can undo a theme switch.
+struct ThemeBack(Option<(String, bool)>);
+
+impl Global for ThemeBack {}
+
+/// Remember the current theme choice before it changes.
+pub fn remember(cx: &mut App) {
+    let c = cfg(cx);
+    let now = (c.str("theme").to_string(), c.bool("follow_system"));
+    cx.set_global(ThemeBack(Some(now)));
+}
+
+/// Go back to the theme choice before the last change (and swap, so a second
+/// call redoes it). `false` when there is nothing to go back to.
+pub fn undo(cx: &mut App) -> bool {
+    let Some((name, follow)) = cx.try_global::<ThemeBack>().and_then(|b| b.0.clone()) else {
+        return false;
+    };
+    remember(cx);
+    update_config(cx, |s| {
+        s.env_theme = None;
+        let scope = scope_for(s, "theme");
+        let _ = s.write(scope, "theme", name.into());
+        let scope = scope_for(s, "follow_system");
+        let _ = s.write(scope, "follow_system", follow.into());
+    });
+    true
+}
+
+/// A palette as a `themes` entry for settings.json: what "copy theme" puts
+/// on the clipboard.
+pub fn palette_json(p: &Palette) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("name".into(), p.name.into());
+    map.insert("dark".into(), p.dark.into());
+    for (key, c) in [
+        ("bg", p.bg),
+        ("surface", p.surface),
+        ("border", p.border),
+        ("fg", p.fg),
+        ("muted", p.muted),
+        ("accent", p.accent),
+        ("keyword", p.keyword),
+        ("string", p.string),
+        ("number", p.number),
+        ("func", p.func),
+        ("ty", p.ty),
+        ("constant", p.constant),
+        ("prop", p.prop),
+        ("comment", p.comment),
+        ("code", p.code),
+    ] {
+        map.insert(key.into(), hex(c).into());
+    }
+    serde_json::Value::Object(map)
 }
 
 /// Next theme in the list (presets, then custom), wrapping.
@@ -664,6 +723,7 @@ pub fn cycle(cx: &mut App) {
 /// Switch back to following the OS appearance.
 #[allow(dead_code)] // wired to the command palette
 pub fn follow_system(cx: &mut App) {
+    remember(cx);
     update_config(cx, |s| {
         s.env_theme = None;
         let scope = scope_for(s, "follow_system");
@@ -758,6 +818,27 @@ mod tests {
             std::ptr::eq(intern("Ink"), ink.name),
             "names are interned once"
         );
+    }
+
+    #[test]
+    fn palette_json_round_trips_through_validation() {
+        let json = palette_json(&NORD);
+        let spec = crate::config::check_theme(&json).unwrap();
+        assert_eq!(spec.name, "Nord");
+        assert_eq!(spec.colors.len(), 15);
+        let rebuilt = build_custom(&spec, &PRESETS);
+        assert_eq!(
+            (rebuilt.bg, rebuilt.accent, rebuilt.dark),
+            (NORD.bg, NORD.accent, NORD.dark)
+        );
+        assert!(
+            crate::config::check_theme(&serde_json::json!({"bg": "#000"})).is_err(),
+            "needs a name"
+        );
+        assert!(
+            crate::config::check_theme(&serde_json::json!({"name": "x", "bg": "nope"})).is_err()
+        );
+        assert!(crate::config::check_theme(&serde_json::json!([1])).is_err());
     }
 
     #[test]

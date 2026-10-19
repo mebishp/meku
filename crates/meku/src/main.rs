@@ -34,6 +34,7 @@ actions!(
     [
         ToggleSidebar,
         CycleTheme,
+        ThemeUndo,
         NavBack,
         NavForward,
         ZoomIn,
@@ -1806,6 +1807,11 @@ impl MekuShell {
         self.nav_step(1, cx);
     }
 
+    fn on_theme_undo(&mut self, _: &ThemeUndo, _: &mut Window, cx: &mut Context<Self>) {
+        self.notice = (!theme::undo(cx)).then(|| "No theme change to undo".to_string());
+        cx.notify();
+    }
+
     fn on_cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
         theme::cycle(cx);
     }
@@ -2064,6 +2070,7 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_cycle_theme))
+            .on_action(cx.listener(Self::on_theme_undo))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.on_drop_paths(paths.paths(), cx);
             }))
@@ -2265,6 +2272,7 @@ fn main() {
             KeyBinding::new("up", palette::PaletteUp, Some("Palette")),
             KeyBinding::new("down", palette::PaletteDown, Some("Palette")),
             KeyBinding::new("ctrl-alt-t", CycleTheme, Some("Meku")),
+            KeyBinding::new("ctrl-alt-z", ThemeUndo, Some("Meku")),
             KeyBinding::new("alt-left", NavBack, Some("Meku")),
             KeyBinding::new("alt-right", NavForward, Some("Meku")),
             KeyBinding::new("ctrl-=", ZoomIn, Some("Meku")),
@@ -3517,13 +3525,13 @@ mod ui_tests {
         // Buttons flip modes too; the roll starts from Live again.
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click("mode-read", cx);
+            view.update(cx, |s, cx| s.set_tab_mode(Mode::Read, cx));
         })
         .unwrap();
         assert_eq!(doc_mode(cx, &view), Mode::Read);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click("mode-edit", cx);
+            view.update(cx, |s, cx| s.set_tab_mode(Mode::Edit, cx));
         })
         .unwrap();
         assert_eq!(doc_mode(cx, &view), Mode::Edit);
@@ -3569,13 +3577,13 @@ mod ui_tests {
         })
         .unwrap();
         cx.update_window(window, |_, window, cx| {
-            window.click("mode-read", cx);
+            view.update(cx, |s, cx| s.set_tab_mode(Mode::Read, cx));
             window.render_frame(cx);
             assert!(
                 window.try_find(("doc-row", 80usize)).is_some(),
                 "Read mode keeps the tail row in view",
             );
-            window.click("mode-edit", cx);
+            view.update(cx, |s, cx| s.set_tab_mode(Mode::Edit, cx));
             window.render_frame(cx);
             assert!(
                 window.try_find(("doc-row", 80usize)).is_some(),
@@ -3591,7 +3599,7 @@ mod ui_tests {
     }
 
     fn image_rows_body(cx: &mut TestAppContext) {
-        let (_view, window, _dir) = open_note_in(
+        let (view, window, _dir) = open_note_in(
             cx,
             1200.0,
             800.0,
@@ -3609,7 +3617,7 @@ mod ui_tests {
         // In Edit mode the row shows raw text instead.
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click("mode-edit", cx);
+            view.update(cx, |s, cx| s.set_tab_mode(Mode::Edit, cx));
         })
         .unwrap();
         cx.update_window(window, |_, window, cx| {
@@ -5339,9 +5347,9 @@ mod ui_tests {
 
     fn title_modes_body(cx: &mut TestAppContext) {
         let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one two three\nfour\n");
-        step(cx, window, |w, cx| w.click("mode-read", cx));
+        cx.update(|cx| view.update(cx, |s, cx| s.set_tab_mode(Mode::Read, cx)));
         assert_eq!(view.read_with(&*cx, |s, _| s.tab_mode()), Mode::Read);
-        step(cx, window, |w, cx| w.click("mode-edit", cx));
+        cx.update(|cx| view.update(cx, |s, cx| s.set_tab_mode(Mode::Edit, cx)));
         assert_eq!(view.read_with(&*cx, |s, _| s.tab_mode()), Mode::Edit);
         // The status bar counts words and reports the caret position.
         let (words, lc) = cx.update(|cx| {
@@ -6147,5 +6155,52 @@ mod ui_tests {
             assert_eq!(crate::theme::active(cx).name, "Ink");
             assert_eq!(crate::theme::active(cx).bg, 0x101010);
         });
+    }
+
+    #[test]
+    fn theme_changes_undo_and_themes_move_through_the_clipboard() {
+        run_ui_test("theme_undo_share", theme_undo_share_body);
+    }
+
+    fn theme_undo_share_body(cx: &mut TestAppContext) {
+        let (view, _window, _dir) = open_note_in(cx, 1200.0, 800.0, "text\n");
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
+        let name = |cx: &mut TestAppContext| cx.update(|cx| crate::theme::active(cx).name);
+        cx.update(|cx| crate::theme::choose("Nord", cx));
+        assert_eq!(name(cx), "Nord");
+        cx.update(|cx| crate::theme::choose("Dracula", cx));
+        assert_eq!(name(cx), "Dracula");
+        assert!(cx.update(crate::theme::undo));
+        assert_eq!(name(cx), "Nord", "undo returns to the previous theme");
+        assert!(cx.update(crate::theme::undo));
+        assert_eq!(name(cx), "Dracula", "a second undo redoes it");
+
+        // Copy the active theme, tweak it, and add it back from the clipboard.
+        let json = cx.update(|cx| crate::theme::palette_json(&crate::theme::active(cx)));
+        let mut json = json;
+        json["name"] = "Shared".into();
+        json["bg"] = "#101010".into();
+        cx.update(|cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(json.to_string()))
+        });
+        cx.update(|cx| view.update(cx, |s, cx| s.add_theme_from_clipboard(cx)));
+        assert_eq!(name(cx), "Shared", "the added theme is applied");
+        assert_eq!(cx.update(|cx| crate::theme::active(cx).bg), 0x101010);
+
+        // A bad clipboard is explained, not applied.
+        cx.update(|cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                "{\"bg\": \"red\"}".into(),
+            ))
+        });
+        cx.update(|cx| view.update(cx, |s, cx| s.add_theme_from_clipboard(cx)));
+        assert_eq!(name(cx), "Shared");
+        let notice = view
+            .read_with(&*cx, |s, _| s.notice.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("name") || notice.contains("theme"),
+            "{notice}"
+        );
     }
 }

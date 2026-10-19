@@ -667,6 +667,33 @@ pub fn parse_hex(s: &str) -> Option<u32> {
     }
 }
 
+/// Validate one theme object (pasted from elsewhere) before it is added.
+pub fn check_theme(value: &Value) -> Result<ThemeSpec, String> {
+    if !value.is_object() {
+        return Err("A theme is a JSON object with a \"name\"".into());
+    }
+    let mut issues = Vec::new();
+    let mut specs = parse_themes(
+        Scope::Global,
+        &Value::Array(vec![value.clone()]),
+        &mut issues,
+    );
+    if let Some(issue) = issues.first() {
+        return Err(format!(
+            "{}: {}",
+            issue
+                .key
+                .as_deref()
+                .unwrap_or("theme")
+                .replace("themes[0]", "theme"),
+            issue.message
+        ));
+    }
+    specs
+        .pop()
+        .ok_or_else(|| "The theme has no name".to_string())
+}
+
 fn parse_themes(scope: Scope, value: &Value, issues: &mut Vec<Issue>) -> Vec<ThemeSpec> {
     let issue = |key: &str, message: String| Issue {
         scope,

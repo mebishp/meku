@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
@@ -69,14 +70,6 @@ impl Mode {
             Mode::Edit => Ico::Source,
             Mode::Live => Ico::Live,
             Mode::Read => Ico::Read,
-        }
-    }
-
-    fn tip(self) -> &'static str {
-        match self {
-            Mode::Edit => "Source mode",
-            Mode::Live => "Live preview",
-            Mode::Read => "Reading view",
         }
     }
 }
@@ -192,7 +185,7 @@ impl MekuShell {
 
         let mut right = h_flex().gap_1().items_center().flex_none();
         if self.doc_rel().is_some() {
-            right = right.child(self.render_mode_switch_icons(cx));
+            right = right.child(self.render_doc_menu(cx));
         }
         if !self.show_sidebar {
             right = right.child(icon_button(
@@ -258,61 +251,46 @@ impl MekuShell {
             .into_any_element()
     }
 
-    /// Source / Live / Read as an icon segmented control.
-    fn render_mode_switch_icons(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.tab_mode();
+    /// The editor's "more" menu: view mode, find, and the app-level
+    /// shortcuts that used to crowd the title bar.
+    fn render_doc_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::palette::Command;
         let shell = cx.entity();
-        let theme_colors = cx.theme();
-        let track = theme_colors.secondary;
-        let (fg, muted) = (theme_colors.foreground, theme_colors.muted_foreground);
-        let raised = theme_colors.background;
-        let border = theme_colors.border;
-        let segments: Vec<AnyElement> = [Mode::Edit, Mode::Live, Mode::Read]
-            .into_iter()
-            .map(|m| {
-                let click_shell = shell.clone();
-                let on = m == current;
-                let mut seg = div()
-                    .id(format!("mode-{m:?}").to_lowercase())
-                    .test_support()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(26.))
-                    .px_2p5()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .tab_stop(true)
-                    .focus_visible(move |s| s.text_color(fg).bg(raised))
-                    .text_xs()
-                    .font_weight(if on {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if on { fg } else { muted })
-                    .child(m.label())
-                    .tooltip(move |window, cx| Tooltip::new(m.tip()).build(window, cx))
-                    .on_click(move |_, _, cx| {
-                        click_shell.update(cx, |view, cx| view.set_tab_mode(m, cx));
-                    });
-                seg = if on {
-                    seg.bg(raised).border_1().border_color(border).shadow_sm()
-                } else {
-                    seg.hover(move |s| s.text_color(fg))
-                };
-                seg.into_any_element()
+        let current = self.tab_mode();
+        let muted = cx.theme().muted_foreground;
+        Button::new("doc-menu")
+            .ghost()
+            .compact()
+            .child(icon(Ico::More, px(16.), muted))
+            .tooltip("View and more")
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for mode in [Mode::Edit, Mode::Live, Mode::Read] {
+                    let s = shell.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(mode.label())
+                            .checked(mode == current)
+                            .on_click(move |_, _, cx| {
+                                s.update(cx, |v, cx| v.set_tab_mode(mode, cx));
+                            }),
+                    );
+                }
+                menu = menu.item(PopupMenuItem::separator());
+                let entries: [(&str, Command); 5] = [
+                    ("Find in note", Command::FindInNote),
+                    ("Find and replace", Command::ReplaceInNote),
+                    ("Go to line", Command::GoToLine),
+                    ("Keyboard shortcuts", Command::ShortcutsHelp),
+                    ("Settings", Command::OpenSettings),
+                ];
+                for (label, command) in entries {
+                    let s = shell.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        s.update(cx, |v, cx| v.run_command(command, window, cx));
+                    }));
+                }
+                menu
             })
-            .collect();
-        h_flex()
-            .id("mode-switch")
-            .flex_none()
-            .items_center()
-            .gap(px(2.))
-            .p(px(2.))
-            .rounded_lg()
-            .bg(track)
-            .children(segments)
             .into_any_element()
     }
 
