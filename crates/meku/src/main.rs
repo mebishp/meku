@@ -6295,4 +6295,34 @@ mod ui_tests {
             }
         }
     }
+
+    #[test]
+    #[ignore]
+    fn perf_typing_in_a_10k_line_note() {
+        run_ui_test("perf_typing", perf_typing_body);
+    }
+
+    fn perf_typing_body(cx: &mut TestAppContext) {
+        let text: String = (0..10_000)
+            .map(|i| format!("Line {i} with **bold** and `code` and a [link](x)\n"))
+            .collect();
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, &text);
+        focus_doc_for(cx, &view, window);
+        move_doc_caret(cx, &view, 5000);
+        let mut times = Vec::new();
+        for _ in 0..60 {
+            let t = std::time::Instant::now();
+            cx.update_window(window, |_, w, cx| {
+                w.input("a", cx);
+                w.render_frame(cx);
+            })
+            .unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "typing 10k lines: p50 {:.1}ms p95 {:.1}ms max {:.1}ms",
+            times[30], times[56], times[59]
+        );
+    }
 }
