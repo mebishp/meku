@@ -459,6 +459,10 @@ impl MekuShell {
             .text_size(cx.theme().font_size * crate::theme::zoom(cx))
             .child(input_bridge)
             .child(list_body)
+            .child(crate::smooth::wheel(
+                &self.smooth.doc,
+                crate::smooth::for_list(&self.doc_list),
+            ))
             .children(self.render_find_bar(cx))
             .pipe_fade(rel, cx)
     }

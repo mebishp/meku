@@ -8,6 +8,7 @@ mod lightbox;
 mod palette;
 mod settings_page;
 mod slash;
+mod smooth;
 mod theme;
 
 use std::cell::RefCell;
@@ -256,6 +257,8 @@ pub struct MekuShell {
     focus_doc: bool,
     /// Settings generation last applied (see [`MekuShell::apply_settings`]).
     config_gen: u64,
+    /// Smooth wheel scrolling state for every scroll container.
+    smooth: smooth::Smooth,
     sidebar_setting: bool,
     /// The settings page, when open.
     settings: Option<settings_page::SettingsPage>,
@@ -321,6 +324,7 @@ impl MekuShell {
             focus_title: None,
             focus_doc: false,
             config_gen: u64::MAX,
+            smooth: smooth::Smooth::default(),
             sidebar_setting: true,
             settings: None,
             settings_request: None,
@@ -6202,5 +6206,38 @@ mod ui_tests {
             notice.contains("name") || notice.contains("theme"),
             "{notice}"
         );
+    }
+
+    #[test]
+    fn mouse_wheel_notches_glide_instead_of_jumping() {
+        run_ui_test("smooth_wheel", smooth_wheel_body);
+    }
+
+    fn smooth_wheel_body(cx: &mut TestAppContext) {
+        let body: String = (0..120).map(|i| format!("line {i}\n\n")).collect();
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, &body);
+        cx.update(|cx| cx.set_global(crate::config::ConfigState::in_memory()));
+        step(cx, window, |_, _| {});
+        let top = |cx: &mut TestAppContext| {
+            view.read_with(&*cx, |s, _| {
+                let t = s.doc_list.logical_scroll_top();
+                (t.item_ix, f32::from(t.offset_in_item))
+            })
+        };
+        assert_eq!(top(cx).0, 0);
+        // Three wheel notches downward over the document.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            for _ in 0..3 {
+                window.scroll(
+                    "md-scroll",
+                    gpui_kit::ScrollDelta::Lines(gpui_kit::point(0.0, -1.0)),
+                    cx,
+                );
+            }
+        })
+        .unwrap();
+        let first = top(cx);
+        assert_eq!(first, (0, 0.0), "a notch does not jump the list");
     }
 }

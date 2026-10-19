@@ -520,8 +520,14 @@ impl MekuShell {
             .flex_1()
             .min_w_0()
             .h_full()
+            .relative()
             .overflow_y_scroll()
-            .child(body);
+            .track_scroll(&self.smooth.settings_h)
+            .child(body)
+            .child(crate::smooth::wheel(
+                &self.smooth.settings,
+                crate::smooth::for_handle(&self.smooth.settings_h, false),
+            ));
 
         let path = state
             .layer(scope)

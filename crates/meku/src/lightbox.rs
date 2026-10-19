@@ -195,7 +195,13 @@ impl MekuShell {
             .bottom(px(16.))
             .left(px(16.))
             .right(px(16.))
+            .relative()
             .overflow_scroll()
+            .track_scroll(&self.smooth.lightbox_h)
+            .child(crate::smooth::wheel(
+                &self.smooth.lightbox,
+                crate::smooth::for_handle(&self.smooth.lightbox_h, false),
+            ))
             // Anywhere outside the picture closes the view.
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 close_shell.update(cx, |v, cx| {

@@ -625,8 +625,14 @@ impl MekuShell {
             .id("palette-list")
             .p_1()
             .max_h(px(360.))
+            .relative()
             .overflow_y_scroll()
-            .children(rows);
+            .track_scroll(&self.smooth.palette_h)
+            .children(rows)
+            .child(crate::smooth::wheel(
+                &self.smooth.palette,
+                crate::smooth::for_handle(&self.smooth.palette_h, false),
+            ));
         if empty {
             list = list.child(
                 div()

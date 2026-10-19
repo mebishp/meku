@@ -376,3 +376,4 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] Muted text on surface ≥4.5:1 in every preset (Solarized tweaked).
 - [x] Title bar: the mode switch became a three-dot menu (Edit / Live / Read with check, Find, Replace, Go to line, Shortcuts, Settings).
 - [x] Themes: `Ctrl+Alt+Z` / "Theme: undo last change" (a second press redoes); "Theme: copy as JSON" puts the active theme on the clipboard as a `themes` entry; "Theme: add from clipboard" validates it, adds it to the global themes and applies it.
+- [x] **Smooth scrolling everywhere** (`smooth.rs`): mouse-wheel notches ease toward their target (exponential glide, frame-rate independent, notches accumulate) in the document, file tree, outline, tab strip, settings, palette list and lightbox. Touchpads keep their native pixel scrolling. Unit-tested math; headless tests cannot run platform frames, so the on-screen feel is not machine-verified.

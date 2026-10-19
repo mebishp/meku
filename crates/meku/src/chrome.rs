@@ -455,9 +455,14 @@ impl MekuShell {
             .pt(px(6.))
             .px(px(8.))
             .bg(bar_bg)
+            .relative()
             .overflow_x_scroll()
             .track_scroll(&self.tabs_scroll)
             .children(tabs)
+            .child(crate::smooth::wheel(
+                &self.smooth.tabs,
+                crate::smooth::for_handle(&self.tabs_scroll, true),
+            ))
             .child(div().flex_none().pb(px(2.)).pl(px(4.)).child(icon_button(
                 "new-tab",
                 Ico::Plus,
@@ -646,9 +651,15 @@ impl MekuShell {
                     .min_h_0()
                     .id("file-tree-scroll")
                     .test_support()
+                    .relative()
                     .overflow_y_scroll()
+                    .track_scroll(&self.smooth.tree_h)
                     .px_1()
-                    .child(self.render_tree_rows(cx)),
+                    .child(self.render_tree_rows(cx))
+                    .child(crate::smooth::wheel(
+                        &self.smooth.tree,
+                        crate::smooth::for_handle(&self.smooth.tree_h, false),
+                    )),
             )
             .children(
                 theme::cfg(cx)
@@ -894,10 +905,16 @@ impl MekuShell {
                 div()
                     .id("outline-scroll")
                     .max_h(px(200.))
+                    .relative()
                     .overflow_y_scroll()
+                    .track_scroll(&self.smooth.outline_h)
                     .px_1()
                     .pb_1()
                     .children(rows)
+                    .child(crate::smooth::wheel(
+                        &self.smooth.outline,
+                        crate::smooth::for_handle(&self.smooth.outline_h, false),
+                    ))
                     .when_empty(empty, muted),
             );
         }
