@@ -6243,4 +6243,56 @@ mod ui_tests {
             "a notch responds at once but leaves the tail to the glide: {first:?}"
         );
     }
+
+    #[test]
+    fn typing_a_task_box_char_by_char_keeps_text_and_caret() {
+        run_ui_test("task_typing", task_typing_body);
+    }
+
+    fn task_typing_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "\n");
+        focus_doc_for(cx, &view, window);
+        move_doc_caret(cx, &view, 0);
+        for (i, c) in ["-", " ", "[", " ", "]", " ", "t"].into_iter().enumerate() {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.input(c, cx);
+            })
+            .unwrap();
+            let (mut caret, mut row_h) = (false, 0.0);
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                caret = w.try_find("doc-caret").is_some();
+                row_h = w
+                    .try_find(("doc-row", 0usize))
+                    .map_or(0.0, |r| f32::from(r.bounds().size.height));
+            })
+            .unwrap();
+            assert!(caret, "step {i} {c:?}: the caret is drawn");
+            let caret_h = cx
+                .update_window(window, |_, w, _| {
+                    w.try_find("doc-caret")
+                        .map_or(0.0, |c| f32::from(c.bounds().size.height))
+                })
+                .unwrap();
+            assert!(
+                caret_h >= 8.0,
+                "step {i} {c:?}: the caret has height ({caret_h})"
+            );
+            assert!(
+                row_h >= 18.0,
+                "step {i} {c:?}: the row has height ({row_h})"
+            );
+            if i == 5 {
+                assert!(
+                    cx.update_window(window, |_, w, cx| {
+                        w.render_frame(cx);
+                        w.try_find(("task-box", 0usize)).is_some()
+                    })
+                    .unwrap(),
+                    "the checkbox shows on the empty task row"
+                );
+            }
+        }
+    }
 }

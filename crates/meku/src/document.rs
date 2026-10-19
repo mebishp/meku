@@ -2482,6 +2482,14 @@ fn row_element(
             );
         }
     }
+    // An empty task row ("- [ ] " just typed) has no text to give it height;
+    // without a floor the checkbox and caret overflow a zero-height row and
+    // nothing shows.
+    if display_empty {
+        let line_h =
+            window.text_style().line_height_in_pixels(window.rem_size()) * heading_scale(row.kind);
+        el = el.min_h(line_h);
+    }
     // Tasks: a real checkbox control in the gap before the text.
     if !reveal && let Some((checked, task_src)) = row.task() {
         let box_size = px(16.);
@@ -2539,6 +2547,7 @@ fn row_element(
     let wrap = (col_width > px(0.)).then(|| (col_width - text_x - right_pad).max(px(40.)));
     let wants_caret = caret_shape.is_some();
     let caret_geo = caret_shape
+        .filter(|_| !display_empty)
         .and_then(|(text, runs, index)| {
             caret_geometry(window, &text, &runs, font_size, index, wrap)
         })
