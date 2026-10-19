@@ -49,6 +49,14 @@ pub(crate) enum DocKey {
     DeleteWordBack,
     DeleteWordFwd,
     DeleteToLineStart,
+    MoveLineUp,
+    MoveLineDown,
+    DuplicateLine,
+    DeleteLine,
+    InsertLineBelow,
+    InsertLineAbove,
+    JoinLines,
+    ToggleComment,
     Enter,
     SelectAll,
     Undo,
@@ -74,6 +82,39 @@ fn smart_home_dest(row: &Row, text: &str, caret: usize) -> usize {
             .unwrap_or(line.len())
     };
     row.src.start + offset
+}
+
+/// The language tagged on the code fence enclosing `caret`, walking the rows
+/// the same way the highlighter does (open delimiter sets it, close clears
+/// it). `None` outside fenced code or for untagged fences.
+fn fence_lang_at(model: &DocModel, caret: usize) -> Option<String> {
+    let row_ix = row_at(&model.rows, caret);
+    let mut fence_lang: Option<String> = None;
+    for row in &model.rows[..=row_ix] {
+        let line = &model.text[row.src.clone()];
+        let trimmed = line.trim_start();
+        let is_delim = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        if row.kind != RowKind::Code {
+            fence_lang = None;
+        } else if is_delim {
+            let tag = if fence_lang.is_none() {
+                trimmed[3..].split_whitespace().next()
+            } else {
+                None
+            };
+            fence_lang = tag.map(str::to_string);
+        }
+    }
+    fence_lang.filter(|tag| !tag.is_empty())
+}
+
+/// Comment prefix for the few v0.1-highlighted languages.
+fn comment_prefix(lang: &str) -> Option<&'static str> {
+    match lang {
+        "rust" | "javascript" | "js" | "typescript" | "ts" => Some("//"),
+        "python" | "py" | "bash" | "sh" | "shell" | "ruby" | "yaml" | "yml" | "toml" => Some("#"),
+        _ => None,
+    }
 }
 
 /// Parsed rows for one buffer version.
@@ -469,6 +510,47 @@ impl MekuShell {
             DocKey::DeleteToLineStart => {
                 buffer.update(cx, |b, _| b.delete_to_line_start());
                 true
+            }
+            DocKey::MoveLineUp => {
+                buffer.update(cx, |b, _| b.move_line_up());
+                true
+            }
+            DocKey::MoveLineDown => {
+                buffer.update(cx, |b, _| b.move_line_down());
+                true
+            }
+            DocKey::DuplicateLine => {
+                buffer.update(cx, |b, _| b.duplicate_line());
+                true
+            }
+            DocKey::DeleteLine => {
+                buffer.update(cx, |b, _| b.delete_line());
+                true
+            }
+            DocKey::InsertLineBelow => {
+                buffer.update(cx, |b, _| b.insert_line_below());
+                true
+            }
+            DocKey::InsertLineAbove => {
+                buffer.update(cx, |b, _| b.insert_line_above());
+                true
+            }
+            DocKey::JoinLines => {
+                buffer.update(cx, |b, _| b.join_lines());
+                true
+            }
+            DocKey::ToggleComment => {
+                let caret = buffer.read(cx).caret();
+                let prefix = fence_lang_at(&model, caret)
+                    .as_deref()
+                    .and_then(comment_prefix);
+                match prefix {
+                    Some(prefix) => {
+                        buffer.update(cx, |b, _| b.toggle_line_comment(prefix));
+                        true
+                    }
+                    None => false,
+                }
             }
             DocKey::Backspace => {
                 buffer.update(cx, |b, _| b.delete_backward());

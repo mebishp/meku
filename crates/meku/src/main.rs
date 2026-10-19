@@ -63,6 +63,14 @@ actions!(
         DocDeleteWordBack,
         DocDeleteWordFwd,
         DocDeleteToLineStart,
+        DocMoveLineUp,
+        DocMoveLineDown,
+        DocDuplicateLine,
+        DocDeleteLine,
+        DocInsertLineBelow,
+        DocInsertLineAbove,
+        DocJoinLines,
+        DocToggleComment,
         DocEnter,
         DocSelectAll,
         DocUndo,
@@ -637,6 +645,65 @@ impl MekuShell {
         cx: &mut Context<Self>,
     ) {
         self.doc_key(document::DocKey::DeleteToLineStart, false, window, cx);
+    }
+    fn on_doc_move_line_up(
+        &mut self,
+        _: &DocMoveLineUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::MoveLineUp, false, window, cx);
+    }
+    fn on_doc_move_line_down(
+        &mut self,
+        _: &DocMoveLineDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::MoveLineDown, false, window, cx);
+    }
+    fn on_doc_duplicate_line(
+        &mut self,
+        _: &DocDuplicateLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::DuplicateLine, false, window, cx);
+    }
+    fn on_doc_delete_line(
+        &mut self,
+        _: &DocDeleteLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::DeleteLine, false, window, cx);
+    }
+    fn on_doc_insert_line_below(
+        &mut self,
+        _: &DocInsertLineBelow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::InsertLineBelow, false, window, cx);
+    }
+    fn on_doc_insert_line_above(
+        &mut self,
+        _: &DocInsertLineAbove,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::InsertLineAbove, false, window, cx);
+    }
+    fn on_doc_join_lines(&mut self, _: &DocJoinLines, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::JoinLines, false, window, cx);
+    }
+    fn on_doc_toggle_comment(
+        &mut self,
+        _: &DocToggleComment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::ToggleComment, false, window, cx);
     }
     fn on_doc_up(&mut self, _: &DocUp, window: &mut Window, cx: &mut Context<Self>) {
         self.doc_key(document::DocKey::Up, false, window, cx);
@@ -1588,6 +1655,14 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_doc_delete_word_back))
             .on_action(cx.listener(Self::on_doc_delete_word_fwd))
             .on_action(cx.listener(Self::on_doc_delete_to_line_start))
+            .on_action(cx.listener(Self::on_doc_move_line_up))
+            .on_action(cx.listener(Self::on_doc_move_line_down))
+            .on_action(cx.listener(Self::on_doc_duplicate_line))
+            .on_action(cx.listener(Self::on_doc_delete_line))
+            .on_action(cx.listener(Self::on_doc_insert_line_below))
+            .on_action(cx.listener(Self::on_doc_insert_line_above))
+            .on_action(cx.listener(Self::on_doc_join_lines))
+            .on_action(cx.listener(Self::on_doc_toggle_comment))
             .on_action(cx.listener(Self::on_doc_enter))
             .on_action(cx.listener(Self::on_doc_select_all))
             .on_action(cx.listener(Self::on_doc_undo))
@@ -1666,6 +1741,14 @@ fn main() {
             KeyBinding::new("ctrl-backspace", DocDeleteWordBack, Some("Meku")),
             KeyBinding::new("ctrl-delete", DocDeleteWordFwd, Some("Meku")),
             KeyBinding::new("ctrl-shift-backspace", DocDeleteToLineStart, Some("Meku")),
+            KeyBinding::new("alt-up", DocMoveLineUp, Some("Meku")),
+            KeyBinding::new("alt-down", DocMoveLineDown, Some("Meku")),
+            KeyBinding::new("ctrl-shift-d", DocDuplicateLine, Some("Meku")),
+            KeyBinding::new("ctrl-shift-k", DocDeleteLine, Some("Meku")),
+            KeyBinding::new("ctrl-enter", DocInsertLineBelow, Some("Meku")),
+            KeyBinding::new("ctrl-shift-enter", DocInsertLineAbove, Some("Meku")),
+            KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
+            KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
             KeyBinding::new("enter", DocEnter, Some("Meku")),
             KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
             KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
@@ -1707,12 +1790,14 @@ mod ui_tests {
     // recursion. Import everything this module needs explicitly.
     use crate::{
         CancelOverlay, CloseTab, CycleMode, DocBackspace, DocCopy, DocCut, DocDelete,
-        DocDeleteToLineStart, DocDeleteWordBack, DocDeleteWordFwd, DocDocEnd, DocDocStart, DocDown,
-        DocEnd, DocEnter, DocHome, DocLeft, DocPageDown, DocPageUp, DocPaste, DocRedo, DocRight,
-        DocSelectAll, DocSelectDocEnd, DocSelectDocStart, DocSelectDown, DocSelectEnd,
-        DocSelectHome, DocSelectLeft, DocSelectPageDown, DocSelectPageUp, DocSelectRight,
-        DocSelectUp, DocSelectWordLeft, DocSelectWordRight, DocUndo, DocUp, DocWordRight,
-        MekuShell, Mode, NamingMode, NewTab, NextTab, OpenFolder, Save, ToggleSidebar,
+        DocDeleteLine, DocDeleteToLineStart, DocDeleteWordBack, DocDeleteWordFwd, DocDocEnd,
+        DocDocStart, DocDown, DocDuplicateLine, DocEnd, DocEnter, DocHome, DocInsertLineAbove,
+        DocInsertLineBelow, DocJoinLines, DocLeft, DocMoveLineDown, DocMoveLineUp, DocPageDown,
+        DocPageUp, DocPaste, DocRedo, DocRight, DocSelectAll, DocSelectDocEnd, DocSelectDocStart,
+        DocSelectDown, DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectPageDown,
+        DocSelectPageUp, DocSelectRight, DocSelectUp, DocSelectWordLeft, DocSelectWordRight,
+        DocToggleComment, DocUndo, DocUp, DocWordRight, MekuShell, Mode, NamingMode, NewTab,
+        NextTab, OpenFolder, Save, ToggleSidebar,
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
@@ -1793,6 +1878,14 @@ mod ui_tests {
                 KeyBinding::new("ctrl-backspace", DocDeleteWordBack, Some("Meku")),
                 KeyBinding::new("ctrl-delete", DocDeleteWordFwd, Some("Meku")),
                 KeyBinding::new("ctrl-shift-backspace", DocDeleteToLineStart, Some("Meku")),
+                KeyBinding::new("alt-up", DocMoveLineUp, Some("Meku")),
+                KeyBinding::new("alt-down", DocMoveLineDown, Some("Meku")),
+                KeyBinding::new("ctrl-shift-d", DocDuplicateLine, Some("Meku")),
+                KeyBinding::new("ctrl-shift-k", DocDeleteLine, Some("Meku")),
+                KeyBinding::new("ctrl-enter", DocInsertLineBelow, Some("Meku")),
+                KeyBinding::new("ctrl-shift-enter", DocInsertLineAbove, Some("Meku")),
+                KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
+                KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
                 KeyBinding::new("enter", DocEnter, Some("Meku")),
                 KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
                 KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
@@ -2337,6 +2430,27 @@ mod ui_tests {
                     && let Some(buffer) = shell.buffers.get(&rel).cloned()
                 {
                     buffer.update(cx, |b, _| b.move_caret(dest, false));
+                }
+            });
+        });
+    }
+
+    /// Extend the selection from `start` to `end` through the real buffer.
+    fn select_doc_range(
+        cx: &mut TestAppContext,
+        view: &Entity<MekuShell>,
+        start: usize,
+        end: usize,
+    ) {
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                if let Some(rel) = shell.doc_rel()
+                    && let Some(buffer) = shell.buffers.get(&rel).cloned()
+                {
+                    buffer.update(cx, |b, _| {
+                        b.move_caret(start, false);
+                        b.move_caret(end, true);
+                    });
                 }
             });
         });
@@ -2926,6 +3040,167 @@ mod ui_tests {
                 .any(|(r, t)| t == &meku_markdown::highlight::Tok::Keyword
                     && &text[r.clone()] == "let"),
             "keyword `let` should be a token: {spans:?}"
+        );
+    }
+
+    // -- line editing shortcuts (F3) -----------------------------------
+
+    #[test]
+    fn alt_up_down_swaps_lines_with_the_caret() {
+        run_ui_test("line_move", line_move_body);
+    }
+
+    fn line_move_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one\ntwo\nthree\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 5); // inside "two"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("alt-up", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "two\none\nthree\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 1, "caret rides the moved line");
+        cx.update_window(window, |_, window, cx| {
+            window.press("alt-down", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one\ntwo\nthree\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 5, "and back again");
+    }
+
+    #[test]
+    fn ctrl_shift_k_deletes_the_caret_line() {
+        run_ui_test("line_delete", line_delete_body);
+    }
+
+    fn line_delete_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one\ntwo\nthree\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 6); // inside "two"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-shift-k", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one\nthree\n");
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            4,
+            "caret lands where the line was"
+        );
+        assert!(buffer_text(cx, &view, &rel).1, "editor must be dirty");
+    }
+
+    #[test]
+    fn ctrl_enter_puts_a_blank_line_below_and_above() {
+        run_ui_test("line_insert", line_insert_body);
+    }
+
+    fn line_insert_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one\ntwo\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 1); // inside "one"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-enter", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one\n\ntwo\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 4, "caret lands on the new line");
+        // Now from the "two" line: an empty blank appears above it.
+        move_doc_caret(cx, &view, 5); // start of "two"
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-shift-enter", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one\n\n\ntwo\n");
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            5,
+            "caret stays on the fresh line"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_d_duplicates_the_line() {
+        run_ui_test("line_dup", line_dup_body);
+    }
+
+    fn line_dup_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one\ntwo\nthree\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 5); // inside "two"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-shift-d", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one\ntwo\ntwo\nthree\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 9, "caret rides into the copy");
+    }
+
+    #[test]
+    fn ctrl_j_joins_with_the_next_line() {
+        run_ui_test("line_join", line_join_body);
+    }
+
+    fn line_join_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one\n  two\nthree\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-j", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "one two\nthree\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 4, "caret sits at the seam");
+    }
+
+    #[test]
+    fn ctrl_slash_comments_only_inside_code_fences() {
+        run_ui_test("toggle_comment", toggle_comment_body);
+    }
+
+    fn toggle_comment_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) =
+            open_note_in(cx, 1200.0, 800.0, "# Prose\n\n```rust\nlet x = 1;\n```\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        // Prose line: no fence language, nothing happens.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-/", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "# Prose\n\n```rust\nlet x = 1;\n```\n",
+            "markdown prose is not commented"
+        );
+        // Inside the rust fence: gets a `//` comment.
+        move_doc_caret(cx, &view, 20); // inside "let x = 1;"
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-/", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "# Prose\n\n```rust\n// let x = 1;\n```\n"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-/", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "# Prose\n\n```rust\nlet x = 1;\n```\n",
+            "second press uncomments"
         );
     }
 }

@@ -38,14 +38,14 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 
 ## 3. Line Editing Shortcuts
 
-- [ ] Move line up / down (Alt+Up / Alt+Down)
-- [ ] Duplicate line or selection (Ctrl+Shift+D)
-- [ ] Delete line (Ctrl+Shift+K)
-- [ ] Insert line below (Ctrl+Enter) and above (Ctrl+Shift+Enter)
-- [ ] Join lines (Ctrl+J)
-- [ ] Toggle comment in code (Ctrl+/)
-- [ ] Sort selected lines
-- [ ] Transform case: upper, lower, title, toggle
+- [x] Move line up / down (Alt+Up / Alt+Down)
+- [x] Duplicate line or selection (Ctrl+Shift+D)
+- [x] Delete line (Ctrl+Shift+K)
+- [x] Insert line below (Ctrl+Enter) and above (Ctrl+Shift+Enter)
+- [x] Join lines (Ctrl+J)
+- [x] Toggle comment in code (Ctrl+/)
+- [x] Sort selected lines
+- [x] Transform case: upper, lower, title, toggle
 
 ---
 

@@ -18,7 +18,7 @@ _Plan efficiently before writing app code. Research done by 4 subagents (feature
 - [x] Freeze GFM subset: headings, emphasis/strong/strike, lists, task lists, code fence/inline, tables, quote, hr, links/images, autolinks, raw-HTML passthrough (sanitized)
 - [x] Freeze explicit deferrals: `[[wikilinks]]`, embeds, backlinks, graph/canvas, tags pane, frontmatter UI, math, mermaid, vim, plugins/sync/publish, terminal/AI
 - [ ] Write MVP acceptance criteria into `docs/acceptance.md` (12 criteria: open mekuto <1s/100 files, file ops, live-preview round-trip, tabs+dirty, Ctrl-P <100ms/1k files, search, palette, outline ≤200ms, status bar, settings persist, crash recovery ≤2s loss, GFM fixture zero panics)
-- [x] Freeze keymap defaults (Linux): `Ctrl-P` finder · `Ctrl-Shift-P` palette · `Ctrl-B` explorer · `Ctrl-,` settings · `Ctrl-N/W/T` note/close/tab · `Ctrl-S` save · `Ctrl-F` find · `Ctrl-E` edit/live/read cycle (Build 5) · `Ctrl+←/→` word jump · `Ctrl+Backspace/Delete` word delete · `Ctrl+Shift+Backspace` delete-line-start · `Ctrl+Home/End` doc ends · PageUp/Down · smart `Home` (Build 5.x) 
+- [x] Freeze keymap defaults (Linux): `Ctrl-P` finder · `Ctrl-Shift-P` palette · `Ctrl-B` explorer · `Ctrl-,` settings · `Ctrl-N/W/T` note/close/tab · `Ctrl-S` save · `Ctrl-F` find · `Ctrl-E` edit/live/read cycle (Build 5) · `Ctrl+←/→` word jump · `Ctrl+Backspace/Delete` word delete · `Ctrl+Shift+Backspace` delete-line-start · `Ctrl+Home/End` doc ends · PageUp/Down · smart `Home` (Build 5.x) · `Alt+↑/↓` move line · `Ctrl+Shift+D/K` duplicate/delete line · `Ctrl+Enter/Shift+Enter` insert below/above · `Ctrl+J` join lines · `Ctrl+/` comment toggle in code (F3)
 - [ ] Freeze `session.json` schema v1 (`version`, `active_tab`, `open_tabs[{path,cursor,scroll,pinned}]`, `explorer{expanded,auto_reveal}`) + corrupt-file rule (backup to `session.corrupt-<ts>.json`, start empty, never crash)
 
 **Mekuto layout (frozen):**
@@ -164,15 +164,16 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [ ] Jump to heading from outline (builds with palette/outline)
 - [ ] Bookmarks / jump back (Alt+Left/Right)
 
-### F3 Line Editing Shortcuts (§3) — **next chunk**
-- [ ] Move line up/down (Alt+Up/Alt+Down)
-- [ ] Duplicate line/selection (Ctrl+Shift+D)
-- [ ] Delete line (Ctrl+Shift+K)
-- [ ] Insert line below/above (Ctrl+Enter / Ctrl+Shift+Enter)
-- [ ] Join lines (Ctrl+J)
-- [ ] Toggle comment in code (Ctrl+/)
-- [ ] Sort selected lines
-- [ ] Transform case (upper/lower/title/toggle)
+### F3 Line Editing Shortcuts (§3) — **landed 2026-10-19**
+- [x] Move line up/down (Alt+Up/Alt+Down) — block-aware (selection spans move as a block), caret/selection ride along; no-op at the first line / over the phantom line after a trailing newline
+- [x] Duplicate line/selection (Ctrl+Shift+D) — copy lands below; a last line without a newline gains its own separator; caret keeps its offset in the copy
+- [x] Delete line (Ctrl+Shift+K) — block-aware, newlines included, caret to block start
+- [x] Insert line below/above (Ctrl+Enter / Ctrl+Shift+Enter)
+- [x] Join lines (Ctrl+J) — drops the newline + next line's indent; one space at the seam unless either side is empty or already has whitespace
+- [x] Toggle comment in code (Ctrl+/) — only inside a code fence; prefix from the fence language (`//` rust/js/ts, `#` python/bash/etc.), indent kept, blank lines untouched, one undo step; no-op outside fences
+- [x] Sort selected lines — `OpenBuffer::sort_selected_lines` (stable byte order), wired as a palette command in Build 6/F11 (no default key)
+- [x] Transform case (upper/lower/title/toggle) — `OpenBuffer::transform_case(CaseKind)`; collapsed caret targets the alphanumeric word under it; palette command in Build 6/F11
+- Buffer unit tests (15) + 6 headless UI tests drive the real keystrokes; `test(38+53)` + fmt/clippy green (2026-10-19).
 
 ### F4 Enter and Smart Continuation (§4) — **next chunk**
 - [ ] Enter continues bullets / exits empty bullets, numbered lists increment + renumber, task items `[ ]`

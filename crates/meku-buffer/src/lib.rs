@@ -30,6 +30,35 @@ fn char_class(c: char) -> u8 {
     }
 }
 
+/// Case transforms for [`OpenBuffer::transform_case`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseKind {
+    Upper,
+    Lower,
+    Title,
+    Toggle,
+}
+
+/// Upper-case the first alphanumeric of every word; the rest goes lower.
+fn to_title_case(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at_boundary = true;
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            if at_boundary {
+                out.extend(c.to_uppercase());
+                at_boundary = false;
+            } else {
+                out.extend(c.to_lowercase());
+            }
+        } else {
+            at_boundary = true;
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 struct Snapshot {
     text: Rope,
@@ -359,6 +388,352 @@ impl OpenBuffer {
         } else if self.caret > 0 {
             self.replace(self.prev_boundary(self.caret)..self.caret, "", false);
         }
+    }
+
+    // -- line editing ----------------------------------------------------------
+
+    /// Byte span of the `LineType::LF` line `idx`, trailing newline included
+    /// (the last line may lack one).
+    fn line_span(&self, idx: usize) -> Range<usize> {
+        let start = self.text.line_to_byte_idx(idx, LineType::LF);
+        let end = if idx + 1 < self.text.len_lines(LineType::LF) {
+            self.text.line_to_byte_idx(idx + 1, LineType::LF)
+        } else {
+            self.text.len()
+        };
+        start..end
+    }
+
+    /// Lines touched by the selection: the caret's line when collapsed,
+    /// otherwise every line from the selection start to the char before its
+    /// end (a selection ending exactly at a line start does not claim that
+    /// line).
+    fn selected_lines(&self) -> Range<usize> {
+        let r = self.selection();
+        let first = self
+            .text
+            .byte_to_line_idx(r.start.min(self.text.len()), LineType::LF);
+        let last = if r.start == r.end {
+            first
+        } else {
+            self.text
+                .byte_to_line_idx((r.end - 1).min(self.text.len()), LineType::LF)
+        };
+        first..last + 1
+    }
+
+    /// One user-level edit over a byte range with an explicit caret/anchor
+    /// outcome (unlike [`OpenBuffer::replace`], which collapses onto the
+    /// insertion end). Always one undo step.
+    fn edit_region(&mut self, range: Range<usize>, insert: &str, caret: usize, anchor: usize) {
+        if range.start == range.end && insert.is_empty() {
+            return;
+        }
+        self.push_undo();
+        self.redo.clear();
+        self.apply_edit(range, insert);
+        self.caret = caret.min(self.text.len());
+        self.anchor = anchor.min(self.text.len());
+        self.marked = None;
+        self.coalescing = false;
+    }
+
+    /// Swap the selected line block with the line above it (`Alt+Up`). The
+    /// caret and selection ride along inside the block. No-op on the first
+    /// line.
+    pub fn move_line_up(&mut self) {
+        let lines = self.selected_lines();
+        if lines.start == 0 {
+            return;
+        }
+        let prev = self.line_span(lines.start - 1);
+        let block_start = prev.end;
+        let block_end = self.line_span(lines.end - 1).end;
+        let region_start = prev.start;
+        let prev_text = self.text.slice(prev).to_string();
+        let block_text = self.text.slice(block_start..block_end).to_string();
+        let region_ends_nl = block_text.ends_with('\n');
+        let pb = prev_text.strip_suffix('\n').unwrap_or(&prev_text);
+        let bb = block_text.strip_suffix('\n').unwrap_or(&block_text);
+        let tail = if region_ends_nl { "\n" } else { "" };
+        let new = format!("{bb}\n{pb}{tail}");
+        // The block keeps its content and now starts where the previous
+        // line did; a last line without a newline gains its separator after
+        // the content, so inner positions shift purely by the block move.
+        let map = |p: usize| -> usize {
+            if p < block_start {
+                p
+            } else if p <= block_end {
+                region_start + (p - block_start)
+            } else {
+                p
+            }
+        };
+        let (caret, anchor) = (map(self.caret), map(self.anchor));
+        self.edit_region(region_start..block_end, &new, caret, anchor);
+    }
+
+    /// Swap the selected line block with the line below it (`Alt+Down`).
+    /// No-op when the block already ends at the document's last line, or
+    /// when the only line below is the phantom empty line after a trailing
+    /// newline.
+    pub fn move_line_down(&mut self) {
+        let lines = self.selected_lines();
+        let last = self.text.len_lines(LineType::LF) - 1;
+        if lines.end > last {
+            return;
+        }
+        let block_start = self.line_span(lines.start).start;
+        let next = self.line_span(lines.end);
+        if next.start == next.end && lines.end + 1 > last {
+            return;
+        }
+        let block_end = next.start;
+        let block_text = self.text.slice(block_start..block_end).to_string();
+        let next_text = self.text.slice(next.clone()).to_string();
+        let region_ends_nl = next_text.ends_with('\n');
+        let bb = block_text.strip_suffix('\n').unwrap_or(&block_text);
+        let nb = next_text.strip_suffix('\n').unwrap_or(&next_text);
+        let tail = if region_ends_nl { "\n" } else { "" };
+        let new = format!("{nb}\n{bb}{tail}");
+        let shift = nb.len() + 1;
+        let map = |p: usize| -> usize {
+            if p < block_start {
+                p
+            } else if p <= block_end {
+                block_start + shift + (p - block_start)
+            } else {
+                p
+            }
+        };
+        let (caret, anchor) = (map(self.caret), map(self.anchor));
+        self.edit_region(block_start..next.end, &new, caret, anchor);
+    }
+
+    /// Copy the selected line block below itself (`Ctrl+Shift+D`); the caret
+    /// and selection ride into the copy at the same offset.
+    pub fn duplicate_line(&mut self) {
+        let lines = self.selected_lines();
+        let block_start = self.line_span(lines.start).start;
+        let block_end = self.line_span(lines.end - 1).end;
+        let copy = self.text.slice(block_start..block_end).to_string();
+        // A final block without a newline needs one of its own so the copy
+        // becomes a line of its own.
+        let spaced = copy.ends_with('\n');
+        let insert = if spaced {
+            copy.clone()
+        } else {
+            format!("\n{copy}")
+        };
+        let content_start = block_end + usize::from(!spaced);
+        let map = |p: usize| -> usize {
+            if p < block_start {
+                p
+            } else if p <= block_end {
+                content_start + (p - block_start)
+            } else {
+                p
+            }
+        };
+        let (caret, anchor) = (map(self.caret), map(self.anchor));
+        self.edit_region(block_end..block_end, &insert, caret, anchor);
+    }
+
+    /// Delete the selected line block, newlines included (`Ctrl+Shift+K`).
+    /// The caret lands where the block began.
+    pub fn delete_line(&mut self) {
+        if self.text.len() == 0 {
+            return;
+        }
+        let lines = self.selected_lines();
+        let block_start = self.line_span(lines.start).start;
+        let block_end = self.line_span(lines.end - 1).end;
+        self.edit_region(block_start..block_end, "", block_start, block_start);
+    }
+
+    /// Insert an empty line below the caret's line (`Ctrl+Enter`) and move
+    /// the caret onto it.
+    pub fn insert_line_below(&mut self) {
+        let at = self.line_span(self.caret_line()).end;
+        self.edit_region(at..at, "\n", at, at);
+    }
+
+    /// Insert an empty line above the caret's line (`Ctrl+Shift+Enter`) and
+    /// move the caret onto it.
+    pub fn insert_line_above(&mut self) {
+        let at = self.line_span(self.caret_line()).start;
+        self.edit_region(at..at, "\n", at, at);
+    }
+
+    fn caret_line(&self) -> usize {
+        self.text
+            .byte_to_line_idx(self.caret.min(self.text.len()), LineType::LF)
+    }
+
+    /// Merge the caret's line with the one below (`Ctrl+J`): the newline and
+    /// the next line's indentation go away; a single space is kept at the
+    /// seam unless either side is empty or already has whitespace there.
+    pub fn join_lines(&mut self) {
+        let idx = self.caret_line();
+        if idx + 1 >= self.text.len_lines(LineType::LF) {
+            return;
+        }
+        let cur = self.line_span(idx);
+        let next = self.line_span(idx + 1);
+        let cur_text = self.text.slice(cur.clone()).to_string();
+        let next_text = self.text.slice(next.clone()).to_string();
+        let c = cur_text.strip_suffix('\n').unwrap_or(&cur_text);
+        let n = next_text.strip_suffix('\n').unwrap_or(&next_text);
+        let lead = n.len() - n.trim_start().len();
+        let seam_start = cur.start + c.len();
+        let seam_end = next.start + lead;
+        let sep = if c.is_empty() || n.is_empty() || c.ends_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        };
+        let caret = seam_start + sep.len();
+        self.edit_region(seam_start..seam_end, sep, caret, caret);
+    }
+
+    /// Sort the selected lines (byte order, stable). No-op without a
+    /// selection. A palette command in v0.1 — no default key.
+    pub fn sort_selected_lines(&mut self) {
+        let r = self.selection();
+        if r.start == r.end {
+            return;
+        }
+        let lines = self.selected_lines();
+        let block_start = self.line_span(lines.start).start;
+        let block_end = self.line_span(lines.end - 1).end;
+        let text = self.text.slice(block_start..block_end).to_string();
+        let (suffix, body) = match text.strip_suffix('\n') {
+            Some(body) => ("\n", body),
+            None => ("", &text[..]),
+        };
+        let mut ls: Vec<&str> = body.split('\n').collect();
+        ls.sort();
+        let new = format!("{}{}{}", ls.join("\n"), suffix, "");
+        let caret = block_start + new.len();
+        self.edit_region(block_start..block_end, &new, caret, block_start);
+    }
+
+    /// Case transforms for the selection, or the alphanumeric word the caret
+    /// sits in when the selection is collapsed. A palette command in v0.1.
+    pub fn transform_case(&mut self, kind: CaseKind) {
+        let r = self.selection();
+        let range = if r.start != r.end {
+            r
+        } else {
+            let mut s = self.caret;
+            let mut e = self.caret;
+            while let Some((c, start)) = self.char_before(s) {
+                if char_class(c) != CHAR_WORD {
+                    break;
+                }
+                s = start;
+            }
+            while let Some((c, end)) = self.char_after(e) {
+                if char_class(c) != CHAR_WORD {
+                    break;
+                }
+                e = end;
+            }
+            if s == e {
+                return;
+            }
+            s..e
+        };
+        let text = self.text.slice(range.clone()).to_string();
+        let new = match kind {
+            CaseKind::Upper => text.to_uppercase(),
+            CaseKind::Lower => text.to_lowercase(),
+            CaseKind::Title => to_title_case(&text),
+            CaseKind::Toggle => text
+                .chars()
+                .map(|c| {
+                    if c.is_uppercase() {
+                        c.to_lowercase().to_string()
+                    } else {
+                        c.to_uppercase().to_string()
+                    }
+                })
+                .collect(),
+        };
+        let end = range.start + new.len();
+        self.edit_region(range.clone(), &new, end, range.start);
+    }
+
+    /// Toggle `prefix` line comments over the selected lines (or the caret's
+    /// line): commented → uncommented, otherwise commented. Blank lines are
+    /// left alone. The caller picks the prefix from the fence language.
+    pub fn toggle_line_comment(&mut self, prefix: &str) {
+        if prefix.is_empty() {
+            return;
+        }
+        let lines = self.selected_lines();
+        let spans: Vec<Range<usize>> = (lines.start..lines.end)
+            .map(|i| self.line_span(i))
+            .collect();
+        let contents: Vec<String> = spans
+            .iter()
+            .map(|sp| self.text.slice(sp.clone()).to_string())
+            .collect();
+        let commented = contents.iter().all(|line| {
+            let t = line.trim_end_matches('\n').trim_start();
+            t.is_empty() || t.starts_with(prefix)
+        });
+        // Per-line byte deltas, applied bottom-up so offsets stay valid.
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
+        if commented {
+            for (sp, line) in spans.iter().zip(&contents) {
+                let body = line.trim_end_matches('\n');
+                let indent = body.len() - body.trim_start().len();
+                let rest = &body[indent..];
+                if rest.is_empty() {
+                    continue;
+                }
+                let mut cut = indent + prefix.len();
+                if rest[prefix.len()..].starts_with(' ') {
+                    cut += 1;
+                }
+                edits.push((sp.start + indent, sp.start + cut, String::new()));
+            }
+        } else {
+            for (sp, line) in spans.iter().zip(&contents) {
+                let body = line.trim_end_matches('\n');
+                if body.trim().is_empty() {
+                    continue;
+                }
+                let indent = body.len() - body.trim_start().len();
+                edits.push((sp.start + indent, sp.start + indent, format!("{prefix} ")));
+            }
+        }
+        if edits.is_empty() {
+            return;
+        }
+        self.push_undo();
+        self.redo.clear();
+        for (start, end, insert) in edits.iter().rev() {
+            self.apply_edit(*start..*end, insert);
+        }
+        // Map the caret/anchor through the cumulative deltas of the edits
+        // before their line.
+        let map = |p: usize, edits: &[(usize, usize, String)]| -> usize {
+            let mut out = p;
+            for (start, end, insert) in edits {
+                if *start < p || (*start == p && *end == *start && !insert.is_empty()) {
+                    out += insert.len().saturating_sub(end - start);
+                }
+            }
+            out
+        };
+        let caret = map(self.caret.min(self.text.len()), &edits);
+        let anchor = map(self.anchor.min(self.text.len()), &edits);
+        self.caret = caret.min(self.text.len());
+        self.anchor = anchor.min(self.text.len());
+        self.marked = None;
+        self.coalescing = false;
     }
 
     // -- editing ------------------------------------------------------------
@@ -772,5 +1147,260 @@ mod tests {
             "next run is 'word…' + space (len-9)"
         );
         assert_eq!(b.word_right(4695), s.len());
+    }
+
+    // -- line editing ------------------------------------------------
+
+    #[test]
+    fn move_line_up_swaps_and_rides_the_caret() {
+        let mut b = buf("one\ntwo\nthree\n");
+        b.move_caret(5, false); // inside "two"
+        b.move_line_up();
+        assert_eq!(b.text_string(), "two\none\nthree\n");
+        assert_eq!(b.caret(), 1, "caret keeps its offset in the moved line");
+        assert!(b.dirty);
+        // Undo restores both text and caret.
+        assert!(b.undo());
+        assert_eq!(b.text_string(), "one\ntwo\nthree\n");
+        assert_eq!(b.caret(), 5);
+    }
+
+    #[test]
+    fn move_line_down_swaps_and_rides_the_caret() {
+        let mut b = buf("one\ntwo\nthree\n");
+        b.move_caret(1, false); // inside "one"
+        b.move_line_down();
+        assert_eq!(b.text_string(), "two\none\nthree\n");
+        assert_eq!(b.caret(), 5);
+    }
+
+    #[test]
+    fn move_line_up_at_first_line_is_a_noop() {
+        let mut b = buf("one\ntwo\n");
+        b.move_line_up();
+        assert_eq!(b.text_string(), "one\ntwo\n");
+        assert!(!b.dirty, "no edit, no dirty");
+    }
+
+    #[test]
+    fn move_line_down_at_last_line_is_a_noop() {
+        let mut b = buf("one\ntwo\n");
+        b.move_caret(5, false);
+        b.move_line_down();
+        assert_eq!(b.text_string(), "one\ntwo\n");
+        assert!(!b.dirty);
+    }
+
+    #[test]
+    fn move_line_up_lifts_last_line_without_newline() {
+        let mut b = buf("a\nb");
+        b.move_caret(3, false);
+        b.move_line_up();
+        assert_eq!(b.text_string(), "b\na");
+        assert_eq!(b.caret(), 1, "caret stays after 'b'");
+    }
+
+    #[test]
+    fn move_line_down_over_last_line_keeps_ending() {
+        let mut b = buf("a\nb\nc");
+        b.move_caret(3, false); // inside "b\n"
+        b.move_line_down();
+        assert_eq!(b.text_string(), "a\nc\nb", "no trailing newline invented");
+        assert_eq!(b.caret(), 5);
+    }
+
+    #[test]
+    fn move_line_block_selection_moves_whole_block() {
+        let mut b = buf("one\ntwo\nthree\nfour\n");
+        // Select "two\nthree\n" (bytes 4..14).
+        b.move_caret(4, false);
+        b.move_caret(14, true);
+        b.move_line_up();
+        assert_eq!(b.text_string(), "two\nthree\none\nfour\n");
+        assert_eq!(b.anchor(), 0, "selection rides the block, start corner");
+        assert_eq!(b.caret(), 10);
+    }
+
+    #[test]
+    fn duplicate_line_copies_below_and_moves_caret() {
+        let mut b = buf("one\ntwo\nthree\n");
+        b.move_caret(6, false); // inside "two"
+        b.duplicate_line();
+        assert_eq!(b.text_string(), "one\ntwo\ntwo\nthree\n");
+        assert_eq!(b.caret(), 10, "caret lands on the copy");
+    }
+
+    #[test]
+    fn duplicate_last_line_adds_the_newline() {
+        let mut b = buf("a\nb");
+        b.move_caret(3, false);
+        b.duplicate_line();
+        assert_eq!(b.text_string(), "a\nb\nb");
+        assert_eq!(b.caret(), 5, "end of the original becomes end of the copy");
+    }
+
+    #[test]
+    fn delete_line_removes_content_and_newline() {
+        let mut b = buf("one\ntwo\nthree\n");
+        b.move_caret(6, false);
+        b.delete_line();
+        assert_eq!(b.text_string(), "one\nthree\n");
+        assert_eq!(b.caret(), 4);
+    }
+
+    #[test]
+    fn delete_last_line_leaves_prior_newline() {
+        let mut b = buf("a\nb");
+        b.move_caret(3, false);
+        b.delete_line();
+        assert_eq!(b.text_string(), "a\n");
+    }
+
+    #[test]
+    fn delete_selected_lines_removes_the_block() {
+        let mut b = buf("one\ntwo\nthree\nfour\n");
+        b.move_caret(4, false);
+        b.move_caret(14, true);
+        b.delete_line();
+        assert_eq!(b.text_string(), "one\nfour\n");
+    }
+
+    #[test]
+    fn insert_line_below_after_caret_line() {
+        let mut b = buf("one\ntwo\n");
+        b.move_caret(1, false); // inside "one"
+        b.insert_line_below();
+        assert_eq!(b.text_string(), "one\n\ntwo\n");
+        assert_eq!(b.caret(), 4, "caret lands on the new empty line");
+    }
+
+    #[test]
+    fn insert_line_below_at_end_of_text() {
+        let mut b = buf("a\nb");
+        b.move_caret(3, false);
+        b.insert_line_below();
+        assert_eq!(b.text_string(), "a\nb\n");
+        assert_eq!(b.caret(), 3);
+    }
+
+    #[test]
+    fn insert_line_above_before_caret_line() {
+        let mut b = buf("one\ntwo\n");
+        b.move_caret(1, false);
+        b.insert_line_above();
+        assert_eq!(b.text_string(), "\none\ntwo\n");
+        assert_eq!(b.caret(), 0);
+    }
+
+    #[test]
+    fn join_lines_merges_with_one_space() {
+        let mut b = buf("one\ntwo\nthree\n");
+        b.join_lines();
+        assert_eq!(b.text_string(), "one two\nthree\n");
+        assert_eq!(b.caret(), 4, "caret sits at the seam");
+    }
+
+    #[test]
+    fn join_lines_drops_next_indent_and_keeps_trailing_space() {
+        let mut b = buf("one \n  two\n");
+        b.join_lines();
+        assert_eq!(b.text_string(), "one two\n", "no double space at the seam");
+        // And the tight variant gains exactly one space.
+        let mut b = buf("one\n  two\n");
+        b.join_lines();
+        assert_eq!(b.text_string(), "one two\n");
+    }
+
+    #[test]
+    fn join_lines_with_empty_neighbour_is_bare() {
+        let mut b = buf("a\n\nb\n");
+        b.join_lines();
+        assert_eq!(b.text_string(), "a\nb\n", "empty next line just disappears");
+    }
+
+    #[test]
+    fn sort_selected_lines_orders_the_block() {
+        let mut b = buf("pear\napple\nfig\n");
+        b.move_caret(0, false);
+        b.move_caret(14, true);
+        b.sort_selected_lines();
+        assert_eq!(b.text_string(), "apple\nfig\npear\n");
+    }
+
+    #[test]
+    fn sort_without_selection_is_a_noop() {
+        let mut b = buf("pear\napple\n");
+        b.sort_selected_lines();
+        assert_eq!(b.text_string(), "pear\napple\n");
+        assert!(!b.dirty);
+    }
+
+    #[test]
+    fn transform_case_upper_lower_toggle() {
+        let mut b = buf("hello World\n");
+        b.move_caret(0, false);
+        b.move_caret(11, true);
+        b.transform_case(CaseKind::Upper);
+        assert_eq!(b.text_string(), "HELLO WORLD\n");
+        assert_eq!(b.selection(), 0..11, "selection survives the transform");
+        b.transform_case(CaseKind::Toggle);
+        assert_eq!(b.text_string(), "hello world\n");
+        b.move_caret(0, false);
+        b.move_caret(11, true);
+        b.transform_case(CaseKind::Title);
+        assert_eq!(b.text_string(), "Hello World\n");
+        b.transform_case(CaseKind::Lower);
+        assert_eq!(b.text_string(), "hello world\n");
+    }
+
+    #[test]
+    fn transform_case_collapsed_targets_the_word() {
+        let mut b = buf("one Two three");
+        b.move_caret(6, false); // inside "Two"
+        b.transform_case(CaseKind::Upper);
+        assert_eq!(b.text_string(), "one TWO three");
+        assert_eq!(b.selection(), 4..7);
+    }
+
+    #[test]
+    fn toggle_line_comment_adds_then_removes() {
+        let mut b = buf("let a = 1;\nlet b = 2;\n");
+        b.select_all();
+        b.toggle_line_comment("//");
+        assert_eq!(b.text_string(), "// let a = 1;\n// let b = 2;\n");
+        b.toggle_line_comment("//");
+        assert_eq!(b.text_string(), "let a = 1;\nlet b = 2;\n");
+    }
+
+    #[test]
+    fn toggle_line_comment_only_touches_selected_lines() {
+        let mut b = buf("a\nb\nc\n");
+        b.move_caret(2, false);
+        b.move_caret(4, true); // selects "b\n"
+        b.toggle_line_comment("//");
+        assert_eq!(b.text_string(), "a\n// b\nc\n");
+    }
+
+    #[test]
+    fn toggle_line_comment_respects_indent_and_blank_lines() {
+        let mut b = buf("  indented\n\nplain\n");
+        b.select_all();
+        b.toggle_line_comment("#");
+        assert_eq!(
+            b.text_string(),
+            "  # indented\n\n# plain\n",
+            "blank lines stay blank, indent kept"
+        );
+        b.toggle_line_comment("#");
+        assert_eq!(b.text_string(), "  indented\n\nplain\n");
+    }
+
+    #[test]
+    fn toggled_comment_survives_undo_as_one_step() {
+        let mut b = buf("x\n");
+        b.toggle_line_comment("//");
+        assert_eq!(b.text_string(), "// x\n");
+        assert!(b.undo());
+        assert_eq!(b.text_string(), "x\n");
     }
 }
