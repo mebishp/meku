@@ -57,6 +57,13 @@ pub(crate) enum DocKey {
     InsertLineAbove,
     JoinLines,
     ToggleComment,
+    SoftBreak,
+    Indent,
+    Outdent,
+    ListBullet,
+    ListOrdered,
+    ListTask,
+    ToggleTask,
     Enter,
     SelectAll,
     Undo,
@@ -84,28 +91,31 @@ fn smart_home_dest(row: &Row, text: &str, caret: usize) -> usize {
     row.src.start + offset
 }
 
-/// The language tagged on the code fence enclosing `caret`, walking the rows
-/// the same way the highlighter does (open delimiter sets it, close clears
-/// it). `None` outside fenced code or for untagged fences.
-fn fence_lang_at(model: &DocModel, caret: usize) -> Option<String> {
+/// Where `caret` sits relative to fenced code, walking the rows above it the
+/// same way the highlighter does: an open delimiter sets the language, a
+/// close clears it, and any non-code row closes it too. Returns
+/// `(inside_fence, fence_language)`.
+fn fence_at(model: &DocModel, caret: usize) -> (bool, Option<String>) {
     let row_ix = row_at(&model.rows, caret);
-    let mut fence_lang: Option<String> = None;
+    let mut open: Option<String> = None;
     for row in &model.rows[..=row_ix] {
         let line = &model.text[row.src.clone()];
         let trimmed = line.trim_start();
         let is_delim = trimmed.starts_with("```") || trimmed.starts_with("~~~");
         if row.kind != RowKind::Code {
-            fence_lang = None;
+            open = None;
         } else if is_delim {
-            let tag = if fence_lang.is_none() {
-                trimmed[3..].split_whitespace().next()
-            } else {
-                None
+            open = match open {
+                None => trimmed[3..]
+                    .split_whitespace()
+                    .next()
+                    .map(str::to_string)
+                    .filter(|t| !t.is_empty()),
+                Some(_) => None,
             };
-            fence_lang = tag.map(str::to_string);
         }
     }
-    fence_lang.filter(|tag| !tag.is_empty())
+    (open.is_some(), open)
 }
 
 /// Comment prefix for the few v0.1-highlighted languages.
@@ -524,7 +534,11 @@ impl MekuShell {
                 true
             }
             DocKey::DeleteLine => {
-                buffer.update(cx, |b, _| b.delete_line());
+                buffer.update(cx, |b, _| {
+                    b.delete_line();
+                    // A removed ordered item closes the numbering gap.
+                    b.renumber_ordered_at_caret();
+                });
                 true
             }
             DocKey::InsertLineBelow => {
@@ -541,9 +555,8 @@ impl MekuShell {
             }
             DocKey::ToggleComment => {
                 let caret = buffer.read(cx).caret();
-                let prefix = fence_lang_at(&model, caret)
-                    .as_deref()
-                    .and_then(comment_prefix);
+                let (inside, lang) = fence_at(&model, caret);
+                let prefix = lang.as_deref().filter(|_| inside).and_then(comment_prefix);
                 match prefix {
                     Some(prefix) => {
                         buffer.update(cx, |b, _| b.toggle_line_comment(prefix));
@@ -553,7 +566,7 @@ impl MekuShell {
                 }
             }
             DocKey::Backspace => {
-                buffer.update(cx, |b, _| b.delete_backward());
+                buffer.update(cx, |b, _| b.backspace());
                 true
             }
             DocKey::Delete => {
@@ -561,7 +574,43 @@ impl MekuShell {
                 true
             }
             DocKey::Enter => {
-                buffer.update(cx, |b, _| b.insert("\n"));
+                // Enumeration-aware Enter is skipped inside fenced code:
+                // a `1. item` line there must stay plain source.
+                let caret = buffer.read(cx).caret();
+                if fence_at(&model, caret).0 {
+                    buffer.update(cx, |b, _| b.insert("\n"));
+                } else {
+                    buffer.update(cx, |b, _| b.smart_enter());
+                }
+                true
+            }
+            DocKey::Indent | DocKey::Outdent => {
+                let code = fence_at(&model, buffer.read(cx).caret()).0;
+                buffer.update(cx, |b, _| {
+                    if key == DocKey::Indent {
+                        b.indent(code);
+                    } else {
+                        b.outdent(code);
+                    }
+                });
+                true
+            }
+            DocKey::ListBullet | DocKey::ListOrdered | DocKey::ListTask | DocKey::ToggleTask => {
+                // List markers are markup; inside a fence they would be code.
+                if fence_at(&model, buffer.read(cx).caret()).0 {
+                    false
+                } else {
+                    buffer.update(cx, |b, _| match key {
+                        DocKey::ListBullet => b.convert_list(meku_buffer::ListKind::Bullet),
+                        DocKey::ListOrdered => b.convert_list(meku_buffer::ListKind::Ordered),
+                        DocKey::ListTask => b.convert_list(meku_buffer::ListKind::Task),
+                        _ => b.toggle_task(),
+                    });
+                    true
+                }
+            }
+            DocKey::SoftBreak => {
+                buffer.update(cx, |b, _| b.soft_break());
                 true
             }
             DocKey::SelectAll => {

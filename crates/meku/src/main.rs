@@ -71,6 +71,13 @@ actions!(
         DocInsertLineAbove,
         DocJoinLines,
         DocToggleComment,
+        DocSoftBreak,
+        DocIndent,
+        DocOutdent,
+        DocListBullet,
+        DocListOrdered,
+        DocListTask,
+        DocToggleTask,
         DocEnter,
         DocSelectAll,
         DocUndo,
@@ -704,6 +711,42 @@ impl MekuShell {
         cx: &mut Context<Self>,
     ) {
         self.doc_key(document::DocKey::ToggleComment, false, window, cx);
+    }
+    fn on_doc_soft_break(&mut self, _: &DocSoftBreak, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::SoftBreak, false, window, cx);
+    }
+    fn on_doc_indent(&mut self, _: &DocIndent, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Indent, false, window, cx);
+    }
+    fn on_doc_outdent(&mut self, _: &DocOutdent, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::Outdent, false, window, cx);
+    }
+    fn on_doc_list_bullet(
+        &mut self,
+        _: &DocListBullet,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::ListBullet, false, window, cx);
+    }
+    fn on_doc_list_ordered(
+        &mut self,
+        _: &DocListOrdered,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::ListOrdered, false, window, cx);
+    }
+    fn on_doc_list_task(&mut self, _: &DocListTask, window: &mut Window, cx: &mut Context<Self>) {
+        self.doc_key(document::DocKey::ListTask, false, window, cx);
+    }
+    fn on_doc_toggle_task(
+        &mut self,
+        _: &DocToggleTask,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.doc_key(document::DocKey::ToggleTask, false, window, cx);
     }
     fn on_doc_up(&mut self, _: &DocUp, window: &mut Window, cx: &mut Context<Self>) {
         self.doc_key(document::DocKey::Up, false, window, cx);
@@ -1663,6 +1706,13 @@ impl Render for MekuShell {
             .on_action(cx.listener(Self::on_doc_insert_line_above))
             .on_action(cx.listener(Self::on_doc_join_lines))
             .on_action(cx.listener(Self::on_doc_toggle_comment))
+            .on_action(cx.listener(Self::on_doc_soft_break))
+            .on_action(cx.listener(Self::on_doc_indent))
+            .on_action(cx.listener(Self::on_doc_outdent))
+            .on_action(cx.listener(Self::on_doc_list_bullet))
+            .on_action(cx.listener(Self::on_doc_list_ordered))
+            .on_action(cx.listener(Self::on_doc_list_task))
+            .on_action(cx.listener(Self::on_doc_toggle_task))
             .on_action(cx.listener(Self::on_doc_enter))
             .on_action(cx.listener(Self::on_doc_select_all))
             .on_action(cx.listener(Self::on_doc_undo))
@@ -1749,6 +1799,12 @@ fn main() {
             KeyBinding::new("ctrl-shift-enter", DocInsertLineAbove, Some("Meku")),
             KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
             KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
+            KeyBinding::new("tab", DocIndent, Some("Meku")),
+            KeyBinding::new("shift-tab", DocOutdent, Some("Meku")),
+            KeyBinding::new("ctrl-shift-8", DocListBullet, Some("Meku")),
+            KeyBinding::new("ctrl-shift-7", DocListOrdered, Some("Meku")),
+            KeyBinding::new("ctrl-shift-9", DocListTask, Some("Meku")),
+            KeyBinding::new("ctrl-l", DocToggleTask, Some("Meku")),
             KeyBinding::new("enter", DocEnter, Some("Meku")),
             KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
             KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
@@ -1791,13 +1847,14 @@ mod ui_tests {
     use crate::{
         CancelOverlay, CloseTab, CycleMode, DocBackspace, DocCopy, DocCut, DocDelete,
         DocDeleteLine, DocDeleteToLineStart, DocDeleteWordBack, DocDeleteWordFwd, DocDocEnd,
-        DocDocStart, DocDown, DocDuplicateLine, DocEnd, DocEnter, DocHome, DocInsertLineAbove,
-        DocInsertLineBelow, DocJoinLines, DocLeft, DocMoveLineDown, DocMoveLineUp, DocPageDown,
+        DocDocStart, DocDown, DocDuplicateLine, DocEnd, DocEnter, DocHome, DocIndent,
+        DocInsertLineAbove, DocInsertLineBelow, DocJoinLines, DocLeft, DocListBullet,
+        DocListOrdered, DocListTask, DocMoveLineDown, DocMoveLineUp, DocOutdent, DocPageDown,
         DocPageUp, DocPaste, DocRedo, DocRight, DocSelectAll, DocSelectDocEnd, DocSelectDocStart,
         DocSelectDown, DocSelectEnd, DocSelectHome, DocSelectLeft, DocSelectPageDown,
         DocSelectPageUp, DocSelectRight, DocSelectUp, DocSelectWordLeft, DocSelectWordRight,
-        DocToggleComment, DocUndo, DocUp, DocWordRight, MekuShell, Mode, NamingMode, NewTab,
-        NextTab, OpenFolder, Save, ToggleSidebar,
+        DocSoftBreak, DocToggleComment, DocToggleTask, DocUndo, DocUp, DocWordRight, MekuShell,
+        Mode, NamingMode, NewTab, NextTab, OpenFolder, Save, ToggleSidebar,
     };
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
@@ -1886,6 +1943,13 @@ mod ui_tests {
                 KeyBinding::new("ctrl-shift-enter", DocInsertLineAbove, Some("Meku")),
                 KeyBinding::new("ctrl-j", DocJoinLines, Some("Meku")),
                 KeyBinding::new("ctrl-/", DocToggleComment, Some("Meku")),
+                KeyBinding::new("tab", DocIndent, Some("Meku")),
+                KeyBinding::new("shift-tab", DocOutdent, Some("Meku")),
+                KeyBinding::new("ctrl-shift-8", DocListBullet, Some("Meku")),
+                KeyBinding::new("ctrl-shift-7", DocListOrdered, Some("Meku")),
+                KeyBinding::new("ctrl-shift-9", DocListTask, Some("Meku")),
+                KeyBinding::new("ctrl-l", DocToggleTask, Some("Meku")),
+                KeyBinding::new("shift-enter", DocSoftBreak, Some("Meku")),
                 KeyBinding::new("enter", DocEnter, Some("Meku")),
                 KeyBinding::new("ctrl-a", DocSelectAll, Some("Meku")),
                 KeyBinding::new("ctrl-z", DocUndo, Some("Meku")),
@@ -3201,6 +3265,249 @@ mod ui_tests {
             buffer_text(cx, &view, &rel).0,
             "# Prose\n\n```rust\nlet x = 1;\n```\n",
             "second press uncomments"
+        );
+    }
+
+    // -- F4: enter & smart continuation -------------------------------
+
+    #[test]
+    fn enter_continues_the_bullet_list() {
+        run_ui_test("enter_bullet", enter_bullet_body);
+    }
+
+    fn enter_bullet_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "- wash dishes\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 6); // after "wash", before the space
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "- wash\n- dishes\n",
+            "marker repeats and the space rides below"
+        );
+        assert_eq!(doc_caret(cx, &view, &rel), 9);
+        assert!(buffer_text(cx, &view, &rel).1, "editor must be dirty");
+    }
+
+    #[test]
+    fn enter_on_an_empty_bullet_exits_the_list() {
+        run_ui_test("enter_exit", enter_exit_body);
+    }
+
+    fn enter_exit_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "above\n- \nbelow\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 7); // after "- "
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "above\n\nbelow\n",
+            "the empty marker is swallowed, not repeated"
+        );
+        assert_eq!(doc_caret(cx, &view, &rel), 6);
+    }
+
+    #[test]
+    fn enter_renumbers_the_ordered_list() {
+        run_ui_test("enter_renumber", enter_renumber_body);
+    }
+
+    fn enter_renumber_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) =
+            open_note_in(cx, 1200.0, 800.0, "1. one\n2. two\n3. three\n4. four\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 12); // splits "2. tw|o"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "1. one\n2. tw\n3. o\n4. three\n5. four\n",
+            "items behind the split renumber"
+        );
+        assert_eq!(doc_caret(cx, &view, &rel), 16);
+    }
+
+    #[test]
+    fn shift_enter_soft_breaks_the_item() {
+        run_ui_test("soft_break", soft_break_body);
+    }
+
+    fn soft_break_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "- item\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 4); // "it|em"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("shift-enter", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "- it\n  em\n",
+            "the wrap lines up under the item text"
+        );
+        assert_eq!(doc_caret(cx, &view, &rel), 7);
+    }
+
+    #[test]
+    fn enter_replaces_the_selection() {
+        run_ui_test("enter_selection", enter_selection_body);
+    }
+
+    fn enter_selection_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "- one two\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        select_doc_range(cx, &view, 2, 5); // "one"
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "- \n two\n",
+            "selection swaps for a plain newline"
+        );
+    }
+
+    #[test]
+    fn enter_inside_a_fence_stays_plain() {
+        run_ui_test("enter_fence", enter_fence_body);
+    }
+
+    fn enter_fence_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) =
+            open_note_in(cx, 1200.0, 800.0, "1. numbered\n\n```text\nx\ny\n```\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        // Caret right before "y" (after "x\n": 12 + 1 + 8 + 2 bytes in).
+        move_doc_caret(cx, &view, 23);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "1. numbered\n\n```text\nx\n\ny\n```\n",
+            "fences get a bare newline, not marker magic"
+        );
+    }
+
+    // -- F5: indentation & lists --------------------------------------
+
+    #[test]
+    fn tab_and_shift_tab_nest_and_unnest_the_item() {
+        run_ui_test("tab_nest", tab_nest_body);
+    }
+
+    fn tab_nest_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "- a\n- b\n- c\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 6);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("tab", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- a\n  - b\n- c\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 8);
+        cx.update_window(window, |_, window, cx| {
+            window.press("shift-tab", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- a\n- b\n- c\n");
+        assert!(buffer_text(cx, &view, &rel).1, "editor must be dirty");
+    }
+
+    #[test]
+    fn tab_in_a_fence_inserts_four_spaces() {
+        run_ui_test("tab_fence", tab_fence_body);
+    }
+
+    fn tab_fence_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "```rust\nfn\n```\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 8);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("tab", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "```rust\n    fn\n```\n");
+    }
+
+    #[test]
+    fn backspace_in_leading_whitespace_drops_one_level() {
+        run_ui_test("bs_indent", bs_indent_body);
+    }
+
+    fn bs_indent_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "    text\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 4);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "  text\n");
+        assert_eq!(doc_caret(cx, &view, &rel), 2);
+    }
+
+    #[test]
+    fn list_conversion_and_checkbox_keys() {
+        run_ui_test("list_convert", list_convert_body);
+    }
+
+    fn list_convert_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "one\ntwo\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-a", cx);
+            window.press("ctrl-shift-7", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "1. one\n2. two\n");
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-shift-9", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- [ ] one\n- [ ] two\n");
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-l", cx);
+        })
+        .unwrap();
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- [x] one\n- [x] two\n");
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-shift-8", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "- one\n- two\n",
+            "tasks swap to plain bullets"
         );
     }
 }

@@ -51,18 +51,18 @@ Scope: the editor only (text input, live rendering, keyboard behavior, and editi
 
 ## 4. Enter and Smart Continuation
 
-- [ ] Enter in a bullet list creates the next bullet
-- [ ] Enter on an empty bullet exits the list
-- [ ] Enter in a numbered list increments the number
-- [ ] Renumber the list automatically when an item is inserted or removed
-- [ ] Enter in a task list (`- [ ]`) creates an unchecked task
-- [ ] Enter in a blockquote continues the `>` prefix
-- [ ] Enter in a callout continues the callout prefix
-- [ ] Enter inside a code block inserts a newline without leaving the block
-- [ ] Enter in a table moves to the next row, or adds a row at the end
-- [ ] Enter preserves indentation of the current line
-- [ ] Shift+Enter inserts a soft line break (inside lists and quotes)
-- [ ] Enter after a heading starts a normal paragraph
+- [x] Enter in a bullet list creates the next bullet
+- [x] Enter on an empty bullet exits the list
+- [x] Enter in a numbered list increments the number
+- [x] Renumber the list automatically when an item is inserted or removed
+- [x] Enter in a task list (`- [ ]`) creates an unchecked task
+- [x] Enter in a blockquote continues the `>` prefix
+- [x] Enter in a callout continues the callout prefix
+- [x] Enter inside a code block inserts a newline without leaving the block
+- [ ] Enter in a table moves to the next row, or adds a row at the end (deferred to F13)
+- [x] Enter preserves indentation of the current line
+- [x] Shift+Enter inserts a soft line break (inside lists and quotes)
+- [x] Enter after a heading starts a normal paragraph
 
 ---
 

@@ -39,6 +39,167 @@ pub enum CaseKind {
     Toggle,
 }
 
+/// One rewritten line: `(old start, old len, new start, (cut_at, removed, added))`.
+type LineSplice = (usize, usize, usize, (usize, usize, usize));
+
+/// Target of [`OpenBuffer::convert_list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKind {
+    Bullet,
+    Ordered,
+    Task,
+}
+
+/// What kind of markdown line marker a line carries, as far as plain-text
+/// pattern matching can tell (list bullets, tasks, ordered numbers, quotes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkerKind {
+    Bullet(char),
+    Task(char),
+    Ordered(u32, char),
+    /// Quote depth; the prefix bytes are re-taken from the line.
+    Quote(usize),
+    /// A list item directly inside a quote (`> - item`); the inner marker's
+    /// exact byte length rides along (digits may differ from `n`'s).
+    QuoteList {
+        depth: usize,
+        list: Box<(MarkerKind, usize)>,
+    },
+}
+
+/// Parsed leading marker of one line: `indent` whitespace, then marker bytes
+/// up to (excluding) the item's own content.
+#[derive(Debug)]
+struct Marker {
+    indent: usize,
+    prefix_len: usize,
+    kind: MarkerKind,
+}
+
+/// Text (without the newline) that the next line starts with after Enter on
+/// a line carrying `marker`. Tasks restart unchecked; ordered numbers count
+/// up; a callout's `[!NOTE]` tag is content and is never repeated.
+fn continuation_text(marker: &Marker, line: &str) -> String {
+    let indent = &line[..marker.indent];
+    let inner_text = |kind: &MarkerKind| -> String {
+        match kind {
+            MarkerKind::Bullet(c) => format!("{c} "),
+            MarkerKind::Task(_) => "[ ] ".to_string(),
+            MarkerKind::Ordered(n, sep) => format!("{}{sep} ", n + 1),
+            _ => String::new(),
+        }
+    };
+    match &marker.kind {
+        MarkerKind::Bullet(c) => format!("{indent}{c} "),
+        MarkerKind::Task(c) => format!("{indent}{c} [ ] "),
+        MarkerKind::Ordered(n, sep) => format!("{indent}{}{sep} ", n + 1),
+        MarkerKind::Quote(_) => format!("{indent}{}", &line[marker.indent..marker.prefix_len]),
+        MarkerKind::QuoteList { list, .. } => {
+            let (kind, len) = &**list;
+            let quote = &line[marker.indent..marker.prefix_len - len];
+            format!("{indent}{quote}{}", inner_text(kind))
+        }
+    }
+}
+
+/// Recognize the leading marker of a (newline-stripped) line. Returns
+/// `None` for prose, headings, fences and anything else that has no
+/// continuation semantics.
+fn parse_marker(line: &str) -> Option<Marker> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+
+    // Quotes (possibly stacked `>>`), each `>` optionally followed by spaces.
+    let mut scan = rest;
+    let mut depth = 0usize;
+    while let Some(tail) = scan.strip_prefix('>') {
+        depth += 1;
+        scan = tail.trim_start_matches(' ');
+    }
+    if depth == 0 {
+        return parse_list_marker(rest).map(|(len, kind)| Marker {
+            indent,
+            prefix_len: indent + len,
+            kind,
+        });
+    }
+    let quote_len = rest.len() - scan.len();
+    let kind = match parse_list_marker(scan) {
+        Some((len, list)) => MarkerKind::QuoteList {
+            depth,
+            list: Box::new((list, len)),
+        },
+        None => MarkerKind::Quote(depth),
+    };
+    Some(Marker {
+        indent,
+        prefix_len: indent + quote_len + kind.marker_len(),
+        kind,
+    })
+}
+
+impl MarkerKind {
+    /// Byte length of the marker itself, excluding any quote/indent prefix.
+    /// Only meaningful for list markers nested in a quote (`QuoteList`); the
+    /// flat variants get their length straight from `parse_list_marker`.
+    fn marker_len(&self) -> usize {
+        match self {
+            MarkerKind::QuoteList { list, .. } => list.1,
+            _ => 0,
+        }
+    }
+}
+
+/// A `- `/`* `/`+ ` bullet, `- [x] `/`- [ ] ` task or `12. `/`12) ` ordered
+/// item at the start of `rest` (after any indent). Returns the byte length
+/// of the marker (trailing spaces included) and its kind.
+fn parse_list_marker(rest: &str) -> Option<(usize, MarkerKind)> {
+    let bytes = rest.as_bytes();
+    if matches!(bytes.first(), Some(b'-') | Some(b'*') | Some(b'+')) {
+        let bullet = bytes[0] as char;
+        let after_bullet = &rest[1..];
+        return if let Some(space) = after_bullet.strip_prefix(' ') {
+            let task = space
+                .strip_prefix("[ ]")
+                .or_else(|| space.strip_prefix("[x]"))
+                .or_else(|| space.strip_prefix("[X]"));
+            if let Some(task_tail) = task {
+                let len = 5 + usize::from(task_tail.starts_with(' '));
+                Some((len, MarkerKind::Task(bullet)))
+            } else {
+                Some((2, MarkerKind::Bullet(bullet)))
+            }
+        } else {
+            None
+        };
+    }
+    // Ordered: digits, `.` or `)`, at least one space.
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 || digits > 9 {
+        return None;
+    }
+    let sep = match bytes.get(digits) {
+        Some(b'.') => '.',
+        Some(b')') => ')',
+        _ => return None,
+    };
+    let after = &rest[digits + 1..];
+    if !after.starts_with(' ') {
+        return None;
+    }
+    let spaces = after.len() - after.trim_start().len();
+    let mut num = 0u32;
+    for d in rest[..digits].bytes() {
+        num = num * 10 + u32::from(d - b'0');
+    }
+    Some((digits + 1 + spaces, MarkerKind::Ordered(num, sep)))
+}
+
+/// All-whitespace tail of a (newline-stripped) line.
+fn blank_tail(s: &str) -> bool {
+    s.chars().all(char::is_whitespace)
+}
+
 /// Upper-case the first alphanumeric of every word; the rest goes lower.
 fn to_title_case(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -736,6 +897,518 @@ impl OpenBuffer {
         self.coalescing = false;
     }
 
+    // -- enter continuations --------------------------------------------------
+
+    /// Text of the `LineType::LF` line around the caret, newline stripped.
+    /// Returns the line's start byte and its body.
+    fn line_body(&self) -> (usize, String) {
+        let span = self.line_span(self.caret_line());
+        let s = self.text.slice(span.start..span.end).to_string();
+        let body = s.strip_suffix('\n').unwrap_or(&s).to_string();
+        (span.start, body)
+    }
+
+    /// Type-smart Enter: bullets/tasks/quotes continue themselves, ordered
+    /// lists count up (and renumber the whole block), an empty item exits,
+    /// prose/headings/fences fall back to a plain newline. Selections are
+    /// replaced first, like typing.
+    pub fn smart_enter(&mut self) {
+        if let Some(r) = self.nonempty_selection() {
+            self.replace(r, "\n", false);
+            return;
+        }
+        let (line_start, line) = self.line_body();
+        let Some(marker) = parse_marker(&line) else {
+            self.insert("\n");
+            return;
+        };
+        let caret_in = self.caret - line_start;
+        let content = &line[marker.prefix_len..];
+
+        // Empty item: the marker alone on the line ends the list/quote.
+        if blank_tail(content) {
+            self.edit_region(
+                line_start + marker.indent..line_start + marker.prefix_len,
+                "",
+                line_start + marker.indent,
+                line_start + marker.indent,
+            );
+            return;
+        }
+        // Caret inside the marker: the newline goes above the whole item.
+        if caret_in <= marker.prefix_len {
+            self.edit_region(
+                line_start..line_start,
+                "\n",
+                self.caret + 1,
+                self.anchor + 1,
+            );
+            return;
+        }
+        self.push_undo();
+        self.redo.clear();
+        let cont = continuation_text(&marker, &line);
+        let insert = format!("\n{cont}");
+        // The whitespace run between the split and the next word rides below,
+        // not above: `- wash| dishes` becomes `- wash\n- dishes`.
+        let rest = &line[caret_in..];
+        let strip = rest.len() - rest.trim_start().len();
+        let range = self.caret..self.caret + strip;
+        self.apply_edit(range, &insert);
+        let at = self.caret + insert.len();
+        self.caret = at;
+        self.anchor = at;
+        self.marked = None;
+        self.coalescing = false;
+        if let MarkerKind::Ordered(..) = marker.kind {
+            let idx = self.text.byte_to_line_idx(at, LineType::LF);
+            self.renumber_ordered_from(idx);
+        }
+    }
+
+    /// Soft line break (`Shift+Enter`): a raw newline that keeps the current
+    /// item's indentation (lists ride at the content column, quotes repeat
+    /// the `>` prefix so the block stays explicit), no new marker.
+    pub fn soft_break(&mut self) {
+        if let Some(r) = self.nonempty_selection() {
+            self.replace(r, "\n", false);
+            return;
+        }
+        let (_line_start, line) = self.line_body();
+        let cont = match parse_marker(&line) {
+            None => {
+                self.insert("\n");
+                return;
+            }
+            Some(ref marker) => match marker.kind {
+                MarkerKind::Quote(_) | MarkerKind::QuoteList { .. } => {
+                    continuation_text(marker, &line)
+                }
+                _ => line[..marker.prefix_len]
+                    .chars()
+                    .map(|c| if c.is_whitespace() { c } else { ' ' })
+                    .collect::<String>(),
+            },
+        };
+        let insert = format!("\n{cont}");
+        self.replace(self.selection(), &insert, false);
+    }
+
+    fn nonempty_selection(&self) -> Option<Range<usize>> {
+        let r = self.selection();
+        (r.start != r.end).then_some(r)
+    }
+
+    /// Marker facts of line `idx`: `(indent, number, separator)` when the
+    /// line carries an ordered item.
+    fn ordered_info(&self, idx: usize) -> Option<(usize, u32, char)> {
+        let span = self.line_span(idx);
+        let s = self.text.slice(span.start..span.end).to_string();
+        let body = s.strip_suffix('\n').unwrap_or(&s);
+        let indent = body.len() - body.trim_start().len();
+        match parse_list_marker(&body[indent..]) {
+            Some((_, MarkerKind::Ordered(n, sep))) => Some((indent, n, sep)),
+            _ => None,
+        }
+    }
+
+    /// Body (newline stripped) of line `idx`.
+    fn line_string(&self, idx: usize) -> String {
+        let span = self.line_span(idx);
+        let s = self.text.slice(span.start..span.end).to_string();
+        s.strip_suffix('\n').unwrap_or(&s).to_string()
+    }
+
+    /// Renumber the ordered run at line `idx`'s indent: items keep the
+    /// first line's number and count up from there, so an inserted or
+    /// removed item straightens its neighbours. Deeper-indented lines
+    /// (nested children) are stepped over; a blank line, a shallower line
+    /// or a non-ordered line at the same indent ends the run. Raw edits —
+    /// never a second undo step on its own.
+    fn renumber_ordered_from(&mut self, idx: usize) {
+        let Some((want_indent, _, _)) = self.ordered_info(idx) else {
+            return;
+        };
+        let deeper = |this: &Self, i: usize| -> bool {
+            let body = this.line_string(i);
+            !blank_tail(&body) && body.len() - body.trim_start().len() > want_indent
+        };
+        let mut first = idx;
+        let mut j = idx;
+        while j > 0 {
+            j -= 1;
+            match self.ordered_info(j) {
+                Some((indent, _, _)) if indent == want_indent => first = j,
+                _ if deeper(self, j) => {}
+                _ => break,
+            }
+        }
+        let Some((_, base, _)) = self.ordered_info(first) else {
+            return;
+        };
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
+        let mut want = base;
+        let mut i = first;
+        let total = self.text.len_lines(LineType::LF);
+        while i < total {
+            match self.ordered_info(i) {
+                Some((indent, n, _)) if indent == want_indent => {
+                    if n != want {
+                        let start = self.line_span(i).start;
+                        let body = self.line_string(i);
+                        let leading = body.len() - body.trim_start().len();
+                        let digits = body[leading..]
+                            .bytes()
+                            .take_while(|b| b.is_ascii_digit())
+                            .count();
+                        edits.push((start + leading, start + leading + digits, want.to_string()));
+                    }
+                    match want.checked_add(1) {
+                        Some(w) => want = w,
+                        None => break,
+                    }
+                }
+                _ if deeper(self, i) => {}
+                _ => break,
+            }
+            i += 1;
+        }
+        for (start, end, digits) in edits.iter().rev() {
+            self.apply_edit(*start..*end, digits);
+        }
+    }
+
+    // -- indentation & list conversion (F5) ----------------------------------
+
+    /// Rewrite a block of whole lines as one undo step. `f(i, body)` gets
+    /// the block-relative index and the newline-stripped line and returns the
+    /// new line plus the splice it applied `(cut_at, removed, added)` so the
+    /// caret and anchor can be mapped through it.
+    fn rewrite_lines(
+        &mut self,
+        lines: Range<usize>,
+        mut f: impl FnMut(usize, &str) -> (String, usize, usize, usize),
+    ) {
+        let block_start = self.line_span(lines.start).start;
+        let block_end = self.line_span(lines.end - 1).end;
+        let old = self.text.slice(block_start..block_end).to_string();
+        let ends_nl = old.ends_with('\n');
+        let body = old.strip_suffix('\n').unwrap_or(&old);
+        let mut out = String::with_capacity(old.len() + 16);
+        // (old line start, old line len, new line start, splice)
+        let mut spans: Vec<LineSplice> = Vec::new();
+        let mut old_at = 0usize;
+        for (i, line) in body.split('\n').enumerate() {
+            let (new_line, cut, removed, added) = f(i, line);
+            spans.push((old_at, line.len(), out.len(), (cut, removed, added)));
+            out.push_str(&new_line);
+            out.push('\n');
+            old_at += line.len() + 1;
+        }
+        if !ends_nl {
+            out.pop();
+        }
+        if out == old {
+            return;
+        }
+        let map = |p: usize| -> usize {
+            if p < block_start {
+                return p;
+            }
+            if p > block_end {
+                return p + out.len() - old.len();
+            }
+            let rel = p - block_start;
+            for (os, ol, ns, (cut, removed, added)) in &spans {
+                if rel <= os + ol {
+                    let col = rel - os;
+                    let col = if col < *cut || (col == *cut && *removed > 0) {
+                        col
+                    } else if col < cut + removed {
+                        cut + added
+                    } else {
+                        col + added - removed
+                    };
+                    return block_start + ns + col;
+                }
+            }
+            block_start + out.len()
+        };
+        let (caret, anchor) = (map(self.caret), map(self.anchor));
+        self.edit_region(block_start..block_end, &out, caret, anchor);
+    }
+
+    /// Spaces one indent level adds to `body`: ordered items nest under
+    /// their `1. ` text, everything else by two.
+    fn indent_step(body: &str) -> usize {
+        match parse_marker(body) {
+            Some(Marker {
+                kind: MarkerKind::Ordered(..),
+                ..
+            }) => 3,
+            _ => 2,
+        }
+    }
+
+    /// Lines the indent commands act on: the selected lines, plus — for a
+    /// collapsed caret on a list item — the item's nested children.
+    fn indent_target(&self) -> Range<usize> {
+        let sel = self.selected_lines();
+        if self.selection().start != self.selection().end {
+            return sel;
+        }
+        let first = sel.start;
+        let head = self.line_string(first);
+        let Some(m) = parse_marker(&head) else {
+            return sel;
+        };
+        let total = self.text.len_lines(LineType::LF);
+        let mut end = first + 1;
+        while end < total {
+            let body = self.line_string(end);
+            // A trailing phantom line (after the final newline) is not a child.
+            if blank_tail(&body) || body.len() - body.trim_start().len() <= m.indent {
+                break;
+            }
+            end += 1;
+        }
+        first..end
+    }
+
+    /// `Tab`: indent. A collapsed caret on prose/code just inserts a level
+    /// at the caret; on a list item the whole item (children included)
+    /// nests one level; a selection indents every line it touches. Inside
+    /// code fences (`code`) a level is four spaces and lists are ignored.
+    pub fn indent(&mut self, code: bool) {
+        let collapsed = self.selection().start == self.selection().end;
+        let on_item = !code && collapsed && parse_marker(&self.line_body().1).is_some();
+        if collapsed && !on_item {
+            self.insert(if code { "    " } else { "  " });
+            return;
+        }
+        let lines = if code {
+            self.selected_lines()
+        } else {
+            self.indent_target()
+        };
+        let was_ordered: Vec<bool> = (lines.start..lines.end)
+            .map(|i| self.ordered_info(i).is_some())
+            .collect();
+        let above = lines
+            .start
+            .checked_sub(1)
+            .and_then(|i| self.ordered_info(i));
+        self.rewrite_lines(lines.clone(), |_, body| {
+            if blank_tail(body) {
+                return (body.to_string(), 0, 0, 0);
+            }
+            let n = if code { 4 } else { Self::indent_step(body) };
+            (format!("{}{body}", " ".repeat(n)), 0, 0, n)
+        });
+        if code {
+            return;
+        }
+        // The moved head starts a nested run at 1 unless it follows a
+        // sibling at its new indent; then straighten both levels.
+        if was_ordered.first() == Some(&true) {
+            let head = self.ordered_info(lines.start);
+            if let Some((indent, _, _)) = head {
+                let continues = matches!(above, Some((a, _, _)) if a == indent);
+                if !continues {
+                    self.set_ordered_number(lines.start, 1);
+                }
+                self.renumber_ordered_from(lines.start);
+            }
+        }
+        let after = lines
+            .end
+            .min(self.text.len_lines(LineType::LF).saturating_sub(1));
+        self.renumber_ordered_from(after);
+        if let Some(prev) = lines.start.checked_sub(1) {
+            self.renumber_ordered_from(prev);
+        }
+    }
+
+    /// `Shift+Tab`: outdent the target lines by one level (a tab or up to
+    /// the line's step in spaces), then straighten any ordered runs.
+    pub fn outdent(&mut self, code: bool) {
+        let lines = if code {
+            self.selected_lines()
+        } else {
+            self.indent_target()
+        };
+        let mut changed = false;
+        self.rewrite_lines(lines.clone(), |_, body| {
+            let step = if code { 4 } else { Self::indent_step(body) };
+            let removed = if body.starts_with('\t') {
+                1
+            } else {
+                body.bytes().take(step).take_while(|b| *b == b' ').count()
+            };
+            changed |= removed > 0;
+            (body[removed..].to_string(), 0, removed, 0)
+        });
+        if code || !changed {
+            return;
+        }
+        for i in [lines.start, lines.end.saturating_sub(1)] {
+            if i < self.text.len_lines(LineType::LF) {
+                self.renumber_ordered_from(i);
+            }
+        }
+        let after = lines
+            .end
+            .min(self.text.len_lines(LineType::LF).saturating_sub(1));
+        self.renumber_ordered_from(after);
+    }
+
+    /// Overwrite the digits of the ordered item on line `idx`.
+    fn set_ordered_number(&mut self, idx: usize, n: u32) {
+        let body = self.line_string(idx);
+        let start = self.line_span(idx).start;
+        let leading = body.len() - body.trim_start().len();
+        let digits = body[leading..]
+            .bytes()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digits > 0 {
+            self.apply_edit(start + leading..start + leading + digits, &n.to_string());
+        }
+    }
+
+    /// `Backspace` with indent awareness: a collapsed caret sitting in a
+    /// line's leading whitespace removes back to the previous 2-space stop
+    /// (or one tab) instead of a single space. Everything else is a normal
+    /// backward delete.
+    pub fn backspace(&mut self) {
+        if self.selection().start == self.selection().end && self.caret > 0 {
+            let (line_start, body) = self.line_body();
+            let col = self.caret - line_start;
+            let lead = &body[..col.min(body.len())];
+            if !lead.is_empty() && lead.bytes().all(|b| b == b' ' || b == b'\t') {
+                let remove = if lead.ends_with('\t') {
+                    1
+                } else {
+                    let spaces = lead.len() - lead.trim_end_matches(' ').len();
+                    (spaces - 1) % 2 + 1
+                };
+                self.replace(self.caret - remove..self.caret, "", false);
+                return;
+            }
+        }
+        self.delete_backward();
+    }
+
+    /// Convert the selected lines to `kind`, or strip the marker when every
+    /// non-blank line already is that kind (a toggle). Blank and quoted
+    /// lines are left alone; numbering counts the converted lines from 1.
+    pub fn convert_list(&mut self, kind: ListKind) {
+        let lines = self.selected_lines();
+        let matches_kind = |body: &str| -> bool {
+            matches!(
+                (parse_marker(body).map(|m| m.kind), kind),
+                (Some(MarkerKind::Bullet(_)), ListKind::Bullet)
+                    | (Some(MarkerKind::Ordered(..)), ListKind::Ordered)
+                    | (Some(MarkerKind::Task(_)), ListKind::Task)
+            )
+        };
+        let bodies: Vec<String> = lines.clone().map(|i| self.line_string(i)).collect();
+        let eligible = |b: &String| !blank_tail(b) && !b.trim_start().starts_with('>');
+        let strip = bodies
+            .iter()
+            .filter(|b| eligible(b))
+            .all(|b| matches_kind(b))
+            && bodies.iter().any(eligible);
+        let mut number = 0u32;
+        self.rewrite_lines(lines, |_, body| {
+            if blank_tail(body) || body.trim_start().starts_with('>') {
+                return (body.to_string(), 0, 0, 0);
+            }
+            let indent = body.len() - body.trim_start().len();
+            let old_len = match parse_marker(body) {
+                Some(Marker {
+                    kind: MarkerKind::Bullet(_) | MarkerKind::Task(_) | MarkerKind::Ordered(..),
+                    prefix_len,
+                    ..
+                }) => prefix_len - indent,
+                _ => 0,
+            };
+            let new_marker = if strip {
+                String::new()
+            } else {
+                match kind {
+                    ListKind::Bullet => "- ".to_string(),
+                    ListKind::Task => "- [ ] ".to_string(),
+                    ListKind::Ordered => {
+                        number += 1;
+                        format!("{number}. ")
+                    }
+                }
+            };
+            let out = format!(
+                "{}{new_marker}{}",
+                &body[..indent],
+                &body[indent + old_len..]
+            );
+            (out, indent, old_len, new_marker.len())
+        });
+        let idx = self.caret_line();
+        self.renumber_ordered_from(idx);
+    }
+
+    /// Flip `[ ]`/`[x]` on every selected task line; bullets and plain
+    /// lines become unchecked tasks first.
+    pub fn toggle_task(&mut self) {
+        let lines = self.selected_lines();
+        self.rewrite_lines(lines, |_, body| {
+            if blank_tail(body) {
+                return (body.to_string(), 0, 0, 0);
+            }
+            let indent = body.len() - body.trim_start().len();
+            match parse_marker(body) {
+                Some(Marker {
+                    kind: MarkerKind::Task(_),
+                    ..
+                }) => {
+                    let at = indent + 3;
+                    let flipped = if body.as_bytes()[at] == b' ' {
+                        "x"
+                    } else {
+                        " "
+                    };
+                    (
+                        format!("{}{flipped}{}", &body[..at], &body[at + 1..]),
+                        at,
+                        1,
+                        1,
+                    )
+                }
+                Some(Marker {
+                    kind: MarkerKind::Bullet(_) | MarkerKind::Ordered(..),
+                    prefix_len,
+                    ..
+                }) => {
+                    let old = prefix_len - indent;
+                    let out = format!("{}- [ ] {}", &body[..indent], &body[prefix_len..]);
+                    (out, indent, old, 6)
+                }
+                _ => (
+                    format!("{}- [ ] {}", &body[..indent], &body[indent..]),
+                    indent,
+                    0,
+                    6,
+                ),
+            }
+        });
+    }
+
+    /// Public renumber hook for edit paths that remove an ordered item
+    /// (delete-line etc.): straightens the list around the caret afterwards.
+    pub fn renumber_ordered_at_caret(&mut self) {
+        let idx = self.caret_line();
+        self.renumber_ordered_from(idx);
+    }
+
     // -- editing ------------------------------------------------------------
 
     /// Replace `range` with `insert` as one user edit. Records an undo step
@@ -1402,5 +2075,324 @@ mod tests {
         assert_eq!(b.text_string(), "// x\n");
         assert!(b.undo());
         assert_eq!(b.text_string(), "x\n");
+    }
+
+    // -- enter continuation (F4) -------------------------------------
+
+    #[test]
+    fn enter_continues_a_bullet() {
+        let mut b = buf("- wash dishes\n");
+        b.move_caret(6, false); // after "wash", before the space
+        b.smart_enter();
+        assert_eq!(b.text_string(), "- wash\n- dishes\n");
+        assert_eq!(b.caret(), 9, "caret sits after the new marker");
+        // Suffix content stays on the old line.
+        let mut b = buf("- done\n");
+        b.move_caret(6, false);
+        b.smart_enter();
+        assert_eq!(b.text_string(), "- done\n- \n");
+        assert_eq!(b.caret(), 9);
+    }
+
+    #[test]
+    fn enter_on_an_empty_bullet_exits_the_list() {
+        let mut b = buf("above\n- \nbelow\n");
+        b.move_caret(7, false); // after "- "
+        b.smart_enter();
+        assert_eq!(b.text_string(), "above\n\nbelow\n");
+        assert_eq!(b.caret(), 6, "back to the line start, marker gone");
+    }
+
+    #[test]
+    fn enter_continues_numbered_lists_and_renumbers() {
+        let mut b = buf("1. one\n2. two\n3. three\n4. four\n");
+        // Split item 2 in half: "2. tw|o" (byte 12 = after "tw").
+        b.move_caret(12, false);
+        b.smart_enter();
+        assert_eq!(
+            b.text_string(),
+            "1. one\n2. tw\n3. o\n4. three\n5. four\n",
+            "inserted item numbers up; the rest straightens"
+        );
+        assert_eq!(b.caret(), 16, "caret after the `3. ` marker");
+        // Removing an item closes the gap too (via delete_line).
+        let mut b = buf("1. a\n2. b\n3. c\n");
+        b.move_caret(7, false);
+        b.delete_line();
+        b.renumber_ordered_at_caret();
+        assert_eq!(b.text_string(), "1. a\n2. c\n");
+    }
+
+    #[test]
+    fn ordered_lists_keep_the_first_number_and_separator() {
+        let mut b = buf("3) alpha\n4) beta\n");
+        b.move_caret(7, false); // splits "alph|a"
+        b.smart_enter();
+        assert_eq!(
+            b.text_string(),
+            "3) alph\n4) a\n5) beta\n",
+            "base 3 is preserved; `)` sep kept"
+        );
+        assert_eq!(b.caret(), 11);
+    }
+
+    #[test]
+    fn enter_continues_tasks_unchecked() {
+        let mut b = buf("- [x] water the plants\n");
+        b.move_caret(9, false); // inside "water" (after "wat")
+        b.smart_enter();
+        assert_eq!(
+            b.text_string(),
+            "- [x] wat\n- [ ] er the plants\n",
+            "new task is always unchecked"
+        );
+        assert_eq!(b.caret(), 16);
+        // From the end: a ready-to-type unchecked item.
+        let mut b = buf("- [x] done\n");
+        b.move_caret(10, false);
+        b.smart_enter();
+        assert_eq!(b.text_string(), "- [x] done\n- [ ] \n");
+        assert_eq!(b.caret(), 17);
+        // Exiting after the fresh empty item.
+        b.smart_enter();
+        assert_eq!(b.text_string(), "- [x] done\n\n");
+    }
+
+    #[test]
+    fn enter_after_heading_and_prose_is_plain() {
+        let mut b = buf("# Title\nnext");
+        b.move_caret(7, false);
+        b.smart_enter();
+        assert_eq!(b.text_string(), "# Title\n\nnext", "no marker invented");
+        let mut b = buf("plain text\n");
+        b.move_caret(6, false); // after "plain " — prose keeps the space
+        b.smart_enter();
+        assert_eq!(b.text_string(), "plain \ntext\n");
+    }
+
+    #[test]
+    fn enter_inside_indent_continues_the_indent() {
+        let mut b = buf("  - nested item\n");
+        b.move_caret(10, false); // after "nested", before its space
+        b.smart_enter();
+        assert_eq!(b.text_string(), "  - nested\n  - item\n");
+        assert_eq!(b.caret(), 15);
+    }
+
+    #[test]
+    fn enter_in_nested_quote_list_continues_both() {
+        let mut b = buf("> - quoted bullet\nzhi\n");
+        b.move_caret(10, false); // after "quoted"
+        b.smart_enter();
+        assert_eq!(b.text_string(), "> - quoted\n> - bullet\nzhi\n");
+        assert_eq!(b.caret(), 15);
+    }
+
+    #[test]
+    fn enter_replaces_a_selection_like_typing() {
+        let mut b = buf("- one two\n");
+        b.move_caret(2, false);
+        b.move_caret(5, true); // "one"
+        b.smart_enter();
+        assert_eq!(b.text_string(), "- \n two\n", "insert uses the plain path");
+    }
+
+    #[test]
+    fn empty_bullet_exit_survives_undo_as_one_step() {
+        let mut b = buf("- \n");
+        b.move_caret(2, false);
+        b.smart_enter();
+        assert_eq!(b.text_string(), "\n");
+        assert!(b.undo());
+        assert_eq!(b.text_string(), "- \n");
+        assert_eq!(b.caret(), 2, "caret restored");
+    }
+
+    #[test]
+    fn soft_break_keeps_item_columns_and_quotes() {
+        let mut b = buf("- item\n");
+        b.move_caret(4, false); // "it|em"
+        b.soft_break();
+        assert_eq!(
+            b.text_string(),
+            "- it\n  em\n",
+            "indented to the content col"
+        );
+        let mut b = buf("> quote\n");
+        b.move_caret(7, false); // end of "quote"
+        b.soft_break();
+        assert_eq!(b.text_string(), "> quote\n> \n", "quote prefix repeats");
+        let mut b = buf("1. one\n");
+        b.move_caret(6, false);
+        b.soft_break();
+        assert_eq!(b.text_string(), "1. one\n   \n", "no number invented");
+    }
+
+    #[test]
+    fn enter_continues_quote_prefixes_not_callout_tags() {
+        let mut b = buf("> a wise note\n");
+        b.move_caret(8, false); // after "wise", before the space (stripped below)
+        b.smart_enter();
+        assert_eq!(b.text_string(), "> a wise\n> note\n", "quote stays alive");
+        assert_eq!(b.caret(), 11);
+        // "> " alone exits the quote.
+        let mut b = buf("> \nbody\n");
+        b.move_caret(2, false);
+        b.smart_enter();
+        assert_eq!(b.text_string(), "\nbody\n");
+        // Callout header: the tag is never duplicated.
+        let mut b = buf("> [!NOTE] heads up\nmore\n");
+        b.move_caret(18, false);
+        b.smart_enter();
+        assert_eq!(
+            b.text_string(),
+            "> [!NOTE] heads up\n> \nmore\n",
+            "only the `>` prefix continues"
+        );
+        assert_eq!(b.caret(), 21);
+    }
+
+    // -- F5: indentation & lists -------------------------------------------
+
+    #[test]
+    fn tab_nests_an_item_with_its_children() {
+        let mut b = buf("- a\n- b\n  - c\n- d\n");
+        b.move_caret(6, false); // inside "b"
+        b.indent(false);
+        assert_eq!(b.text_string(), "- a\n  - b\n    - c\n- d\n");
+        assert_eq!(b.caret(), 8, "caret rides the shifted text");
+        b.undo();
+        assert_eq!(b.text_string(), "- a\n- b\n  - c\n- d\n", "one undo step");
+    }
+
+    #[test]
+    fn tab_on_prose_inserts_a_level_and_selection_indents_lines() {
+        let mut b = buf("plain\n");
+        b.move_caret(5, false);
+        b.indent(false);
+        assert_eq!(b.text_string(), "plain  \n");
+        let mut b = buf("a\nb\nc\n");
+        b.move_caret(0, false);
+        b.move_caret(3, true); // "a\nb"
+        b.indent(false);
+        assert_eq!(b.text_string(), "  a\n  b\nc\n");
+        assert_eq!(b.selection(), 2..7, "selection keeps its text");
+    }
+
+    #[test]
+    fn tab_in_code_uses_four_spaces() {
+        let mut b = buf("x\ny\n");
+        b.move_caret(0, false);
+        b.move_caret(3, true);
+        b.indent(true);
+        assert_eq!(b.text_string(), "    x\n    y\n");
+        b.outdent(true);
+        assert_eq!(b.text_string(), "x\ny\n");
+    }
+
+    #[test]
+    fn shift_tab_outdents_and_renumbers() {
+        let mut b = buf("1. a\n   1. b\n   2. c\n2. d\n");
+        b.move_caret(11, false); // inside "b"
+        b.outdent(false);
+        assert_eq!(b.text_string(), "1. a\n2. b\n   2. c\n3. d\n");
+        let mut b = buf("  - a\n");
+        b.move_caret(4, false);
+        b.outdent(false);
+        assert_eq!(b.text_string(), "- a\n");
+        b.outdent(false);
+        assert_eq!(b.text_string(), "- a\n", "already flush: no-op");
+    }
+
+    #[test]
+    fn indenting_an_ordered_item_restarts_the_nested_run() {
+        let mut b = buf("1. a\n2. b\n3. c\n");
+        b.move_caret(8, false); // inside "b"
+        b.indent(false);
+        assert_eq!(b.text_string(), "1. a\n   1. b\n2. c\n");
+        let mut b = buf("1. a\n   1. x\n2. b\n");
+        b.move_caret(15, false);
+        b.indent(false);
+        assert_eq!(
+            b.text_string(),
+            "1. a\n   1. x\n   2. b\n",
+            "joins the sibling run"
+        );
+    }
+
+    #[test]
+    fn backspace_removes_one_indent_level() {
+        let mut b = buf("    text\n");
+        b.move_caret(4, false);
+        b.backspace();
+        assert_eq!(b.text_string(), "  text\n");
+        b.backspace();
+        assert_eq!(b.text_string(), "text\n");
+        b.backspace();
+        assert_eq!(b.text_string(), "text\n", "document start: nothing to join");
+        let mut b = buf("   x\n");
+        b.move_caret(3, false);
+        b.backspace();
+        assert_eq!(b.text_string(), "  x\n", "odd indent snaps to the stop");
+        let mut b = buf("ab\n");
+        b.move_caret(2, false);
+        b.backspace();
+        assert_eq!(b.text_string(), "a\n", "mid-text backspace is unchanged");
+        let mut b = buf("\tx\n");
+        b.move_caret(1, false);
+        b.backspace();
+        assert_eq!(b.text_string(), "x\n");
+    }
+
+    #[test]
+    fn convert_lines_to_lists_and_back() {
+        let mut b = buf("one\ntwo\n\nthree\n");
+        b.select_all();
+        b.convert_list(ListKind::Bullet);
+        assert_eq!(b.text_string(), "- one\n- two\n\n- three\n");
+        b.convert_list(ListKind::Bullet);
+        assert_eq!(
+            b.text_string(),
+            "one\ntwo\n\nthree\n",
+            "same kind toggles off"
+        );
+        b.select_all();
+        b.convert_list(ListKind::Ordered);
+        assert_eq!(b.text_string(), "1. one\n2. two\n\n3. three\n");
+        b.convert_list(ListKind::Task);
+        assert_eq!(
+            b.text_string(),
+            "- [ ] one\n- [ ] two\n\n- [ ] three\n",
+            "kinds swap"
+        );
+    }
+
+    #[test]
+    fn convert_keeps_indent_and_skips_quotes() {
+        let mut b = buf("  item\n> quote\n");
+        b.select_all();
+        b.convert_list(ListKind::Bullet);
+        assert_eq!(b.text_string(), "  - item\n> quote\n");
+    }
+
+    #[test]
+    fn toggle_task_flips_and_promotes() {
+        let mut b = buf("- [ ] a\n- [x] b\n- c\nd\n");
+        b.select_all();
+        b.toggle_task();
+        assert_eq!(b.text_string(), "- [x] a\n- [ ] b\n- [ ] c\n- [ ] d\n");
+        let mut b = buf("- [ ] a\n");
+        b.move_caret(7, false);
+        b.toggle_task();
+        assert_eq!(b.text_string(), "- [x] a\n");
+        assert_eq!(b.caret(), 7);
+    }
+
+    #[test]
+    fn renumber_steps_over_nested_children() {
+        let mut b = buf("1. a\n   - n\n3. c\n");
+        b.move_caret(0, false);
+        b.renumber_ordered_at_caret();
+        assert_eq!(b.text_string(), "1. a\n   - n\n2. c\n");
     }
 }

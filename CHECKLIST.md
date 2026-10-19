@@ -18,7 +18,7 @@ _Plan efficiently before writing app code. Research done by 4 subagents (feature
 - [x] Freeze GFM subset: headings, emphasis/strong/strike, lists, task lists, code fence/inline, tables, quote, hr, links/images, autolinks, raw-HTML passthrough (sanitized)
 - [x] Freeze explicit deferrals: `[[wikilinks]]`, embeds, backlinks, graph/canvas, tags pane, frontmatter UI, math, mermaid, vim, plugins/sync/publish, terminal/AI
 - [ ] Write MVP acceptance criteria into `docs/acceptance.md` (12 criteria: open mekuto <1s/100 files, file ops, live-preview round-trip, tabs+dirty, Ctrl-P <100ms/1k files, search, palette, outline ≤200ms, status bar, settings persist, crash recovery ≤2s loss, GFM fixture zero panics)
-- [x] Freeze keymap defaults (Linux): `Ctrl-P` finder · `Ctrl-Shift-P` palette · `Ctrl-B` explorer · `Ctrl-,` settings · `Ctrl-N/W/T` note/close/tab · `Ctrl-S` save · `Ctrl-F` find · `Ctrl-E` edit/live/read cycle (Build 5) · `Ctrl+←/→` word jump · `Ctrl+Backspace/Delete` word delete · `Ctrl+Shift+Backspace` delete-line-start · `Ctrl+Home/End` doc ends · PageUp/Down · smart `Home` (Build 5.x) · `Alt+↑/↓` move line · `Ctrl+Shift+D/K` duplicate/delete line · `Ctrl+Enter/Shift+Enter` insert below/above · `Ctrl+J` join lines · `Ctrl+/` comment toggle in code (F3)
+- [x] Freeze keymap defaults (Linux): `Ctrl-P` finder · `Ctrl-Shift-P` palette · `Ctrl-B` explorer · `Ctrl-,` settings · `Ctrl-N/W/T` note/close/tab · `Ctrl-S` save · `Ctrl-F` find · `Ctrl-E` edit/live/read cycle (Build 5) · `Ctrl+←/→` word jump · `Ctrl+Backspace/Delete` word delete · `Ctrl+Shift+Backspace` delete-line-start · `Ctrl+Home/End` doc ends · PageUp/Down · smart `Home` (Build 5.x) · `Alt+↑/↓` move line · `Ctrl+Shift+D/K` duplicate/delete line · `Ctrl+Enter/Shift+Enter` insert below/above · `Ctrl+J` join lines · `Ctrl+/` comment toggle in code (F3) · `Shift+Enter` soft break, fence-aware `Enter` continuation (F4)
 - [ ] Freeze `session.json` schema v1 (`version`, `active_tab`, `open_tabs[{path,cursor,scroll,pinned}]`, `explorer{expanded,auto_reveal}`) + corrupt-file rule (backup to `session.corrupt-<ts>.json`, start empty, never crash)
 
 **Mekuto layout (frozen):**
@@ -175,16 +175,19 @@ _Reconciled from the feature file (`live-markdown-editor-features.md`, editor sc
 - [x] Transform case (upper/lower/title/toggle) — `OpenBuffer::transform_case(CaseKind)`; collapsed caret targets the alphanumeric word under it; palette command in Build 6/F11
 - Buffer unit tests (15) + 6 headless UI tests drive the real keystrokes; `test(38+53)` + fmt/clippy green (2026-10-19).
 
-### F4 Enter and Smart Continuation (§4) — **next chunk**
-- [ ] Enter continues bullets / exits empty bullets, numbered lists increment + renumber, task items `[ ]`
-- [ ] Enter continues blockquotes/callouts, verts indentation, soft break (Shift+Enter)
-- [ ] Enter inside code blocks / tables; Enter after a heading starts a paragraph
+### F4 Enter and Smart Continuation (§4) — **landed 2026-10-19**
+- [x] Enter continues bullets / exits empty bullets, numbered lists increment + renumber, task items `[ ]` — `OpenBuffer::smart_enter`: content split rides to the new marker (leading whitespace of the suffix stays below, one undo step); empty item exits the list; ordered lists increment from the caret item and renumber everything behind (raw `apply_edit`s batched), first number + `.`/`)` separator preserved; task markers always spawn unchecked `[ ]`; nested quote+list continues both
+- [x] Enter continues blockquotes/callouts, keeps indentation, soft break (Shift+Enter) — quote `>` prefixes repeat (callout `> [!x]` tags do **not**), the exact inner indent of the current item is reused, `soft_break` copies the marker column as spaces (no marker invented); heading/plain lines get a bare newline (Enter after a heading starts a normal paragraph)
+- [x] Enter inside code blocks inserts a plain newline (fence-aware via `fence_at`, list/quote magic disabled there); table-row Enter and renumber-on-delete deferred to F13/later
+- Buffer unit tests (18) + 6 headless UI tests drive the real keystrokes; `test(44+65)` + fmt/clippy green (2026-10-19).
 
-### F5 Indentation and Lists (§5) — **next chunk**
-- [ ] Tab/Shift+Tab indent/outdent (lines, selection, list children)
-- [ ] Backspace removes one indent level
-- [ ] Convert line to bullet/numbered/task; toggle checkbox (Ctrl+Enter or click)
-- [ ] Ordered-list renumbering; fold list items (defer folding to Build 7 polish)
+### F5 Indentation and Lists (§5) — **landed 2026-10-19**
+- [x] Tab/Shift+Tab indent/outdent — collapsed caret on a list item nests/unnests the item **with its children** (2 spaces, 3 under ordered); selection shifts every touched line (selection rides along); prose Tab inserts a level at the caret; in code fences a level is 4 spaces and list logic is off. One undo step each
+- [x] Backspace in leading whitespace removes one indent level (snaps to the 2-space stop; a tab goes whole); anywhere else unchanged
+- [x] Convert line(s) to bullet/numbered/task (Ctrl+Shift+8/7/9, same kind toggles off, numbering counts converted lines, blanks/quotes skipped, indent kept); toggle checkbox `Ctrl+L` (flips tasks, promotes bullets/plain to `- [ ]`) — `Ctrl+Enter` stays insert-line-below from F3, so the toggle took `Ctrl+L`
+- [x] Ordered-list renumbering now steps over nested children, and indent/outdent restart (`1.`) or rejoin the nested run and straighten both levels
+- [ ] Click a rendered checkbox to toggle (not wired yet — no click target exists in `document.rs`) · fold list items (defer to Build 7 polish)
+- Buffer unit tests (10) + 4 headless UI tests drive the real keystrokes; `test(48+75)` + fmt/clippy green (2026-10-19). Also restored `crates/meku-index` (had been moved under `meku-markdown/`, breaking the workspace manifest).
 
 ### F6 Auto-Pairing and Smart Typing (§6) — **later**
 - [ ] Auto-close `()[]{}""''\`\`` + markdown markers `** * == ~~`; skip-over closers; wrap selection
