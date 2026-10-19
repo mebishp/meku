@@ -384,5 +384,5 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] The app reopens the last mekuto at launch (`state.json` beside the global settings; setting **Reopen last mekuto**, default on). A command-line folder still wins; a deleted folder is skipped.
 - [x] Tabs restore from `.meku/session.json` (setting **Reopen last tabs**) as placeholders: only the active note is read at launch, others load when first activated; a note that vanished loses its tab.
 - [x] Back/forward moved from the title bar to the head of the tab strip.
-- [x] Tabs shrink to fit the strip (floor 40px, then it scrolls); the active tab keeps its width, inactive ones drop the icon and show close on hover when crowded, with a full-title tooltip.
+- [x] Tabs shrink to fit the strip (floor 40px, then it scrolls); the active tab keeps its width, inactive ones drop the icon and close button when crowded (middle-click or the context menu still close them), with a full-title tooltip.
 

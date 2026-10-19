@@ -324,8 +324,8 @@ impl MekuShell {
                 let group = SharedString::from(format!("tab-{index}"));
                 let title = tab.title.trim_end_matches(".md").to_string();
                 // With many tabs the room goes to the titles: inactive tabs
-                // lose the file icon, and their close button floats over the
-                // title's end only while hovered.
+                // lose the file icon and the close button (middle-click and
+                // the context menu still close them).
                 let crowded = tabs_total > 5;
                 let tip = title.clone();
                 let ico = if tab.rel.is_some() {
@@ -360,18 +360,7 @@ impl MekuShell {
                         cx.stop_propagation();
                         close_shell.update(cx, |view, cx| view.close_tab(index, cx));
                     });
-                let floating_close = crowded && !active && !dirty;
-                let close = if floating_close {
-                    close
-                        .absolute()
-                        .right(px(4.))
-                        .top(px(7.))
-                        .bg(hover_bg)
-                        .invisible()
-                        .group_hover(group.clone(), |s| s.visible())
-                } else {
-                    close
-                };
+                let show_close = !(crowded && !active && !dirty);
                 let mut el = h_flex()
                     .id(("tab", index))
                     .test_support()
@@ -411,7 +400,7 @@ impl MekuShell {
                             .text_color(if active { fg } else { muted })
                             .child(title),
                     )
-                    .child(close);
+                    .children(show_close.then_some(close));
                 el = if active {
                     el.bg(active_bg)
                         .border_1()
