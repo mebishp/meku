@@ -96,6 +96,96 @@ pub enum TableRole {
     Body,
 }
 
+/// Visual family of a callout (`> [!note]`, `> [!warning]`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalloutKind {
+    Note,
+    Info,
+    Tip,
+    Success,
+    Question,
+    Warning,
+    Danger,
+    Bug,
+    Example,
+    Quote,
+}
+
+impl CalloutKind {
+    /// Kind for a callout tag name (`note`, `TIP`, `caution`, ...).
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Some(match tag.to_ascii_lowercase().as_str() {
+            "note" | "abstract" | "summary" | "tldr" | "seealso" => Self::Note,
+            "info" | "todo" => Self::Info,
+            "tip" | "hint" | "important" => Self::Tip,
+            "success" | "check" | "done" => Self::Success,
+            "question" | "help" | "faq" => Self::Question,
+            "warning" | "caution" | "attention" => Self::Warning,
+            "danger" | "error" | "failure" | "fail" | "missing" => Self::Danger,
+            "bug" => Self::Bug,
+            "example" => Self::Example,
+            "quote" | "cite" => Self::Quote,
+            _ => return None,
+        })
+    }
+
+    /// Title shown when the callout line has none.
+    pub fn default_title(self) -> &'static str {
+        match self {
+            Self::Note => "Note",
+            Self::Info => "Info",
+            Self::Tip => "Tip",
+            Self::Success => "Success",
+            Self::Question => "Question",
+            Self::Warning => "Warning",
+            Self::Danger => "Danger",
+            Self::Bug => "Bug",
+            Self::Example => "Example",
+            Self::Quote => "Quote",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalloutRole {
+    /// The `> [!type] Title` line.
+    Title,
+    Body,
+}
+
+/// A ``` / ~~~ delimiter line of a fenced code block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fence {
+    /// `true` for the opening line, `false` for the closing one.
+    pub open: bool,
+    /// Info string of an opening line (`rust`, `py`, ...), empty if none.
+    pub lang: String,
+}
+
+/// A quote line that belongs to a callout block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalloutRow {
+    pub kind: CalloutKind,
+    pub role: CalloutRole,
+    /// First / last line of the block (for rounding and padding).
+    pub first: bool,
+    pub last: bool,
+}
+
+/// `[!type]` (+ optional fold marker and spaces) at the start of `rest`:
+/// returns the bytes to hide and the kind.
+fn callout_tag(rest: &str) -> Option<(usize, CalloutKind)> {
+    let inner = rest.strip_prefix("[!")?;
+    let close = inner.find(']')?;
+    let kind = CalloutKind::from_tag(&inner[..close])?;
+    let mut len = 2 + close + 1;
+    if matches!(rest.as_bytes().get(len), Some(b'+' | b'-')) {
+        len += 1;
+    }
+    len += rest[len..].len() - rest[len..].trim_start_matches(' ').len();
+    Some((len, kind))
+}
+
 /// A line that belongs to a GFM pipe table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
@@ -122,6 +212,10 @@ pub struct Row {
     pub runs: Vec<Run>,
     /// Set for the lines of a pipe table.
     pub table: Option<TableRow>,
+    /// Set for the lines of a callout block.
+    pub callout: Option<CalloutRow>,
+    /// Set on the delimiter lines of a fenced code block.
+    pub fence: Option<Fence>,
 }
 
 /// One visible span of display text and the source it came from.
@@ -366,7 +460,33 @@ pub fn build_rows(text: &str) -> Vec<Row> {
         rows.push(row);
     }
     mark_tables(text, &mut rows);
+    mark_callouts(&mut rows);
     rows
+}
+
+/// Quote lines right below a callout title join its block.
+fn mark_callouts(rows: &mut [Row]) {
+    let mut i = 0;
+    while i < rows.len() {
+        let Some(title) = rows[i].callout else {
+            i += 1;
+            continue;
+        };
+        let mut end = i + 1;
+        while end < rows.len() && rows[end].kind == RowKind::Quote && rows[end].callout.is_none() {
+            rows[end].callout = Some(CalloutRow {
+                kind: title.kind,
+                role: CalloutRole::Body,
+                first: false,
+                last: false,
+            });
+            end += 1;
+        }
+        if let Some(last) = rows[end - 1].callout.as_mut() {
+            last.last = true;
+        }
+        i = end;
+    }
 }
 
 /// Turn header + delimiter (+ body) line groups into table rows.
@@ -441,11 +561,24 @@ fn classify(
             list_depth: 0,
             runs: Vec::new(),
             table: None,
+            callout: None,
+            fence: None,
         };
     }
     if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
         *in_fence = !*in_fence;
-        return raw_row(src, RowKind::Code);
+        let mut row = raw_row(src, RowKind::Code);
+        let lang = trimmed
+            .trim_start_matches(['`', '~'])
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        row.fence = Some(Fence {
+            open: *in_fence,
+            lang: if *in_fence { lang } else { String::new() },
+        });
+        return row;
     }
     if *in_fence {
         return raw_row(src, RowKind::Code);
@@ -506,6 +639,20 @@ fn classify(
         }
     }
 
+    // `> [!note] Title`: the tag is markup; the row opens a callout block.
+    let mut callout = None;
+    if kind == RowKind::Quote
+        && let Some((len, ckind)) = callout_tag(rest)
+    {
+        specials.push((p..p + len, Role::Lead));
+        callout = Some(CalloutRow {
+            kind: ckind,
+            role: CalloutRole::Title,
+            first: true,
+            last: false,
+        });
+    }
+
     let runs = make_runs(src.clone(), spans, &specials);
     Row {
         src,
@@ -514,6 +661,8 @@ fn classify(
         list_depth,
         runs,
         table: None,
+        callout,
+        fence: None,
     }
 }
 
@@ -540,6 +689,8 @@ fn raw_row(src: Range<usize>, kind: RowKind) -> Row {
         list_depth: 0,
         runs,
         table: None,
+        callout: None,
+        fence: None,
     }
 }
 
@@ -1126,5 +1277,52 @@ mod tests {
         assert!(fenced.iter().all(|r| r.table.is_none()));
         let no_edges = build_rows("a | b\n--- | ---\n1 | 2\n");
         assert_eq!(no_edges[2].table.as_ref().unwrap().role, TableRole::Body);
+    }
+
+    #[test]
+    fn callouts_group_title_and_body_lines() {
+        let text =
+            "> [!warning]- Careful\n> body one\n> body two\n\n> plain quote\n> [!tip] later\n";
+        let rows = build_rows(text);
+        let c0 = rows[0].callout.unwrap();
+        assert_eq!(
+            (c0.kind, c0.role, c0.first, c0.last),
+            (CalloutKind::Warning, CalloutRole::Title, true, false)
+        );
+        assert_eq!(rows[2].callout.unwrap().role, CalloutRole::Body);
+        assert!(rows[2].callout.unwrap().last);
+        assert!(rows[4].callout.is_none(), "an ordinary quote stays a quote");
+        // A tag inside an existing quote block starts its own callout.
+        assert_eq!(rows[5].callout.unwrap().kind, CalloutKind::Tip);
+        assert!(rows[5].callout.unwrap().first && rows[5].callout.unwrap().last);
+        // The tag (and fold marker) are hidden; only the title shows.
+        assert_eq!(shown(text, 0, false), "Careful");
+        assert_eq!(shown(text, 0, true), "> [!warning]- Careful");
+        assert_eq!(shown(text, 1, false), "body one");
+    }
+
+    #[test]
+    fn callout_tags_cover_aliases_and_reject_unknown() {
+        assert_eq!(CalloutKind::from_tag("CAUTION"), Some(CalloutKind::Warning));
+        assert_eq!(CalloutKind::from_tag("tldr"), Some(CalloutKind::Note));
+        assert_eq!(CalloutKind::from_tag("nonsense"), None);
+        assert!(build_rows("> [!nonsense] x")[0].callout.is_none());
+        assert_eq!(
+            shown("> [!note]", 0, false),
+            "",
+            "title-less callout shows the default title elsewhere"
+        );
+    }
+
+    #[test]
+    fn fence_lines_are_marked_with_their_language() {
+        let rows = build_rows("```rust title=x\nfn a() {}\n```\ntext\n~~~\nraw\n~~~\n");
+        let f0 = rows[0].fence.as_ref().unwrap();
+        assert!(f0.open);
+        assert_eq!(f0.lang, "rust");
+        assert!(rows[1].fence.is_none(), "content is not a delimiter");
+        assert!(!rows[2].fence.as_ref().unwrap().open);
+        assert_eq!(rows[4].fence.as_ref().unwrap().lang, "");
+        assert!(rows[3].fence.is_none());
     }
 }

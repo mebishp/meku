@@ -159,6 +159,8 @@ pub struct MekuShell {
     /// Width document rows wrap at (set while painting; used by the caret).
     doc_wrap: Rc<std::cell::Cell<Pixels>>,
     doc_tables: document::TableCache,
+    /// Fence row whose code was just copied (button shows "Copied").
+    copied: Option<(usize, Instant)>,
     /// Scroll and measurement state of the document list.
     doc_list: ListState,
     /// File the list state currently describes.
@@ -220,6 +222,7 @@ impl MekuShell {
             doc_views: Rc::new(RefCell::new(Vec::new())),
             doc_wrap: Rc::new(std::cell::Cell::new(px(0.))),
             doc_tables: Rc::new(RefCell::new((u64::MAX, HashMap::new()))),
+            copied: None,
             doc_list: ListState::new(0, ListAlignment::Top, px(600.)),
             doc_list_rel: None,
             conflict: None,
@@ -4984,5 +4987,60 @@ mod ui_tests {
             })
         });
         assert_eq!(rows, Some(4));
+    }
+
+    // -- code blocks & callouts ----------------------------------------
+
+    #[test]
+    fn copy_button_puts_the_code_on_the_clipboard() {
+        run_ui_test("code_copy", code_copy_body);
+    }
+
+    fn code_copy_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(
+            cx,
+            1200.0,
+            800.0,
+            "intro\n\n```rust\nfn a() {}\nlet b = 1;\n```\nafter\n",
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("copy-code", 2usize), cx);
+        })
+        .unwrap();
+        let clip = cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(
+            clip.as_deref(),
+            Some("fn a() {}\nlet b = 1;"),
+            "fence lines are not copied"
+        );
+        assert!(
+            view.read_with(&*cx, |s, _| s.copied.is_some()),
+            "button reports Copied"
+        );
+        // The caret did not move onto the fence row (which would reveal it).
+        assert_eq!(doc_caret(cx, &view, &PathBuf::from("doc.md")), 0);
+    }
+
+    #[test]
+    fn callout_blocks_are_recognised_in_the_model() {
+        run_ui_test("callout_model", callout_model_body);
+    }
+
+    fn callout_model_body(cx: &mut TestAppContext) {
+        let (view, _window, _dir) =
+            open_note_in(cx, 1200.0, 800.0, "> [!tip] Hint\n> use it\n\n> plain\n");
+        let rel = PathBuf::from("doc.md");
+        let kinds = cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.doc_model(&rel, cx).map(|m| {
+                    m.rows
+                        .iter()
+                        .map(|r| r.callout.is_some())
+                        .collect::<Vec<_>>()
+                })
+            })
+        });
+        assert_eq!(kinds, Some(vec![true, true, false, false, false]));
     }
 }

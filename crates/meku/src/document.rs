@@ -15,15 +15,17 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::*;
 use meku_markdown::InlineStyle;
 use meku_markdown::highlight::{Tok, highlight};
 use meku_markdown::live::{
-    Display, LinkTarget, Row, RowKind, TableRole, build_rows, classify_link, heading_slug, link_at,
-    project, row_at,
+    CalloutKind, CalloutRole, Display, Fence, LinkTarget, Row, RowKind, TableRole, build_rows,
+    classify_link, heading_slug, link_at, project, row_at,
 };
 use meku_table::Align;
 
@@ -302,6 +304,10 @@ impl MekuShell {
         let caret_on = self.caret_on;
         let wrap_cell = self.doc_wrap.clone();
         let tables = self.doc_tables.clone();
+        let copied_ix = self
+            .copied
+            .filter(|(_, at)| at.elapsed() < std::time::Duration::from_millis(1500))
+            .map(|(i, _)| i);
         let version = model.version;
         let col_width = wrap_cell.get();
         let hover_link = self.hover_link;
@@ -339,6 +345,7 @@ impl MekuShell {
                 &rows,
                 &tables,
                 version,
+                copied_ix == Some(ix),
                 &shell,
                 &views,
                 window,
@@ -1259,6 +1266,117 @@ fn caret_element(
         .bg(color)
 }
 
+/// Background of fenced code blocks.
+fn code_bg(cx: &App) -> Hsla {
+    cx.theme().sidebar
+}
+
+/// Source text between the fence lines of the block opened at row `ix`.
+fn fence_block_text(ix: usize, rows: &[Row], text: &str) -> String {
+    let mut end = ix + 1;
+    while end < rows.len() && !rows[end].fence.as_ref().is_some_and(|f| !f.open) {
+        end += 1;
+    }
+    if end == ix + 1 {
+        return String::new();
+    }
+    text[rows[ix + 1].src.start..rows[end - 1].src.end].to_string()
+}
+
+/// A hidden fence line: the top one becomes a header strip with the language
+/// and a copy button, the bottom one a closing strip, so the block reads as
+/// one rounded container.
+#[allow(clippy::too_many_arguments)]
+fn fence_row_element(
+    row_div: impl ParentElement + Styled + IntoElement,
+    ix: usize,
+    fence: &Fence,
+    rows: &[Row],
+    text: &str,
+    copied: bool,
+    shell: &Entity<MekuShell>,
+    cx: &App,
+) -> AnyElement {
+    let bg = code_bg(cx);
+    if !fence.open {
+        return row_div
+            .h(px(10.))
+            .bg(bg)
+            .rounded_bl(px(8.))
+            .rounded_br(px(8.))
+            .into_any_element();
+    }
+    let code = fence_block_text(ix, rows, text);
+    let shell = shell.clone();
+    let lang = fence.lang.clone();
+    row_div
+        .h(px(32.))
+        .bg(bg)
+        .rounded_tl(px(8.))
+        .rounded_tr(px(8.))
+        .px(px(14.))
+        .child(
+            h_flex()
+                .size_full()
+                .justify_end()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(lang),
+                )
+                .child(
+                    // Presses here belong to the button, not the caret.
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Button::new(("copy-code", ix))
+                                .label(if copied { "Copied" } else { "Copy" })
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                                    shell.update(cx, |view, cx| {
+                                        view.copied = Some((ix, Instant::now()));
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+/// Accent of a callout family, from the active theme.
+fn callout_color(kind: CalloutKind, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match kind {
+        CalloutKind::Note => crate::theme::accent_alpha(cx, 1.0),
+        CalloutKind::Info => theme.info,
+        CalloutKind::Tip | CalloutKind::Success => theme.success,
+        CalloutKind::Question | CalloutKind::Warning => theme.warning,
+        CalloutKind::Danger | CalloutKind::Bug => theme.danger,
+        CalloutKind::Example => hex(crate::theme::active(cx).keyword),
+        CalloutKind::Quote => theme.muted_foreground,
+    }
+}
+
+fn callout_icon(kind: CalloutKind) -> IconName {
+    match kind {
+        CalloutKind::Note => IconName::FileText,
+        CalloutKind::Info => IconName::Info,
+        CalloutKind::Tip => IconName::Star,
+        CalloutKind::Success => IconName::CircleCheck,
+        CalloutKind::Question => IconName::CircleAlert,
+        CalloutKind::Warning => IconName::TriangleAlert,
+        CalloutKind::Danger | CalloutKind::Bug => IconName::CircleX,
+        CalloutKind::Example => IconName::SquareTerminal,
+        CalloutKind::Quote => IconName::FileText,
+    }
+}
+
 /// Column widths per table (keyed by its header row), valid for one document
 /// version.
 pub(crate) type TableCache = Rc<RefCell<(u64, HashMap<usize, Rc<Vec<Pixels>>>)>>;
@@ -1408,6 +1526,7 @@ fn row_element(
     rows: &[Row],
     tables: &TableCache,
     version: u64,
+    copied: bool,
     shell: &Entity<MekuShell>,
     views: &RowViews,
     window: &mut Window,
@@ -1456,6 +1575,13 @@ fn row_element(
         let mut el = row_div.pl(inset).py(px(4.));
         el = el.child(image_row_element(source, ix, cx));
         return el.into_any_element();
+    }
+
+    if !reveal && let Some(fence) = &row.fence {
+        if let Some(slot) = views.borrow_mut().get_mut(ix) {
+            *slot = None;
+        }
+        return fence_row_element(row_div, ix, fence, rows, text, copied, shell, cx);
     }
 
     if !reveal && let Some(table) = &row.table {
@@ -1528,6 +1654,14 @@ fn row_element(
     if matches!(row.kind, RowKind::Code | RowKind::Table) {
         base.font_family = cx.theme().mono_font_family.clone();
     }
+    // Callouts draw only while their line is not being edited.
+    let callout = row.callout.filter(|_| !reveal);
+    if let Some(c) = callout
+        && c.role == CalloutRole::Title
+    {
+        base.font_weight = FontWeight::BOLD;
+        base.color = callout_color(c.kind, cx);
+    }
     // Find matches on this row, in display coordinates.
     let find_disp: Vec<(usize, usize, bool)> = find_hits
         .iter()
@@ -1549,6 +1683,7 @@ fn row_element(
         cx,
     );
     let font_size = base_font * heading_scale(row.kind);
+    let display_empty = display.text.is_empty();
     // Kept for caret shaping below, once this row's padding is known.
     let caret_shape = caret_disp.map(|index| (display.text.clone(), runs.clone(), index));
     let styled = StyledText::new(display.text.clone()).with_runs(runs);
@@ -1579,15 +1714,57 @@ fn row_element(
         el = el.pt(pad_top).pb(font_size * below);
         text_y = pad_top;
     }
-    if row.quote_depth > 0 {
+    if row.quote_depth > 0 && callout.is_none() {
         let depth = f32::from(row.quote_depth.min(4));
+        let mut rule = cx.theme().muted_foreground;
+        rule.a = 0.5;
         el = el
             .border_l_2()
-            .border_color(cx.theme().accent)
+            .border_color(rule)
             .pl(base_font * (1.2 * depth));
         // Later padding refinements replace earlier ones (same as the style
         // system), so track by assignment, not accumulation.
         text_x = base_font * (1.2 * depth);
+    }
+    if let Some(c) = callout {
+        let color = callout_color(c.kind, cx);
+        let mut tint = color;
+        tint.a = 0.11;
+        let pad = px(14.);
+        el = el.bg(tint).pl(pad).pr(pad);
+        text_x = pad;
+        if c.first {
+            el = el.pt(px(10.)).rounded_tl(px(8.)).rounded_tr(px(8.));
+            text_y = px(10.);
+        }
+        if c.last {
+            el = el.pb(px(10.)).rounded_bl(px(8.)).rounded_br(px(8.));
+        }
+        if c.role == CalloutRole::Title {
+            let icon_size = px(16.);
+            let line_h = window.text_style().line_height_in_pixels(window.rem_size());
+            el = el.pl(pad + px(26.)).child(
+                div()
+                    .absolute()
+                    .left(pad)
+                    .top(text_y + ((line_h - icon_size) / 2.0).max(px(0.)))
+                    .child(
+                        Icon::new(callout_icon(c.kind))
+                            .size(icon_size)
+                            .text_color(color),
+                    ),
+            );
+            text_x = pad + px(26.);
+            // A title-less callout shows its kind as the title.
+            if display_empty {
+                el = el.child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(color)
+                        .child(c.kind.default_title()),
+                );
+            }
+        }
     }
     if !reveal && row.list_depth > 0 {
         let indent = base_font * (1.5 * f32::from(row.list_depth.min(8)));
@@ -1632,15 +1809,16 @@ fn row_element(
         el = el.pb(base_font * 0.25);
     }
     if row.kind == RowKind::Code {
-        el = el.bg(cx.theme().sidebar).rounded_sm();
-        if colored.is_none() {
-            el = el.px_2();
-            text_x = px(8.);
-        }
+        el = el.bg(code_bg(cx)).px(px(14.));
+        text_x = px(14.);
     }
-    el = el.child(styled);
-    let right_pad = if row.kind == RowKind::Code && colored.is_none() {
-        px(8.)
+    // A title-less callout shows its default title instead of empty text.
+    let title_less = callout.is_some_and(|c| c.role == CalloutRole::Title) && display_empty;
+    if !title_less {
+        el = el.child(styled);
+    }
+    let right_pad = if row.kind == RowKind::Code {
+        px(14.)
     } else {
         px(0.)
     };
