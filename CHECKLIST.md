@@ -313,3 +313,10 @@ _Fonts and colors are **excluded** by decision; only spacing, margins, layout, c
 - [x] **Links are one click.** On any rendered row (Live mode away from the caret, and everywhere in Read) a plain click on link text follows it, with a pointing-hand cursor while hovering; on the caret row / Edit mode the raw source is shown, so a plain click just edits. `Ctrl+click` follows anywhere.
 - Tests: markdown (nesting levels, glyph per level, task run), buffer (3-level cap, box toggle), UI (Tab to level 3 then stop, checkbox click, plain link click vs caret row). Look/alignment of the checkbox and guides not verified visually.
 
+## Section 8 — Big run: themes, features, motion (2026-10-19)
+
+_Decisions (user): several theme presets · tables as grids · callouts + code-block chrome · find/replace + Ctrl-P + palette + vault search · slash menu + formatting shortcuts · subtle & fast motion · verify each step with screenshots · commit per major change. Screenshot harness: `MEKU_THEME`, `MEKU_MODE`, `MEKU_CARET`, `MEKU_ROW`, `MEKU_MODAL` env hooks + extra CLI args open notes at startup; capture through the XDG screenshot portal (scripts in the session scratchpad)._
+
+- [x] Audit P1 fixes: tab strip no longer widens the pane/window (scrolls), modal scrim no longer fades the dialog card.
+- [x] **Theme presets** (`crates/meku/src/theme.rs`): Meku Light, Meku Dark, Solarized Light/Dark, Nord, Gruvbox Dark, Dracula. A `Palette` drives the kit `ThemeConfig` (every shell surface) *and* the editor's syntax/inline-code colors; contrast of body/muted/code/syntax colors is asserted per preset in a unit test. Settings persist in `~/.config/meku/settings.json` (`theme`, `follow_system`, `reduce_motion`); default follows the OS light/dark appearance (live re-resolve when the OS flips). `Ctrl+Alt+T` cycles presets until the command palette lands. Fenced code no longer inherits the inline-code color; caret uses the theme `caret` token. Verified by screenshots (light/dark/solarized/nord/dracula).
+

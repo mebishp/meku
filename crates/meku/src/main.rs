@@ -1,5 +1,6 @@
 mod document;
 mod explorer;
+mod theme;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -28,6 +29,7 @@ actions!(
     meku,
     [
         ToggleSidebar,
+        CycleTheme,
         NewTab,
         CloseTab,
         NextTab,
@@ -171,6 +173,8 @@ pub struct MekuShell {
     caret_touch: Instant,
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
+    /// Row to scroll into view on the next render (startup/screenshot hook).
+    pending_scroll: Option<(usize, u8)>,
     /// The inline title above each open note's body (not part of the
     /// markdown): shows the file stem, and editing it renames the file.
     title_inputs: HashMap<PathBuf, Entity<InputState>>,
@@ -215,6 +219,7 @@ impl MekuShell {
             caret_on: true,
             caret_touch: Instant::now(),
             hover_link: None,
+            pending_scroll: None,
             title_inputs: HashMap::new(),
             title_subs: HashMap::new(),
             title_pending: None,
@@ -265,6 +270,10 @@ impl MekuShell {
         {
             buffer.update(cx, |b, _| b.move_caret(at, false));
         }
+        self.pending_scroll = std::env::var("MEKU_ROW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|row| (row, 3));
         if std::env::var("MEKU_MODAL").as_deref() == Ok("folder") {
             self.begin_naming(NamingMode::NewFolder, PathBuf::new(), None, cx);
         }
@@ -1495,6 +1504,15 @@ impl MekuShell {
         self.cancel_delete(cx);
     }
 
+    fn on_cycle_theme(&mut self, _: &CycleTheme, _: &mut Window, cx: &mut Context<Self>) {
+        let current = theme::active(cx).name;
+        let at = theme::PRESETS
+            .iter()
+            .position(|p| p.name == current)
+            .unwrap_or(0);
+        theme::choose(theme::PRESETS[(at + 1) % theme::PRESETS.len()].name, cx);
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.show_sidebar = !self.show_sidebar;
         cx.notify();
@@ -2040,6 +2058,7 @@ impl Render for MekuShell {
             .track_focus(&focus)
             .key_context("Meku")
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::on_cycle_theme))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
@@ -2159,9 +2178,11 @@ fn main() {
         // Required: initializes gpui-component theming/global state.
         gpui_kit::init(cx);
         apply_fonts(cx);
+        theme::init(cx);
 
         cx.bind_keys([
             KeyBinding::new("ctrl-b", ToggleSidebar, Some("Meku")),
+            KeyBinding::new("ctrl-alt-t", CycleTheme, Some("Meku")),
             KeyBinding::new("ctrl-t", NewTab, Some("Meku")),
             KeyBinding::new("ctrl-w", CloseTab, Some("Meku")),
             KeyBinding::new("ctrl-tab", NextTab, Some("Meku")),
@@ -2231,6 +2252,9 @@ fn main() {
             options.app_id = Some("meku".to_string());
             cx.open_window(options, |window, cx| {
                 let view = cx.new(MekuShell::new);
+                window
+                    .observe_window_appearance(|_, cx| theme::on_system_appearance_changed(cx))
+                    .detach();
                 if let Some(dir) = initial_dir {
                     view.update(cx, |shell, cx| {
                         shell.open_mekuto(Path::new(&dir), cx);

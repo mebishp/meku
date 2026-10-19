@@ -3896,6 +3896,8 @@ dependencies = [
  "meku-vault",
  "notify",
  "rfd",
+ "serde",
+ "serde_json",
  "tempfile",
  "walkdir",
 ]

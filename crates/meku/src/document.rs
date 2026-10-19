@@ -280,6 +280,17 @@ impl MekuShell {
             self.doc_list.reset(count);
         }
         *self.doc_views.borrow_mut() = (0..count).map(|_| None).collect();
+        // Startup scroll waits until the list has been measured.
+        if let Some((row, frames)) = self.pending_scroll {
+            if frames == 0 {
+                self.pending_scroll = None;
+                self.doc_list
+                    .scroll_to_reveal_item(row.min(count.saturating_sub(1)));
+            } else {
+                self.pending_scroll = Some((row, frames - 1));
+                cx.notify();
+            }
+        }
 
         let shell = cx.entity();
         let rows = model.rows.clone();
@@ -1018,7 +1029,7 @@ fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
     }
     if bits.contains(InlineStyle::CODE) {
         style.font_family = cx.theme().mono_font_family.clone();
-        style.color = cx.theme().accent;
+        style.color = hex(crate::theme::active(cx).code);
     }
     if bits.contains(InlineStyle::LINK) {
         style.color = cx.theme().link;
@@ -1032,16 +1043,16 @@ fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
 
 /// Zed-like code palette for tree-sitter token classes.
 fn tok_color(token: Tok, cx: &App) -> Hsla {
+    let p = crate::theme::active(cx);
     match token {
-        Tok::Comment => cx.theme().muted_foreground,
-        Tok::Str => hex(0xa6_e3_a1),
-        Tok::Num => hex(0xfa_b3_87),
-        Tok::Const => hex(0xf5_c2_e7),
-        Tok::Prop => hex(0x94_e2_d5),
-        Tok::Func => hex(0x89_b4_fa),
-        Tok::Type => hex(0xf9_e2_af),
-        Tok::Op => hex(0x94_e2_d5),
-        Tok::Keyword => hex(0xcb_a6_f7),
+        Tok::Comment => hex(p.comment),
+        Tok::Str => hex(p.string),
+        Tok::Num => hex(p.number),
+        Tok::Const => hex(p.constant),
+        Tok::Prop | Tok::Op => hex(p.prop),
+        Tok::Func => hex(p.func),
+        Tok::Type => hex(p.ty),
+        Tok::Keyword => hex(p.keyword),
         Tok::Other => cx.theme().foreground,
     }
 }
@@ -1058,6 +1069,7 @@ fn text_runs(
     base: &TextStyle,
     selection: Option<(usize, usize)>,
     colored: &[(Range<usize>, Tok)],
+    code_row: bool,
     cx: &App,
 ) -> Vec<TextRun> {
     let len = display.text.len();
@@ -1098,7 +1110,13 @@ fn text_runs(
                 .iter()
                 .find(|r| r.range.start <= a && a < r.range.end);
             if let Some(run) = covering {
+                let keep = style.color;
                 apply_inline(&mut style, run.style, cx);
+                if code_row {
+                    // Fenced code is plain text with its own syntax colors, not
+                    // inline-code coloring.
+                    style.color = keep;
+                }
                 if run.markup {
                     style.color = cx.theme().muted_foreground;
                 }
@@ -1248,7 +1266,7 @@ fn row_element(
                 (row_h - base_font) / 2.0,
                 base_font,
                 base_font,
-                cx.theme().foreground,
+                cx.theme().caret,
             ));
         }
         return el.into_any_element();
@@ -1276,6 +1294,7 @@ fn row_element(
         &base,
         sel_disp,
         colored.as_deref().map_or(&[], |c| c.as_slice()),
+        row.kind == RowKind::Code,
         cx,
     );
     let font_size = base_font * heading_scale(row.kind);
@@ -1376,7 +1395,7 @@ fn row_element(
             text_y + y_offset,
             cheight,
             font_size,
-            cx.theme().foreground,
+            cx.theme().caret,
         ));
     }
     el.into_any_element()
