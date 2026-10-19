@@ -21,6 +21,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::component::{Icon, IconName};
 use gpui_kit::*;
+use meku_buffer::OpenBuffer;
 use meku_markdown::InlineStyle;
 use meku_markdown::highlight::{Tok, highlight};
 use meku_markdown::live::{
@@ -150,7 +151,7 @@ pub(crate) struct DocModel {
     /// Syntax spans per code row, in line-content byte offsets.
     pub hl: Rc<RowSpans>,
     /// Standalone-image source per row (computed once per version).
-    pub images: Rc<Vec<Option<ImageSrc>>>,
+    pub images: Rc<Vec<Option<ImageInfo>>>,
     /// Word count of the note (status bar).
     pub words: usize,
 }
@@ -170,7 +171,10 @@ pub(crate) type RowViews = Rc<RefCell<Vec<Option<RowView>>>>;
 
 impl MekuShell {
     pub(crate) fn modal_open(&self) -> bool {
-        self.naming.is_some() || self.pending_delete.is_some() || self.palette_open()
+        self.naming.is_some()
+            || self.pending_delete.is_some()
+            || self.palette_open()
+            || self.lightbox.is_some()
     }
 
     /// Relative path of the note shown by the active tab, when it has a buffer.
@@ -194,14 +198,16 @@ impl MekuShell {
         let rows = Rc::new(build_rows(&text));
         let hl = Self::colored_rows(&text, &rows);
         let root = self.explorer.root().map(Path::to_path_buf);
+        let mut dim_cache = std::mem::take(&mut self.image_dims);
         let images = Rc::new(
             rows.iter()
                 .map(|row| {
                     root.as_deref()
-                        .and_then(|root| image_source_of(row, &text, root, rel))
+                        .and_then(|root| image_source_of(row, &text, root, rel, &mut dim_cache))
                 })
                 .collect(),
         );
+        self.image_dims = dim_cache;
         let words = text.split_whitespace().count();
         let model = DocModel {
             version,
@@ -973,13 +979,21 @@ impl MekuShell {
                     false
                 }
             }
-            DocKey::Paste => match cx.read_from_clipboard().and_then(|item| item.text()) {
-                Some(text) => {
-                    buffer.update(cx, |b, _| b.paste(&text));
-                    true
+            DocKey::Paste => {
+                let clip = cx.read_from_clipboard();
+                match clip.as_ref().and_then(|item| item.text()) {
+                    Some(text) => {
+                        buffer.update(cx, |b, _| b.paste(&text));
+                        true
+                    }
+                    None => match clip.as_ref().and_then(pasted_image) {
+                        // Screenshots and copied pictures: save beside the
+                        // note and link them in.
+                        Some(image) => self.paste_image(&rel, &buffer, image, cx),
+                        None => false,
+                    },
                 }
-                None => false,
-            },
+            }
         };
         if mutated {
             self.doc_note_edit(&rel);
@@ -1045,6 +1059,50 @@ impl MekuShell {
             buffer.update(cx, |b, _| b.move_caret(at, false));
         }
         cx.notify();
+    }
+
+    /// Save a pasted picture as `attachments/pasted-<time>.<ext>` next to the
+    /// note and insert `![](…)` on its own line. Returns whether the note
+    /// changed.
+    fn paste_image(
+        &mut self,
+        rel: &Path,
+        buffer: &Entity<OpenBuffer>,
+        image: Image,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(root) = self.explorer.root().map(Path::to_path_buf) else {
+            return false;
+        };
+        let dir = rel.parent().unwrap_or(Path::new("")).join("attachments");
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut name = format!("pasted-{secs}.{}", image_extension(image.format));
+        let mut n = 1;
+        while root.join(&dir).join(&name).exists() {
+            n += 1;
+            name = format!("pasted-{secs}-{n}.{}", image_extension(image.format));
+        }
+        let saved = std::fs::create_dir_all(root.join(&dir))
+            .and_then(|()| std::fs::write(root.join(&dir).join(&name), &image.bytes));
+        if let Err(e) = saved {
+            self.notice = Some(format!("Could not save the pasted image: {e}"));
+            return false;
+        }
+        let link = format!("![](attachments/{name})");
+        buffer.update(cx, |b, _| {
+            // Images render when they are alone on their line.
+            let (line_start, line) = (b.line_start_of_caret(), b.caret_line_text());
+            let text = if line.trim().is_empty() && b.caret() == line_start + line.len() {
+                format!("{link}\n")
+            } else {
+                format!("\n{link}\n")
+            };
+            b.insert(&text);
+        });
+        self.notice = Some(format!("Saved attachments/{name}"));
+        true
     }
 
     /// Scroll the row holding `offset` into view without moving the caret.
@@ -1126,24 +1184,80 @@ pub(crate) enum ImageSrc {
 
 /// A row whose whole source line is one image: targeted when hidden (Live/
 /// Read presentation); the caret row and Edit mode show the raw text.
-fn image_source_of(row: &Row, text: &str, root: &Path, note_rel: &Path) -> Option<ImageSrc> {
+/// An image row: where it comes from, its caption, an explicit width
+/// (`![alt|320](..)`) and, for local files, its real pixel size.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ImageInfo {
+    pub src: ImageSrc,
+    pub caption: String,
+    pub width: Option<u32>,
+    pub dims: Option<(u32, u32)>,
+}
+
+/// Pixel size of a local image from its header (no decoding), cached by
+/// modification time.
+pub(crate) type DimCache = HashMap<PathBuf, (std::time::SystemTime, (u32, u32))>;
+
+fn probe_dims(cache: &mut DimCache, path: &Path) -> Option<(u32, u32)> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    if let Some((at, dims)) = cache.get(path)
+        && *at == mtime
+    {
+        return Some(*dims);
+    }
+    let size = imagesize::size(path).ok()?;
+    let dims = (size.width as u32, size.height as u32);
+    cache.insert(path.to_path_buf(), (mtime, dims));
+    Some(dims)
+}
+
+/// A row whose whole source line is one image: targeted when hidden (Live/
+/// Read presentation); the caret row and Edit mode show the raw text.
+fn image_source_of(
+    row: &Row,
+    text: &str,
+    root: &Path,
+    note_rel: &Path,
+    dims: &mut DimCache,
+) -> Option<ImageInfo> {
     if row.kind != RowKind::Text {
         return None;
     }
-    let (_, target) = meku_markdown::live::standalone_image(&text[row.src.clone()])?;
+    let (alt, target) = meku_markdown::live::standalone_image(&text[row.src.clone()])?;
+    let (caption, width) = meku_markdown::live::alt_and_width(alt);
+    let caption = caption.to_string();
     if target.starts_with("http://")
         || target.starts_with("https://")
         || target.starts_with("data:")
     {
-        return Some(ImageSrc::Url(target.to_string()));
+        return Some(ImageInfo {
+            src: ImageSrc::Url(target.to_string()),
+            caption,
+            width,
+            dims: None,
+        });
     }
+    let decoded = meku_markdown::live::percent_decode(target);
     let note_dir = note_rel.parent().unwrap_or(Path::new(""));
-    let joined = root.join(note_dir).join(target);
-    if joined.starts_with(root) {
-        Some(ImageSrc::Path(joined))
-    } else {
-        None
+    // Resolve `..` lexically and refuse anything that climbs out of the mekuto.
+    let mut parts: Vec<std::ffi::OsString> = note_dir.iter().map(|c| c.to_os_string()).collect();
+    for comp in decoded.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            c => parts.push(c.into()),
+        }
     }
+    let joined = root.join(parts.iter().collect::<PathBuf>());
+    let dims = probe_dims(dims, &joined);
+    Some(ImageInfo {
+        src: ImageSrc::Path(joined),
+        caption,
+        width,
+        dims,
+    })
 }
 
 fn apply_inline(style: &mut TextStyle, bits: InlineStyle, cx: &App) {
@@ -1359,6 +1473,25 @@ impl<E: IntoElement + Styled + 'static> OpenFade for E {
     fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement {
         let id = SharedString::from(format!("doc-open-{}", rel.display()));
         crate::theme::fade_in(self, id, 160, 0.0, cx)
+    }
+}
+
+/// The first image on the clipboard, if any.
+fn pasted_image(item: &ClipboardItem) -> Option<Image> {
+    item.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) => Some(image.clone()),
+        _ => None,
+    })
+}
+
+fn image_extension(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        _ => "png",
     }
 }
 
@@ -1615,7 +1748,7 @@ fn row_element(
     caret: Option<usize>,
     selection: Option<Range<usize>>,
     colored: RowColors,
-    image: Option<ImageSrc>,
+    image: Option<ImageInfo>,
     pointer: bool,
     find_hits: &[(Range<usize>, bool)],
     col_width: Pixels,
@@ -1665,14 +1798,21 @@ fn row_element(
 
     // Standalone image rows draw their picture when hidden; the caret row and
     // Edit mode show the raw text instead (unchanged flow below).
-    if !reveal && let Some(source) = image {
+    if !reveal && let Some(info) = image {
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
         }
         let inset = px(20.0 * f32::from(row.list_depth.min(8)));
-        let mut el = row_div.pl(inset).py(px(4.));
-        el = el.child(image_row_element(source, ix, cx));
-        return el.into_any_element();
+        let avail = if col_width > px(0.) {
+            col_width - inset
+        } else {
+            px(560.)
+        };
+        return row_div
+            .pl(inset)
+            .py(px(6.))
+            .child(image_row_element(info, ix, avail, shell, cx))
+            .into_any_element();
     }
 
     if !reveal && let Some(fence) = &row.fence {
@@ -1967,66 +2107,112 @@ fn row_element(
     el.into_any_element()
 }
 
-/// Placeholder box with the image (or its loading/fallback states) stretched
-/// inside a fixed frame, so the row height cannot jitter between load states.
-fn image_row_element(source: ImageSrc, ix: usize, cx: &App) -> AnyElement {
-    let frame = |inner: AnyElement| {
-        div()
-            .id(("image-row", ix))
-            .test_support()
-            .h(px(240.))
-            .w(px(480.))
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .overflow_hidden()
-            .child(inner)
-            .into_any_element()
+/// Largest height of an image row.
+const IMAGE_MAX_H: f32 = 460.0;
+
+/// Frame size for an image: its natural (or `|width`-hinted) size, never wider
+/// than the column, never taller than [`IMAGE_MAX_H`], aspect preserved. With
+/// no known size (remote images) a 16:9 box.
+pub(crate) fn image_frame_size(info: &ImageInfo, avail: Pixels) -> (Pixels, Pixels) {
+    let avail = f32::from(avail).max(120.0);
+    match info.dims {
+        Some((w, h)) if w > 0 && h > 0 => {
+            let natural = info.width.unwrap_or(w) as f32;
+            let mut fw = natural.min(avail);
+            let mut fh = fw * h as f32 / w as f32;
+            if fh > IMAGE_MAX_H {
+                fw *= IMAGE_MAX_H / fh;
+                fh = IMAGE_MAX_H;
+            }
+            (px(fw), px(fh))
+        }
+        _ => {
+            let fw = info.width.map_or(480.0, |w| w as f32).min(avail);
+            (px(fw), px(fw * 9.0 / 16.0))
+        }
+    }
+}
+
+/// The image picture itself, `Contain`-fit into whatever box it is given,
+/// with loading / unavailable states. Shared by the row and the lightbox.
+pub(crate) fn picture(src: &ImageSrc, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let note = move |text: &'static str| {
+        move || {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(muted)
+                .child(text)
+                .into_any_element()
+        }
     };
-    let inner = match source {
-        ImageSrc::Path(path) => img(path)
-            .id("doc-image")
+    match src {
+        ImageSrc::Path(path) => img(path.clone())
             .size_full()
-            .max_h(px(240.))
             .object_fit(ObjectFit::Contain)
-            .with_fallback(|| {
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(Hsla::default())
-                    .child("Image unavailable")
-                    .into_any_element()
-            }),
-        ImageSrc::Url(url) => img(url)
-            .id("doc-image")
+            .with_fallback(note("Image unavailable"))
+            .into_any_element(),
+        ImageSrc::Url(url) => img(url.clone())
             .size_full()
-            .max_h(px(240.))
             .object_fit(ObjectFit::Contain)
-            .with_loading(|| {
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .child("Loading…")
-                    .into_any_element()
-            })
-            .with_fallback(|| {
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .child("Image unavailable")
-                    .into_any_element()
-            }),
-    };
-    frame(inner.into_any_element())
+            .with_loading(note("Loading…"))
+            .with_fallback(note("Image unavailable"))
+            .into_any_element(),
+    }
+}
+
+/// A standalone image row: framed, rounded, click to zoom (lightbox).
+fn image_row_element(
+    info: ImageInfo,
+    ix: usize,
+    avail: Pixels,
+    shell: &Entity<MekuShell>,
+    cx: &App,
+) -> AnyElement {
+    let (fw, fh) = image_frame_size(&info, avail);
+    let theme_colors = cx.theme();
+    let border = theme_colors.border;
+    let hover_border = crate::theme::accent_alpha(cx, 0.9);
+    let muted = theme_colors.muted_foreground;
+    let open = info.clone();
+    let shell = shell.clone();
+    let frame = div()
+        .id(("image-row", ix))
+        .test_support()
+        .w(fw)
+        .h(fh)
+        .rounded_lg()
+        .border_1()
+        .border_color(border)
+        .overflow_hidden()
+        .cursor_pointer()
+        .hover(move |s| s.border_color(hover_border))
+        // A press on the picture zooms it; it must not move the caret.
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            let open = open.clone();
+            shell.update(cx, |view, cx| {
+                // Esc must reach the shell whatever had focus before.
+                window.focus(&view.focus_handle, cx);
+                view.open_lightbox(open, cx);
+            });
+        })
+        .child(picture(&info.src, cx));
+    let mut column = v_flex().gap_1().child(frame);
+    if !info.caption.is_empty() {
+        column = column.child(
+            div()
+                .w(fw)
+                .text_xs()
+                .text_color(muted)
+                .child(info.caption.clone()),
+        );
+    }
+    column.into_any_element()
 }
 
 // -- text input ----------------------------------------------------------

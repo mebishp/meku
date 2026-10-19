@@ -3,6 +3,7 @@ mod document;
 mod explorer;
 mod find;
 mod icons;
+mod lightbox;
 mod palette;
 mod slash;
 mod theme;
@@ -193,6 +194,11 @@ pub struct MekuShell {
     caret_touch: Instant,
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
+    /// Image shown in the zoom view, and its zoom (`None` = fit to window).
+    lightbox: Option<document::ImageInfo>,
+    lightbox_zoom: Option<f32>,
+    /// Header-probed pixel sizes of local images.
+    image_dims: document::DimCache,
     /// Scroll state of the tab strip, and the tab it was last scrolled to.
     tabs_scroll: ScrollHandle,
     tabs_scrolled_to: Option<usize>,
@@ -257,6 +263,9 @@ impl MekuShell {
             caret_on: true,
             caret_touch: Instant::now(),
             hover_link: None,
+            lightbox: None,
+            lightbox_zoom: None,
+            image_dims: HashMap::new(),
             tabs_scroll: ScrollHandle::new(),
             tabs_scrolled_to: None,
             outline_open: true,
@@ -323,6 +332,14 @@ impl MekuShell {
             .ok()
             .and_then(|v| v.parse().ok())
             .map(|row| (row, 3));
+        if std::env::var("MEKU_LIGHTBOX").is_ok()
+            && let Some(rel) = self.doc_rel()
+            && let Some(model) = self.doc_model(&rel, cx)
+            && let Some(info) = model.images.iter().flatten().next().cloned()
+        {
+            self.open_lightbox(info, cx);
+            self.lightbox_zoom = std::env::var("MEKU_ZOOM").ok().and_then(|v| v.parse().ok());
+        }
         if std::env::var("MEKU_FIND").is_ok() {
             self.open_find(std::env::var("MEKU_REPLACE").is_ok(), cx);
         }
@@ -1526,6 +1543,9 @@ impl MekuShell {
     }
 
     fn on_cancel_overlay(&mut self, _: &CancelOverlay, _: &mut Window, cx: &mut Context<Self>) {
+        if self.close_lightbox(cx) {
+            return;
+        }
         if self.slash_dismiss() {
             cx.notify();
         } else if self.palette_open() || self.naming.is_some() || self.pending_delete.is_some() {
@@ -1971,6 +1991,9 @@ impl Render for MekuShell {
             ));
         } else if let Some(palette) = self.render_palette(cx) {
             root = root.child(palette);
+        }
+        if let Some(view) = self.render_lightbox(window, cx) {
+            root = root.child(view);
         }
         root
     }
@@ -5132,6 +5155,150 @@ mod ui_tests {
         assert!(
             !view.read_with(&*cx, |s, _| s.show_sidebar),
             "title bar toggles the sidebar"
+        );
+    }
+
+    // -- images & lightbox -------------------------------------------------
+
+    /// Smallest PNG header: signature + IHDR of a 1x1 image (enough for the
+    /// size probe, which never decodes).
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+        0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89,
+    ];
+
+    #[test]
+    fn image_frames_keep_proportions_and_caps() {
+        use crate::document::{ImageInfo, ImageSrc, image_frame_size};
+        let mk = |dims: Option<(u32, u32)>, width: Option<u32>| ImageInfo {
+            src: ImageSrc::Url("x".into()),
+            caption: String::new(),
+            width,
+            dims,
+        };
+        let f = |i: &ImageInfo, avail: f32| {
+            let (w, h) = image_frame_size(i, px(avail));
+            (f32::from(w), f32::from(h))
+        };
+        assert_eq!(
+            f(&mk(Some((1200, 675)), None), 600.0),
+            (600.0, 337.5),
+            "wide: fills the column"
+        );
+        assert_eq!(
+            f(&mk(Some((200, 100)), None), 600.0),
+            (200.0, 100.0),
+            "small: never upscaled"
+        );
+        let (w, h) = f(&mk(Some((600, 900)), None), 600.0);
+        assert_eq!(h, 460.0, "tall images are capped");
+        assert!(
+            (w - 306.67).abs() < 0.1,
+            "…with the width scaled to match: {w}"
+        );
+        assert_eq!(
+            f(&mk(Some((1200, 675)), Some(240)), 600.0),
+            (240.0, 135.0),
+            "|240 width hint"
+        );
+        assert_eq!(
+            f(&mk(None, None), 800.0),
+            (480.0, 270.0),
+            "unknown size: 16:9"
+        );
+    }
+
+    #[test]
+    fn clicking_an_image_opens_the_lightbox_and_zoom_steps_work() {
+        run_ui_test("lightbox", lightbox_body);
+    }
+
+    fn lightbox_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(
+            cx,
+            1200.0,
+            800.0,
+            "intro\n\n![the cap|50](pic one.png)\n\nafter\n",
+        );
+        std::fs::write(dir.path().join("pic one.png"), PNG_1X1).unwrap();
+        // Rebuild the model so the file's size is probed.
+        cx.update(|cx| view.update(cx, |s, _| s.doc_models.clear()));
+        let state = |cx: &mut TestAppContext| {
+            view.read_with(&*cx, |s, _| (s.lightbox.is_some(), s.lightbox_zoom))
+        };
+        step(cx, window, |_, _| {});
+        let info = cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                let rel = s.doc_rel().unwrap();
+                s.doc_model(&rel, cx).and_then(|m| m.images[2].clone())
+            })
+        });
+        let info = info.expect("image row is recognised (spaces in the path, |width hint)");
+        assert_eq!(
+            (info.caption.as_str(), info.width, info.dims),
+            ("the cap", Some(50), Some((1, 1)))
+        );
+        step(cx, window, |w, cx| w.click(("image-row", 2usize), cx));
+        assert_eq!(state(cx), (true, None), "click opens the zoom view at fit");
+        assert_eq!(
+            doc_caret(cx, &view, &PathBuf::from("doc.md")),
+            0,
+            "the click did not move the caret onto the image row"
+        );
+        step(cx, window, |w, cx| w.click("lightbox-in", cx));
+        assert_eq!(
+            state(cx).1,
+            Some(4.0),
+            "zoom in from fit (3x for a 1px image)"
+        );
+        step(cx, window, |w, cx| w.click("lightbox-out", cx));
+        assert_eq!(state(cx).1, Some(3.0));
+        step(cx, window, |w, cx| w.click("lightbox-fit", cx));
+        assert_eq!(state(cx).1, None, "fit button resets");
+        step(cx, window, |w, cx| w.press("escape", cx));
+        assert!(!state(cx).0, "Esc closes the view");
+        // Closing also works from the close button and the backdrop.
+        step(cx, window, |w, cx| w.click(("image-row", 2usize), cx));
+        step(cx, window, |w, cx| w.click("lightbox-close", cx));
+        assert!(!state(cx).0);
+    }
+
+    #[test]
+    fn pasting_an_image_saves_it_and_links_it() {
+        run_ui_test("paste_image", paste_image_body);
+    }
+
+    fn paste_image_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "intro");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 5);
+        cx.update(|cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(&gpui_kit::Image {
+                format: gpui_kit::ImageFormat::Png,
+                bytes: PNG_1X1.to_vec(),
+                id: 7,
+            }))
+        });
+        step(cx, window, |w, cx| w.press("ctrl-v", cx));
+        let text = buffer_text(cx, &view, &rel).0;
+        assert!(
+            text.starts_with("intro\n![](attachments/pasted-"),
+            "{text:?}"
+        );
+        assert!(
+            text.ends_with(".png)\n"),
+            "own line, with a trailing newline: {text:?}"
+        );
+        let saved: Vec<_> = std::fs::read_dir(dir.path().join("attachments"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            std::fs::read(dir.path().join("attachments").join(&saved[0])).unwrap(),
+            PNG_1X1,
+            "the bytes are saved as pasted"
         );
     }
 }

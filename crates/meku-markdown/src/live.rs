@@ -38,18 +38,41 @@ pub enum RowKind {
 }
 
 /// A source line that is exactly one image: `![alt](target)` after optional
-/// leading whitespace. Targets are used verbatim (`http(s)`, `data:`, paths).
+/// leading whitespace. The target may be `<wrapped in angle brackets>` (for
+/// spaces) and may carry a `"title"`; it is returned without either, and
+/// otherwise verbatim (`http(s)`, `data:`, relative paths, `%20` escapes).
 pub fn standalone_image(line: &str) -> Option<(&str, &str)> {
     let trimmed = line.trim_start_matches(' ').trim_end();
     let bang = trimmed.strip_prefix("![")?;
-    let alt_end = bang.find("]")?;
+    let alt_end = bang.find(']')?;
     let target = bang[alt_end + 1..].trim_start();
-    let target = target.strip_prefix("(")?;
-    let target = target.strip_suffix(")")?;
-    if target.is_empty() || target.contains("\n") {
+    let target = target.strip_prefix('(')?;
+    let target = target.strip_suffix(')')?.trim();
+    if target.is_empty() || target.contains('\n') {
         return None;
     }
-    Some((&bang[..alt_end], target))
+    let target = if let Some(rest) = target.strip_prefix('<') {
+        &rest[..rest.find('>')?]
+    } else {
+        // `path "title"` / `path 'title'`: the title is not part of the path.
+        match target.find(" \"").or_else(|| target.find(" '")) {
+            Some(i) => target[..i].trim_end(),
+            None => target,
+        }
+    };
+    (!target.is_empty()).then_some((&bang[..alt_end], target))
+}
+
+/// Split an image alt text into its caption and an optional width hint
+/// (`![photo|320](x.png)` → `("photo", Some(320))`, Obsidian style).
+pub fn alt_and_width(alt: &str) -> (&str, Option<u32>) {
+    match alt.rsplit_once('|') {
+        Some((caption, w)) => match w.trim().parse::<u32>() {
+            Ok(w) if w > 0 => (caption.trim(), Some(w)),
+            _ => (alt.trim(), None),
+        },
+        None => (alt.trim(), None),
+    }
 }
 
 /// What a byte range is, beyond its inline style.
@@ -389,7 +412,7 @@ pub enum LinkTarget {
     },
 }
 
-fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -1436,5 +1459,24 @@ mod tests {
             spans.len(),
             t1.elapsed()
         );
+    }
+
+    #[test]
+    fn standalone_images_parse_titles_brackets_and_widths() {
+        assert_eq!(standalone_image("![a](x.png)"), Some(("a", "x.png")));
+        assert_eq!(
+            standalone_image("  ![](dir/x.png \"A title\")"),
+            Some(("", "dir/x.png"))
+        );
+        assert_eq!(
+            standalone_image("![a](<my pic.png>)"),
+            Some(("a", "my pic.png"))
+        );
+        assert_eq!(standalone_image("![a](x.png) trailing"), None);
+        assert_eq!(standalone_image("text ![a](x.png)"), None);
+        assert_eq!(alt_and_width("photo|320"), ("photo", Some(320)));
+        assert_eq!(alt_and_width("plain alt"), ("plain alt", None));
+        assert_eq!(alt_and_width("a|b"), ("a|b", None));
+        assert_eq!(alt_and_width("|500"), ("", Some(500)));
     }
 }

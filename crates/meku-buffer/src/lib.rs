@@ -329,6 +329,15 @@ impl OpenBuffer {
         (line + 1, col + 1)
     }
 
+    /// Start offset and text (no newline) of the caret's line.
+    pub fn line_start_of_caret(&self) -> usize {
+        self.line_body().0
+    }
+
+    pub fn caret_line_text(&self) -> String {
+        self.line_body().1
+    }
+
     /// Byte offset where line `idx` (0-based) starts; lines past the end
     /// clamp to the last line.
     pub fn line_start(&self, idx: usize) -> usize {
