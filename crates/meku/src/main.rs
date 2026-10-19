@@ -6005,8 +6005,8 @@ mod ui_tests {
         click_id(cx, window, "set-default_mode-read");
         assert_eq!(cfg_str(cx, "default_mode"), "read");
         assert!(
-            has_id(cx, window, "set-default_mode-dot"),
-            "a modified dot shows"
+            has_id(cx, window, "set-default_mode-reset"),
+            "a reset shows once changed"
         );
         click_id(cx, window, "set-default_mode-reset");
         assert_eq!(

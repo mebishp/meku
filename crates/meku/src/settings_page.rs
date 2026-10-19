@@ -1,5 +1,5 @@
-//! The settings page: every registry setting, global or per mekuto, plus
-//! themes and custom themes. Opened with Ctrl+, or the sidebar's gear.
+//! The settings page: every registry setting, global or per mekuto. Opened
+//! with Ctrl+, or the sidebar's gear.
 //!
 //! Edits write straight to `settings.json` (global) or
 //! `<mekuto>/.meku/settings.json`; a file with broken JSON is shown as a
@@ -8,20 +8,23 @@
 use std::collections::HashMap;
 
 use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
 use serde_json::{Value, json};
 
 use crate::MekuShell;
-use crate::config::{DEFS, Def, Kind, Scope, Section};
+use crate::config::{ConfigState, DEFS, Def, Kind, Scope, Section};
 use crate::icons::{Ico, icon};
-use crate::theme::{self, Palette};
+use crate::theme;
 
 actions!(meku_settings, [OpenSettings]);
 
-/// Which page of the settings is showing.
+/// Which section of the settings is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
     Section(Section),
@@ -34,20 +37,13 @@ impl Tab {
         }
     }
 
-    fn ico(self) -> Ico {
-        match self {
-            Tab::Section(Section::Appearance) => Ico::Sun,
-            Tab::Section(Section::Layout) => Ico::SidebarExpand,
-            Tab::Section(Section::Editor) => Ico::Live,
-            Tab::Section(Section::Markdown) => Ico::Notes,
-            Tab::Section(Section::Files) => Ico::Folder,
-        }
-    }
-
     pub(crate) fn all() -> Vec<Tab> {
         Section::ALL.iter().map(|s| Tab::Section(*s)).collect()
     }
 }
+
+/// Theme settings; shown in a fixed order at the top of Appearance.
+const THEME_KEYS: [&str; 4] = ["theme", "follow_system", "theme_light", "theme_dark"];
 
 /// State of the open settings page.
 pub(crate) struct SettingsPage {
@@ -92,7 +88,7 @@ impl MekuShell {
         // The command palette and other overlays step aside.
         self.close_palette(true, cx);
         self.close_find(cx);
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let mut subs = vec![cx.subscribe(&search, |_, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
                 cx.notify();
@@ -155,8 +151,7 @@ impl MekuShell {
             return;
         };
         let text = input.read(cx).value().trim().to_string();
-        let scope = page.scope;
-        let shown = theme::state(cx).effective_for(scope);
+        let shown = theme::state(cx).effective_for(page.scope);
         if shown.str(key) == text {
             return; // nothing changed: do not pin the default into the file
         }
@@ -169,10 +164,29 @@ impl MekuShell {
             return;
         };
         let result = theme::update_config(cx, |s| s.write(scope, key, value));
-        if let Some(page) = self.settings.as_mut() {
-            page.note = result.err();
-        }
+        self.settings_note(result.err());
         cx.notify();
+    }
+
+    /// Pick a theme: it also turns off following the system, so the choice
+    /// takes effect right away.
+    fn settings_pick_theme(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(scope) = self.settings.as_ref().map(|p| p.scope) else {
+            return;
+        };
+        let result = theme::update_config(cx, |s| {
+            s.env_theme = None;
+            s.write(scope, "follow_system", Value::Bool(false))?;
+            s.write(scope, "theme", Value::String(name.into()))
+        });
+        self.settings_note(result.err());
+        cx.notify();
+    }
+
+    fn settings_note(&mut self, note: Option<String>) {
+        if let Some(page) = self.settings.as_mut() {
+            page.note = note;
+        }
     }
 
     fn settings_reset(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -180,9 +194,7 @@ impl MekuShell {
             return;
         };
         let result = theme::update_config(cx, |s| s.clear(scope, key));
-        if let Some(page) = self.settings.as_mut() {
-            page.note = result.err();
-        }
+        self.settings_note(result.err());
         self.settings_sync(window, cx);
         cx.notify();
     }
@@ -200,28 +212,23 @@ impl MekuShell {
     }
 
     fn settings_open_file(&mut self, scope: Scope, cx: &mut Context<Self>) {
-        let path = theme::state(cx).ensure_file(scope);
-        let note = match path {
+        let note = match theme::state(cx).ensure_file(scope) {
             Some(p) => match std::process::Command::new("xdg-open").arg(&p).spawn() {
                 Ok(_) => None,
                 Err(e) => Some(format!("Could not open {}: {e}", p.display())),
             },
             None => Some("There is no settings file for that scope".to_string()),
         };
-        if let Some(page) = self.settings.as_mut() {
-            page.note = note;
-        }
+        self.settings_note(note);
         cx.notify();
     }
 
     fn settings_backup(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
         let result = theme::update_config(cx, |s| s.backup_and_reset(scope));
-        if let Some(page) = self.settings.as_mut() {
-            page.note = Some(match result {
-                Ok(path) => format!("Saved the broken file as {}", path.display()),
-                Err(e) => e,
-            });
-        }
+        self.settings_note(Some(match result {
+            Ok(path) => format!("Saved the broken file as {}", path.display()),
+            Err(e) => e,
+        }));
         self.settings_sync(window, cx);
         cx.notify();
     }
@@ -260,34 +267,10 @@ impl MekuShell {
             "accent": format!("#{:06x}", current.accent),
         }));
         let result = theme::update_config(cx, |s| s.write_themes(scope, list));
-        if let Some(page) = self.settings.as_mut() {
-            page.note = Some(match result {
-                Ok(()) => format!("Added “{name}”. Change its colours in settings.json."),
-                Err(e) => e,
-            });
-        }
-        cx.notify();
-    }
-
-    fn settings_delete_theme(&mut self, name: &str, cx: &mut Context<Self>) {
-        let Some(scope) = self.settings.as_ref().map(|p| p.scope) else {
-            return;
-        };
-        let mut list: Vec<Value> = theme::state(cx)
-            .layer(scope)
-            .and_then(|l| l.values.get("themes"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        list.retain(|t| {
-            t.get("name")
-                .and_then(Value::as_str)
-                .is_none_or(|n| !n.eq_ignore_ascii_case(name))
-        });
-        let result = theme::update_config(cx, |s| s.write_themes(scope, list));
-        if let Some(page) = self.settings.as_mut() {
-            page.note = result.err();
-        }
+        self.settings_note(Some(match result {
+            Ok(()) => format!("Added “{name}” to your themes. Edit its colours in settings.json."),
+            Err(e) => e,
+        }));
         cx.notify();
     }
 
@@ -306,59 +289,57 @@ impl MekuShell {
         let state = theme::state(cx).clone();
         let query = search.read(cx).value().trim().to_lowercase();
         let has_mekuto = state.mekuto.is_some();
-        let view = viewport_panel(window);
+        let (panel_w, panel_h) = panel_size(window);
 
-        // -- header: title, scope switch, close
-        let scope_chip = |id: &'static str, label: &'static str, target: Scope, enabled: bool| {
-            let shell = shell.clone();
-            chip(
-                id,
-                label,
-                scope == target,
-                enabled,
-                cx,
-                move |window, cx| {
-                    shell.update(cx, |v, cx| v.settings_set_scope(target, window, cx));
-                },
-            )
-        };
+        // -- header: title, scope, search, close
+        let scope_options = [
+            ("settings-scope-global", "Global", Scope::Global, true),
+            (
+                "settings-scope-mekuto",
+                "This mekuto",
+                Scope::Mekuto,
+                has_mekuto,
+            ),
+        ];
+        let scope_switch = segmented(
+            scope_options
+                .iter()
+                .map(|(id, label, target, enabled)| {
+                    let shell = shell.clone();
+                    let target = *target;
+                    Segment {
+                        id: SharedString::from(*id),
+                        label: (*label).to_string(),
+                        on: scope == target,
+                        enabled: *enabled,
+                        click: Box::new(move |window, cx| {
+                            shell.update(cx, |v, cx| v.settings_set_scope(target, window, cx));
+                        }),
+                    }
+                })
+                .collect(),
+            cx,
+        );
         let close_shell = shell.clone();
         let header = h_flex()
             .flex_none()
+            .h(px(52.))
             .px_4()
-            .py_3()
             .gap_3()
             .items_center()
             .border_b_1()
             .border_color(border)
-            .child(icon(Ico::Settings, px(18.), fg))
             .child(
                 div()
-                    .text_base()
+                    .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Settings"),
             )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .ml_3()
-                    .child(scope_chip(
-                        "settings-scope-global",
-                        "Global",
-                        Scope::Global,
-                        true,
-                    ))
-                    .child(scope_chip(
-                        "settings-scope-mekuto",
-                        "This mekuto",
-                        Scope::Mekuto,
-                        has_mekuto,
-                    )),
-            )
+            .child(scope_switch)
             .child(div().flex_1())
             .child(
                 div()
-                    .w(px(220.))
+                    .w(px(200.))
                     .child(Input::new(&search).appearance(true).cleanable(true)),
             )
             .child(small_button(
@@ -373,31 +354,30 @@ impl MekuShell {
                 },
             ));
 
-        // -- left nav
+        // -- left nav: plain text, the current section tinted
         let mut nav = v_flex()
             .flex_none()
-            .w(px(170.))
+            .h_full()
+            .w(px(148.))
             .p_2()
             .gap_0p5()
             .border_r_1()
             .border_color(border);
+        let (hover, active_bg) = (cx.theme().list_hover, cx.theme().list_active);
         for t in Tab::all() {
             let shell = shell.clone();
             let on = query.is_empty() && t == tab;
             let id = SharedString::from(format!("settings-tab-{}", t.label().to_lowercase()));
-            let mut row = h_flex()
+            let mut row = div()
                 .id(id)
                 .test_support()
-                .px_2()
+                .px_2p5()
                 .py_1p5()
-                .gap_2()
-                .items_center()
                 .rounded_md()
                 .cursor_pointer()
                 .text_sm()
                 .text_color(if on { fg } else { muted })
-                .hover(|s| s.bg(cx.theme().list_hover))
-                .child(icon(t.ico(), px(15.), if on { fg } else { muted }))
+                .hover(move |s| s.bg(hover).text_color(fg))
                 .child(t.label())
                 .on_click(move |_, _, cx| {
                     shell.update(cx, |v, cx| {
@@ -408,14 +388,13 @@ impl MekuShell {
                     });
                 });
             if on {
-                row = row.bg(cx.theme().list_active);
+                row = row.bg(active_bg).font_weight(FontWeight::MEDIUM);
             }
             nav = nav.child(row);
         }
 
         // -- body
-        let mut body = v_flex().gap_3().p_4();
-        // Fatal JSON errors first, whichever scope is showing.
+        let mut body = v_flex().w_full().max_w(px(560.)).gap_1().px_6().py_4();
         for issue in state.issues.iter().filter(|i| i.fatal) {
             body = body.child(self.json_banner(issue.scope, &issue.message, cx));
         }
@@ -424,58 +403,42 @@ impl MekuShell {
                 div()
                     .id("settings-note")
                     .test_support()
-                    .text_xs()
-                    .px_3()
                     .py_2()
-                    .rounded_md()
-                    .bg(cx.theme().list_active)
-                    .text_color(fg)
+                    .text_xs()
+                    .text_color(muted)
                     .child(note),
             );
         }
-        if !query.is_empty() {
-            let hits: Vec<&'static Def> = DEFS
-                .iter()
+        let rows: Vec<&'static Def> = if query.is_empty() {
+            let Tab::Section(section) = tab;
+            ordered_defs(section, state.effective_for(scope).bool("follow_system"))
+        } else {
+            DEFS.iter()
                 .filter(|d| {
                     d.label.to_lowercase().contains(&query)
                         || d.key.contains(&query)
                         || d.help.to_lowercase().contains(&query)
                 })
-                .collect();
-            if hits.is_empty() {
-                body = body.child(
-                    div()
-                        .id("settings-empty")
-                        .test_support()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(format!("No settings match “{query}”.")),
-                );
-            }
-            for def in hits {
-                body = body.child(self.setting_row(def, scope, &state, cx));
-            }
-        } else {
-            let Tab::Section(section) = tab;
+                .collect()
+        };
+        if rows.is_empty() {
             body = body.child(
                 div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(section.label()),
+                    .id("settings-empty")
+                    .test_support()
+                    .py_4()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(format!("No settings match “{query}”.")),
             );
-            if section == Section::Appearance {
-                // Themes live here: pickers, gallery, custom themes.
-                body = body.child(self.themes_page(scope, &state, cx));
-            }
-            let themed = ["follow_system", "theme_light", "theme_dark", "theme"];
-            for def in DEFS
-                .iter()
-                .filter(|d| d.section == section && !themed.contains(&d.key))
-            {
-                body = body.child(self.setting_row(def, scope, &state, cx));
-            }
         }
-        // Problems that belong to no visible row.
+        for def in rows {
+            body = body.child(self.setting_row(def, scope, &state, cx));
+        }
+        if query.is_empty() && tab == Tab::Section(Section::Appearance) {
+            body = body.child(self.custom_themes_row(scope, &state, cx));
+        }
+        // Problems that belong to no visible row (unknown keys).
         let stray: Vec<_> = state
             .issues
             .iter()
@@ -490,13 +453,14 @@ impl MekuShell {
             let mut list = v_flex()
                 .id("settings-problems")
                 .test_support()
+                .pt_3()
                 .gap_0p5()
                 .text_xs()
                 .text_color(muted);
             for i in stray {
                 list = list.child(format!(
                     "{}: {}{}",
-                    i.scope.label(),
+                    capitalize(i.scope.label()),
                     i.key
                         .as_deref()
                         .map(|k| format!("“{k}” — "))
@@ -516,26 +480,26 @@ impl MekuShell {
             .overflow_y_scroll()
             .child(body);
 
-        let footer_path = state
+        let path = state
             .layer(scope)
             .and_then(|l| l.path.clone())
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(not saved: no folder is open)".into());
+            .unwrap_or_else(|| "Not saved: no folder is open".into());
         let open_shell = shell.clone();
         let footer = h_flex()
             .flex_none()
+            .h(px(36.))
             .px_4()
-            .py_2()
-            .gap_2()
+            .gap_3()
             .items_center()
             .border_t_1()
             .border_color(border)
             .text_xs()
             .text_color(muted)
-            .child(div().flex_1().truncate().child(footer_path))
-            .child(text_button(
+            .child(div().flex_1().truncate().child(path))
+            .child(link_button(
                 "settings-open-file",
-                "Open settings.json",
+                "Open file",
                 cx,
                 move |_, cx| {
                     open_shell.update(cx, |v, cx| v.settings_open_file(scope, cx));
@@ -545,9 +509,9 @@ impl MekuShell {
         let panel = v_flex()
             .id("settings-page")
             .test_support()
-            .w(view.0)
-            .h(view.1)
-            .rounded_xl()
+            .w(panel_w)
+            .h(panel_h)
+            .rounded_lg()
             .border_1()
             .border_color(border)
             .bg(cx.theme().background)
@@ -571,7 +535,6 @@ impl MekuShell {
         let backdrop_shell = shell.clone();
         let root = div()
             .id("settings-backdrop")
-            .test_support()
             .absolute()
             .inset_0()
             .flex()
@@ -588,53 +551,50 @@ impl MekuShell {
         Some(theme::fade_in(root, "settings-in", 140, 0.0, cx))
     }
 
-    /// Red-ish banner for a settings file that is not valid JSON.
+    /// A settings file that is not valid JSON: what, where, and the way out.
     fn json_banner(&self, scope: Scope, message: &str, cx: &mut Context<Self>) -> AnyElement {
         let shell = cx.entity();
         let (open, reset) = (shell.clone(), shell);
-        let danger = cx.theme().danger;
-        let id = SharedString::from(format!(
-            "settings-banner-{}",
-            if scope == Scope::Global {
-                "global"
-            } else {
-                "mekuto"
-            }
-        ));
+        let which = if scope == Scope::Global {
+            "global"
+        } else {
+            "mekuto"
+        };
+        let mut tint = cx.theme().danger;
+        tint.a = 0.12;
         v_flex()
-            .id(id)
+            .id(SharedString::from(format!("settings-banner-{which}")))
             .test_support()
             .gap_2()
             .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(danger)
+            .mb_2()
+            .rounded_md()
+            .bg(tint)
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(icon(Ico::Warning, px(16.), danger))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{} can't be read", capitalize(scope.label()))),
-                    ),
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(format!("{} can't be read", capitalize(scope.label()))),
             )
-            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!(
-                "{message}. Everything else keeps its default (or the other file's value), and edits are paused for this file so nothing is lost."
-            )))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{message}. Defaults are in use and edits to this file are paused."
+                    )),
+            )
             .child(
                 h_flex()
-                    .gap_2()
-                    .child(text_button(
-                        if scope == Scope::Global { "banner-open-global" } else { "banner-open-mekuto" },
-                        "Open file to fix",
+                    .gap_3()
+                    .child(link_button(
+                        SharedString::from(format!("banner-open-{which}")),
+                        "Open file",
                         cx,
                         move |_, cx| open.update(cx, |v, cx| v.settings_open_file(scope, cx)),
                     ))
-                    .child(text_button(
-                        if scope == Scope::Global { "banner-reset-global" } else { "banner-reset-mekuto" },
+                    .child(link_button(
+                        SharedString::from(format!("banner-reset-{which}")),
                         "Back up and start fresh",
                         cx,
                         move |window, cx| {
@@ -645,17 +605,17 @@ impl MekuShell {
             .into_any_element()
     }
 
-    /// One setting: label, help, control, modified dot and reset.
+    /// One setting: label and one line of help on the left, its control on
+    /// the right, and a reset when it differs from the inherited value.
     fn setting_row(
         &self,
         def: &'static Def,
         scope: Scope,
-        state: &crate::config::ConfigState,
+        state: &ConfigState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let shell = cx.entity();
-        let colors = cx.theme();
-        let (border, muted, accent) = (colors.border, colors.muted_foreground, colors.primary);
+        let muted = cx.theme().muted_foreground;
         let values = state.effective_for(scope);
         let is_set = state.is_set(scope, def.key);
         let key = def.key;
@@ -673,32 +633,33 @@ impl MekuShell {
             }
             Kind::Choice(options) => {
                 let current = values.str(key).to_string();
-                let mut row = h_flex().gap_1().flex_wrap().justify_end();
-                for opt in options {
-                    let shell = shell.clone();
-                    let id = SharedString::from(format!("set-{key}-{opt}"));
-                    row = row.child(chip_dyn(
-                        id,
-                        label_of(opt),
-                        current == *opt,
-                        true,
-                        cx,
-                        move |_, cx| {
-                            shell.update(cx, |v, cx| {
-                                v.settings_write(key, Value::String((*opt).into()), cx)
-                            });
-                        },
-                    ));
-                }
-                row.into_any_element()
+                segmented(
+                    options
+                        .iter()
+                        .map(|opt| {
+                            let shell = shell.clone();
+                            Segment {
+                                id: SharedString::from(format!("set-{key}-{opt}")),
+                                label: label_of(opt),
+                                on: current == *opt,
+                                enabled: true,
+                                click: Box::new(move |_, cx| {
+                                    shell.update(cx, |v, cx| {
+                                        v.settings_write(key, Value::String((*opt).into()), cx)
+                                    });
+                                }),
+                            }
+                        })
+                        .collect(),
+                    cx,
+                )
             }
             Kind::Number { min, max, step } => {
                 let value = values.f64(key);
                 let (down, up) = (shell.clone(), shell.clone());
                 let decimals = usize::from(step < 1.0);
                 let apply = move |delta: f64| {
-                    let next = ((value + delta) / step).round() * step;
-                    let next = next.clamp(min, max);
+                    let next = (((value + delta) / step).round() * step).clamp(min, max);
                     // Keep one decimal clean (1.2, not 1.2000000000000002).
                     if decimals == 1 {
                         (next * 10.0).round() / 10.0
@@ -707,7 +668,6 @@ impl MekuShell {
                     }
                 };
                 h_flex()
-                    .gap_1()
                     .items_center()
                     .child(small_button(
                         SharedString::from(format!("set-{key}-down")),
@@ -723,7 +683,7 @@ impl MekuShell {
                         div()
                             .id(SharedString::from(format!("set-{key}-value")))
                             .test_support()
-                            .min_w(px(56.))
+                            .min_w(px(52.))
                             .text_center()
                             .text_sm()
                             .child(format!("{value:.decimals$}")),
@@ -740,58 +700,60 @@ impl MekuShell {
                     ))
                     .into_any_element()
             }
-            Kind::Text => {
-                let input = self
-                    .settings
-                    .as_ref()
-                    .and_then(|p| p.texts.get(key))
-                    .cloned();
-                match input {
-                    Some(input) => div()
-                        .w(px(220.))
-                        .child(Input::new(&input))
-                        .into_any_element(),
-                    None => div().into_any_element(),
-                }
-            }
+            Kind::Text => match self.settings.as_ref().and_then(|p| p.texts.get(key)) {
+                Some(input) => div()
+                    .w(px(200.))
+                    .child(Input::new(input))
+                    .into_any_element(),
+                None => div().into_any_element(),
+            },
             Kind::Theme => {
                 let current = values.str(key).to_string();
-                let mut row = h_flex().gap_1().flex_wrap();
-                for p in theme::palettes_of(state) {
-                    let shell = shell.clone();
-                    let name = p.name;
-                    let on = current.eq_ignore_ascii_case(name);
-                    let id = SharedString::from(format!(
-                        "set-{key}-{}",
-                        name.to_lowercase().replace(' ', "-")
-                    ));
-                    row = row.child(swatch_chip(id, p, on, cx, move |_, cx| {
-                        shell.update(cx, |v, cx| {
-                            v.settings_write(key, Value::String(name.into()), cx)
-                        });
-                    }));
-                }
-                row.into_any_element()
+                let names: Vec<&'static str> =
+                    theme::palettes_of(state).iter().map(|p| p.name).collect();
+                let shown = names
+                    .iter()
+                    .find(|n| n.eq_ignore_ascii_case(&current))
+                    .copied()
+                    .unwrap_or("Meku Light");
+                let picker = shell.clone();
+                Button::new(SharedString::from(format!("set-{key}")))
+                    .label(shown)
+                    .outline()
+                    .small()
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for name in &names {
+                            let (name, picker) = (*name, picker.clone());
+                            menu = menu.item(
+                                PopupMenuItem::new(name)
+                                    .checked(name.eq_ignore_ascii_case(&current))
+                                    .on_click(move |_, _, cx| {
+                                        picker.update(cx, |v, cx| {
+                                            if key == "theme" {
+                                                v.settings_pick_theme(name, cx);
+                                            } else {
+                                                v.settings_write(
+                                                    key,
+                                                    Value::String(name.into()),
+                                                    cx,
+                                                );
+                                            }
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element()
             }
         };
 
-        let mut title = h_flex().gap_2().items_center().child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .child(def.label),
-        );
-        if is_set {
-            title = title.child(
-                div()
-                    .id(SharedString::from(format!("set-{key}-dot")))
-                    .test_support()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(accent),
-            );
-        }
-        let mut info = v_flex().flex_1().min_w_0().gap_0p5().child(title);
+        let mut info = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_0p5()
+            .child(div().text_sm().child(def.label));
         if !def.help.is_empty() {
             info = info.child(div().text_xs().text_color(muted).child(def.help));
         }
@@ -799,7 +761,7 @@ impl MekuShell {
             info = info.child(
                 div()
                     .text_xs()
-                    .text_color(accent)
+                    .text_color(muted)
                     .child("This mekuto overrides it."),
             );
         }
@@ -817,7 +779,7 @@ impl MekuShell {
                     .child(issue.message.clone()),
             );
         }
-        let reset: Option<AnyElement> = is_set.then(|| {
+        let reset = is_set.then(|| {
             let shell = shell.clone();
             small_button(
                 SharedString::from(format!("set-{key}-reset")),
@@ -833,164 +795,109 @@ impl MekuShell {
                 },
             )
         });
-        let row_id = SharedString::from(format!("setting-{key}"));
-        if matches!(def.kind, Kind::Theme) {
-            // Theme pickers are wide: the chips get a line of their own.
-            return v_flex()
-                .id(row_id)
-                .test_support()
-                .gap_2()
-                .py_3()
-                .border_b_1()
-                .border_color(border)
-                .child(
-                    h_flex()
-                        .gap_4()
-                        .items_start()
-                        .justify_between()
-                        .child(info)
-                        .children(reset),
-                )
-                .child(control)
-                .into_any_element();
-        }
         h_flex()
-            .id(row_id)
+            .id(SharedString::from(format!("setting-{key}")))
             .test_support()
             .gap_4()
-            .py_3()
+            .py_2p5()
             .items_center()
             .justify_between()
-            .border_b_1()
-            .border_color(border)
             .child(info)
             .child(
                 h_flex()
                     .flex_none()
-                    .gap_2()
+                    .gap_1()
                     .items_center()
                     .child(control)
-                    .children(reset),
+                    // Keeps controls aligned whether or not a reset shows.
+                    .child(div().w(px(26.)).children(reset)),
             )
             .into_any_element()
     }
 
-    fn themes_page(
+    /// Custom themes live in settings.json; this row adds a starter entry
+    /// and reports problems with the ones already there.
+    fn custom_themes_row(
         &self,
         scope: Scope,
-        state: &crate::config::ConfigState,
+        state: &ConfigState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let shell = cx.entity();
-        let colors = cx.theme();
-        let (border, muted) = (colors.border, colors.muted_foreground);
-        let active = theme::active(cx).name;
-        let mut page = v_flex().gap_3();
-        for key in ["follow_system", "theme_light", "theme_dark", "theme"] {
-            if let Some(def) = crate::config::def_for(key) {
-                page = page.child(self.setting_row(def, scope, state, cx));
-            }
-        }
-        // Gallery of every theme.
-        let mut grid = h_flex()
-            .gap_3()
-            .flex_wrap()
-            .id("settings-theme-gallery")
-            .test_support();
-        let custom: Vec<String> = state.themes.iter().map(|t| t.name.to_lowercase()).collect();
-        for p in theme::palettes_of(state) {
-            let shell = shell.clone();
-            let on = p.name == active;
-            let is_custom = custom.contains(&p.name.to_lowercase());
-            grid = grid.child(theme_card(p, on, is_custom, cx, move |_, cx| {
-                theme::choose(p.name, cx);
-                shell.update(cx, |_, cx| cx.notify());
-            }));
-        }
-        page = page.child(grid);
-
-        // Custom themes in the scope being edited.
-        let mine: Vec<_> = state.themes.iter().filter(|t| t.scope == scope).collect();
-        let mut custom_box = v_flex()
-            .gap_2()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(border)
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Custom themes"))
-            .child(div().text_xs().text_color(muted).child(
-                "Add themes to the \"themes\" list in settings.json. Each needs a \"name\"; \"base\" names a theme to start from, \"dark\" picks light or dark, and any of bg, surface, border, fg, muted, accent, keyword, string, number, func, ty, constant, prop, comment, code can be set as \"#rrggbb\".",
-            ));
-        for t in &mine {
-            let shell = shell.clone();
-            let name = t.name.clone();
-            let del_name = name.clone();
-            custom_box = custom_box.child(
-                h_flex()
-                    .id(SharedString::from(format!(
-                        "custom-theme-{}",
-                        name.to_lowercase().replace(' ', "-")
-                    )))
-                    .test_support()
-                    .gap_2()
-                    .items_center()
-                    .child(div().flex_1().text_sm().child(name))
-                    .child(small_button(
-                        SharedString::from(format!(
-                            "custom-theme-del-{}",
-                            del_name.to_lowercase().replace(' ', "-")
-                        )),
-                        Ico::Trash,
-                        "Remove theme",
-                        cx,
-                        move |_, cx| {
-                            let n = del_name.clone();
-                            shell.update(cx, |v, cx| v.settings_delete_theme(&n, cx));
-                        },
-                    )),
+        let muted = cx.theme().muted_foreground;
+        let mut info = v_flex()
+            .flex_1()
+            .gap_0p5()
+            .child(div().text_sm().child("Custom themes"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Add them under \"themes\" in settings.json."),
             );
-        }
         for issue in state.issues.iter().filter(|i| {
             i.scope == scope && i.key.as_deref().is_some_and(|k| k.starts_with("themes"))
         }) {
-            custom_box =
-                custom_box.child(div().text_xs().text_color(cx.theme().danger).child(format!(
-                    "{}: {}",
-                    issue.key.as_deref().unwrap_or("themes"),
-                    issue.message
-                )));
+            info = info.child(div().text_xs().text_color(cx.theme().danger).child(format!(
+                "{}: {}",
+                issue.key.as_deref().unwrap_or("themes"),
+                issue.message
+            )));
         }
-        let (add, open) = (shell.clone(), shell);
-        custom_box = custom_box.child(
-            h_flex()
-                .gap_2()
-                .child(text_button(
-                    "settings-new-theme",
-                    "New custom theme",
-                    cx,
-                    move |_, cx| {
-                        add.update(cx, |v, cx| v.settings_new_theme(cx));
-                    },
-                ))
-                .child(text_button(
-                    "settings-theme-file",
-                    "Open settings.json",
-                    cx,
-                    move |_, cx| {
-                        open.update(cx, |v, cx| v.settings_open_file(scope, cx));
-                    },
-                )),
-        );
-        page.child(custom_box).into_any_element()
+        h_flex()
+            .id("settings-custom-themes")
+            .test_support()
+            .gap_4()
+            .py_2p5()
+            .items_center()
+            .justify_between()
+            .child(info)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .child(
+                        Button::new("settings-new-theme")
+                            .label("Add theme")
+                            .outline()
+                            .small()
+                            .on_click(move |_, _, cx| {
+                                shell.update(cx, |v, cx| v.settings_new_theme(cx));
+                            }),
+                    )
+                    .child(div().w(px(26.))),
+            )
+            .into_any_element()
     }
 }
 
+/// The settings of `section` in display order. Appearance leads with the
+/// theme, then whether to follow the system; the light/dark pair only
+/// matters (and only shows) while following it.
+fn ordered_defs(section: Section, follow: bool) -> Vec<&'static Def> {
+    let mut rows: Vec<&'static Def> = Vec::new();
+    if section == Section::Appearance {
+        for key in THEME_KEYS {
+            let pair = key == "theme_light" || key == "theme_dark";
+            if pair && !follow {
+                continue;
+            }
+            rows.extend(crate::config::def_for(key));
+        }
+    }
+    rows.extend(
+        DEFS.iter()
+            .filter(|d| d.section == section && !THEME_KEYS.contains(&d.key)),
+    );
+    rows
+}
+
 /// Panel size: most of the window, capped.
-fn viewport_panel(window: &Window) -> (Pixels, Pixels) {
+fn panel_size(window: &Window) -> (Pixels, Pixels) {
     let v = window.viewport_size();
     (
-        (v.width * 0.92).min(px(940.)).max(px(320.)),
-        (v.height * 0.88).min(px(680.)).max(px(280.)),
+        (v.width * 0.92).clamp(px(320.), px(820.)),
+        (v.height * 0.86).clamp(px(280.), px(600.)),
     )
 }
 
@@ -1002,178 +909,58 @@ fn capitalize(s: &str) -> String {
 }
 
 fn label_of(opt: &str) -> String {
-    let mut s = opt.replace('-', " ");
-    if let Some(first) = s.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    s
+    capitalize(&opt.replace('-', " "))
 }
 
-fn chip(
-    id: &'static str,
-    label: &'static str,
-    on: bool,
-    enabled: bool,
-    cx: &App,
-    click: impl Fn(&mut Window, &mut App) + 'static,
-) -> AnyElement {
-    chip_dyn(
-        SharedString::from(id),
-        label.to_string(),
-        on,
-        enabled,
-        cx,
-        click,
-    )
-}
-
-/// A pill button; `on` marks the selected one of a group.
-fn chip_dyn(
+/// One option of a [`segmented`] control.
+struct Segment {
     id: SharedString,
     label: String,
     on: bool,
     enabled: bool,
-    cx: &App,
-    click: impl Fn(&mut Window, &mut App) + 'static,
-) -> AnyElement {
+    click: Click,
+}
+
+/// Joined options in one recessed track; the selected one is raised.
+fn segmented(segments: Vec<Segment>, cx: &App) -> AnyElement {
     let colors = cx.theme();
-    let (fg, muted, border) = (colors.foreground, colors.muted_foreground, colors.border);
-    let (active, hover) = (colors.list_active, colors.list_hover);
-    let mut el = div()
-        .id(id)
-        .test_support()
-        .px_2p5()
-        .py_1()
+    let (fg, muted) = (colors.foreground, colors.muted_foreground);
+    let (track, raised) = (colors.secondary, colors.background);
+    let mut row = h_flex()
+        .flex_none()
+        .p_0p5()
+        .gap_0p5()
         .rounded_md()
-        .border_1()
-        .text_xs()
-        .child(label);
-    if on {
-        el = el.bg(active).border_color(colors.primary).text_color(fg);
-    } else {
-        el = el.border_color(border).text_color(muted);
+        .bg(track);
+    for seg in segments {
+        let click = seg.click;
+        let mut el = div()
+            .id(seg.id)
+            .test_support()
+            .px_2p5()
+            .py_1()
+            .rounded(px(5.))
+            .text_xs()
+            .child(seg.label);
+        if seg.on {
+            el = el.bg(raised).text_color(fg).font_weight(FontWeight::MEDIUM);
+        } else {
+            el = el.text_color(muted);
+        }
+        if seg.enabled {
+            el = el
+                .cursor_pointer()
+                .hover(move |s| s.text_color(fg))
+                .on_click(move |_, window, cx| click(window, cx));
+        } else {
+            el = el.opacity(0.4);
+        }
+        row = row.child(el);
     }
-    if enabled {
-        el = el
-            .cursor_pointer()
-            .hover(move |s| s.bg(hover).text_color(fg))
-            .on_click(move |_, window, cx| click(window, cx));
-    } else {
-        el = el.opacity(0.4);
-    }
-    el.into_any_element()
+    row.into_any_element()
 }
 
-/// A theme-name chip led by a swatch of its colours.
-fn swatch_chip(
-    id: SharedString,
-    p: Palette,
-    on: bool,
-    cx: &App,
-    click: impl Fn(&mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let colors = cx.theme();
-    let (fg, muted, border) = (colors.foreground, colors.muted_foreground, colors.border);
-    let (active, hover) = (colors.list_active, colors.list_hover);
-    let dot = div()
-        .size(px(12.))
-        .rounded_full()
-        .border_1()
-        .border_color(rgb(p.border))
-        .bg(rgb(p.bg))
-        .child(
-            div()
-                .size(px(5.))
-                .mt(px(3.))
-                .ml(px(3.))
-                .rounded_full()
-                .bg(rgb(p.accent)),
-        );
-    let mut el = h_flex()
-        .id(id)
-        .test_support()
-        .gap_1p5()
-        .items_center()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .text_xs()
-        .cursor_pointer()
-        .child(dot)
-        .child(p.name);
-    if on {
-        el = el.bg(active).border_color(colors.primary).text_color(fg);
-    } else {
-        el = el
-            .border_color(border)
-            .text_color(muted)
-            .hover(move |s| s.bg(hover).text_color(fg));
-    }
-    el.on_click(move |_, window, cx| click(window, cx))
-        .into_any_element()
-}
-
-/// Gallery card: a miniature of the theme and its name.
-fn theme_card(
-    p: Palette,
-    on: bool,
-    custom: bool,
-    cx: &App,
-    click: impl Fn(&mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let colors = cx.theme();
-    let ring = if on { colors.primary } else { colors.border };
-    let id = SharedString::from(format!(
-        "theme-card-{}",
-        p.name.to_lowercase().replace(' ', "-")
-    ));
-    let preview = v_flex()
-        .h(px(64.))
-        .p_2()
-        .gap_1()
-        .bg(rgb(p.bg))
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(p.fg))
-                .child("Aa heading"),
-        )
-        .child(
-            h_flex()
-                .gap_1()
-                .child(div().h(px(4.)).w(px(22.)).rounded_full().bg(rgb(p.accent)))
-                .child(div().h(px(4.)).w(px(14.)).rounded_full().bg(rgb(p.muted)))
-                .child(div().h(px(4.)).w(px(10.)).rounded_full().bg(rgb(p.string)))
-                .child(div().h(px(4.)).w(px(8.)).rounded_full().bg(rgb(p.keyword))),
-        );
-    let label = h_flex()
-        .px_2()
-        .py_1p5()
-        .gap_1()
-        .items_center()
-        .bg(rgb(p.surface))
-        .text_xs()
-        .text_color(rgb(p.fg))
-        .child(div().flex_1().truncate().child(p.name))
-        .children(custom.then(|| div().text_color(rgb(p.muted)).child("custom")))
-        .children(on.then(|| icon(Ico::Check, px(12.), rgb(p.accent).into())));
-    v_flex()
-        .id(id)
-        .test_support()
-        .w(px(148.))
-        .rounded_lg()
-        .border_1()
-        .border_color(ring)
-        .overflow_hidden()
-        .cursor_pointer()
-        .child(preview)
-        .child(label)
-        .on_click(move |_, window, cx| click(window, cx))
-        .into_any_element()
-}
-
+/// Square icon-only button with a tooltip.
 fn small_button(
     id: impl Into<SharedString>,
     ico: Ico,
@@ -1187,7 +974,6 @@ fn small_button(
         colors.muted_foreground,
         colors.list_hover,
     );
-    let click: Click = Box::new(click);
     div()
         .id(id.into())
         .test_support()
@@ -1206,26 +992,22 @@ fn small_button(
         .into_any_element()
 }
 
-fn text_button(
-    id: &'static str,
+/// Quiet text action: accent-coloured, foreground on hover.
+fn link_button(
+    id: impl Into<SharedString>,
     label: &'static str,
     cx: &App,
     click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let colors = cx.theme();
-    let (fg, border, hover) = (colors.foreground, colors.border, colors.list_hover);
+    let (accent, fg) = (colors.primary, colors.foreground);
     div()
-        .id(id)
+        .id(id.into())
         .test_support()
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(border)
         .text_xs()
-        .text_color(fg)
+        .text_color(accent)
         .cursor_pointer()
-        .hover(move |s| s.bg(hover))
+        .hover(move |s| s.text_color(fg))
         .child(label)
         .on_click(move |_, window, cx| click(window, cx))
         .into_any_element()
