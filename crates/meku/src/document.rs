@@ -149,6 +149,8 @@ pub(crate) struct DocModel {
     pub rows: Rc<Vec<Row>>,
     /// Syntax spans per code row, in line-content byte offsets.
     pub hl: Rc<RowSpans>,
+    /// Standalone-image source per row (computed once per version).
+    pub images: Rc<Vec<Option<ImageSrc>>>,
 }
 
 /// What a rendered row exposes for hit testing: its text layout and the
@@ -189,11 +191,21 @@ impl MekuShell {
         let text: Rc<str> = Rc::from(buffer.read(cx).text_string());
         let rows = Rc::new(build_rows(&text));
         let hl = Self::colored_rows(&text, &rows);
+        let root = self.explorer.root().map(Path::to_path_buf);
+        let images = Rc::new(
+            rows.iter()
+                .map(|row| {
+                    root.as_deref()
+                        .and_then(|root| image_source_of(row, &text, root, rel))
+                })
+                .collect(),
+        );
         let model = DocModel {
             version,
             text,
             rows,
             hl,
+            images,
         };
         self.doc_models.insert(rel.to_path_buf(), model.clone());
         Some(model)
@@ -263,18 +275,7 @@ impl MekuShell {
             return div().flex_1().into_any_element();
         };
         let mode = self.tab_mode();
-        let note_rel = rel.to_path_buf();
-        let images: Rc<Vec<Option<ImageSrc>>> = Rc::new(
-            model
-                .rows
-                .iter()
-                .map(|row| {
-                    self.explorer
-                        .root()
-                        .and_then(|root| image_source_of(row, &model.text, root, &note_rel))
-                })
-                .collect(),
-        );
+        let images = model.images.clone();
         let (caret, selection) = {
             let b = buffer.read(cx);
             (b.caret(), b.selection())

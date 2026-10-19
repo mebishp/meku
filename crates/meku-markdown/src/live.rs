@@ -1413,4 +1413,28 @@ mod tests {
         );
         assert_eq!(shown("**==both==**", 0, false), "both");
     }
+
+    /// Rough timing, run with `cargo test -p meku-markdown --release perf -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn perf_build_rows_on_a_large_note() {
+        let mut text = String::new();
+        for i in 0..2500 {
+            text.push_str(&format!(
+                "## Section {i}\n\nSome **bold** and *italic* text with a [link](a.md) and `code` in it.\n\n- item one\n  - nested item\n- [ ] task\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```rust\nfn x() {{}}\n```\n\n> [!note] Title\n> body\n\n"
+            ));
+        }
+        let lines = text.lines().count();
+        let t0 = std::time::Instant::now();
+        let rows = build_rows(&text);
+        let dt = t0.elapsed();
+        eprintln!("build_rows: {lines} lines, {} rows in {dt:?}", rows.len());
+        let t1 = std::time::Instant::now();
+        let spans = content_spans(&text);
+        eprintln!(
+            "content_spans alone: {} spans in {:?}",
+            spans.len(),
+            t1.elapsed()
+        );
+    }
 }
