@@ -2199,6 +2199,43 @@ impl OpenBuffer {
         true
     }
 
+    /// `Backspace` at the start of a list item's text (or inside its marker):
+    /// first un-nest a nested item, then turn a task into a plain bullet,
+    /// then drop the marker so the line becomes ordinary text. Returns false
+    /// when the caret is elsewhere (the caller deletes a character instead).
+    pub fn list_backspace(&mut self) -> bool {
+        if self.selection().start != self.selection().end {
+            return false;
+        }
+        let (line_start, line) = self.line_body();
+        let Some(marker) = parse_marker(&line) else {
+            return false;
+        };
+        let is_list = matches!(
+            marker.kind,
+            MarkerKind::Bullet(_) | MarkerKind::Task(_) | MarkerKind::Ordered(..)
+        );
+        let col = self.caret - line_start;
+        if !is_list || col > marker.prefix_len || col <= marker.indent {
+            return false;
+        }
+        if marker.indent > 0 {
+            self.outdent(false);
+            return true;
+        }
+        if let MarkerKind::Task(_) = marker.kind {
+            // `- [ ] x` → `- x`: keep the bullet, drop the box.
+            let from = line_start + 2;
+            let to = line_start + marker.prefix_len;
+            self.edit_region(from..to, "", from, from);
+            return true;
+        }
+        let from = line_start + marker.indent;
+        let to = line_start + marker.prefix_len;
+        self.edit_region(from..to, "", from, from);
+        true
+    }
+
     /// Flip the task box whose `[ ] ` / `[x] ` starts at byte `at` (a
     /// checkbox click). Caret and selection stay where they are; one undo
     /// step. No-op when the bytes there are not a task box.
@@ -3793,5 +3830,28 @@ mod tests {
         let mut b = buf("/x\n");
         b.select_range(0..2);
         assert_eq!(b.slash_trigger(), None, "no trigger while selecting");
+    }
+
+    #[test]
+    fn backspace_at_item_start_peels_nesting_task_and_marker() {
+        let mut b = buf("- a\n  - [ ] b\n");
+        b.move_caret(12, false); // content start of the nested task
+        assert!(b.list_backspace());
+        assert_eq!(b.text_string(), "- a\n- [ ] b\n", "un-nests first");
+        b.move_caret(10, false);
+        assert!(b.list_backspace());
+        assert_eq!(b.text_string(), "- a\n- b\n", "task becomes a bullet");
+        b.move_caret(6, false);
+        assert!(b.list_backspace());
+        assert_eq!(b.text_string(), "- a\nb\n", "then the marker goes");
+        assert_eq!(b.caret(), 4);
+        assert!(!b.list_backspace(), "plain text: normal backspace");
+        let mut b = buf("1. one\n");
+        b.move_caret(3, false);
+        assert!(b.list_backspace());
+        assert_eq!(b.text_string(), "one\n");
+        let mut b = buf("- text\n");
+        b.move_caret(4, false);
+        assert!(!b.list_backspace(), "mid-text backspace is untouched");
     }
 }

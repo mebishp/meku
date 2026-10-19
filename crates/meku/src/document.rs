@@ -330,13 +330,8 @@ impl MekuShell {
         let title_input = self.title_inputs.get(rel).cloned();
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
-            // Edit reveals every row, Live only the caret's, Read none.
             let is_caret_row = mode != Mode::Read && ix == active;
-            let reveal = match mode {
-                Mode::Edit => true,
-                Mode::Live => is_caret_row,
-                Mode::Read => false,
-            };
+            let reveal = row_is_revealed(mode, row, ix, active, &selection);
             let base = window.text_style().font_size.to_pixels(window.rem_size());
             let el = row_element(
                 ix,
@@ -534,11 +529,14 @@ impl MekuShell {
         if row.kind == RowKind::Code {
             return None;
         }
-        let rendered = match self.tab_mode() {
-            Mode::Read => true,
-            Mode::Live => row_at(&model.rows, caret) != ix,
-            Mode::Edit => false,
-        };
+        let selection = self.buffers.get(&rel)?.read(cx).selection();
+        let rendered = !row_is_revealed(
+            self.tab_mode(),
+            row,
+            ix,
+            row_at(&model.rows, caret),
+            &selection,
+        );
         if !(ctrl || rendered) {
             return None;
         }
@@ -681,13 +679,27 @@ impl MekuShell {
         let Some(model) = self.doc_model(&rel, cx) else {
             return;
         };
+        // What is drawn decides how the caret moves: rendered rows hide markup.
+        let mode = self.tab_mode();
+        let (sel, caret_now) = {
+            let b = buffer.read(cx);
+            (b.selection(), b.caret())
+        };
+        let cur_ix = row_at(&model.rows, caret_now);
+        let revealed_now = row_is_revealed(mode, &model.rows[cur_ix], cur_ix, cur_ix, &sel);
+        let revealed_when_caret = |t: usize| row_is_revealed(mode, &model.rows[t], t, t, &(0..0));
         let mutated = match key {
-            DocKey::Left => {
-                buffer.update(cx, |b, _| b.move_left(extend));
-                false
-            }
-            DocKey::Right => {
-                buffer.update(cx, |b, _| b.move_right(extend));
+            DocKey::Left | DocKey::Right => {
+                let forward = key == DocKey::Right;
+                let target = (sel.start == sel.end || extend)
+                    .then(|| Visible::of(&model, cur_ix, revealed_now))
+                    .flatten()
+                    .and_then(|v| v.step(&model.text, &model.rows[cur_ix].src, caret_now, forward));
+                buffer.update(cx, |b, _| match target {
+                    Some(p) => b.move_caret(p, extend),
+                    None if forward => b.move_right(extend),
+                    None => b.move_left(extend),
+                });
                 false
             }
             DocKey::WordLeft => {
@@ -735,15 +747,23 @@ impl MekuShell {
                         model.text.len()
                     }
                 } else {
-                    let column = model.text[model.rows[row].src.start..caret].chars().count();
+                    let column = match Visible::of(&model, row, revealed_now) {
+                        Some(v) => v.column(caret),
+                        None => model.text[model.rows[row].src.start..caret].chars().count(),
+                    };
                     let target_row = &model.rows[target];
-                    let line = &model.text[target_row.src.clone()];
-                    let offset = line
-                        .char_indices()
-                        .nth(column)
-                        .map(|(i, _)| i)
-                        .unwrap_or(line.len());
-                    target_row.src.start + offset
+                    match Visible::of(&model, target, revealed_when_caret(target)) {
+                        Some(v) => v.offset(column),
+                        None => {
+                            let line = &model.text[target_row.src.clone()];
+                            let offset = line
+                                .char_indices()
+                                .nth(column)
+                                .map(|(i, _)| i)
+                                .unwrap_or(line.len());
+                            target_row.src.start + offset
+                        }
+                    }
                 };
                 buffer.update(cx, |b, _| b.move_caret(dest, extend));
                 false
@@ -764,15 +784,23 @@ impl MekuShell {
                         model.text.len()
                     }
                 } else {
-                    let column = model.text[model.rows[row].src.start..caret].chars().count();
+                    let column = match Visible::of(&model, row, revealed_now) {
+                        Some(v) => v.column(caret),
+                        None => model.text[model.rows[row].src.start..caret].chars().count(),
+                    };
                     let target_row = &model.rows[target];
-                    let line = &model.text[target_row.src.clone()];
-                    let offset = line
-                        .char_indices()
-                        .nth(column)
-                        .map(|(i, _)| i)
-                        .unwrap_or(line.len());
-                    target_row.src.start + offset
+                    match Visible::of(&model, target, revealed_when_caret(target)) {
+                        Some(v) => v.offset(column),
+                        None => {
+                            let line = &model.text[target_row.src.clone()];
+                            let offset = line
+                                .char_indices()
+                                .nth(column)
+                                .map(|(i, _)| i)
+                                .unwrap_or(line.len());
+                            target_row.src.start + offset
+                        }
+                    }
                 };
                 buffer.update(cx, |b, _| b.move_caret(dest, extend));
                 false
@@ -849,12 +877,34 @@ impl MekuShell {
                     None => false,
                 }
             }
-            DocKey::Backspace => {
-                buffer.update(cx, |b, _| b.backspace());
-                true
-            }
-            DocKey::Delete => {
-                buffer.update(cx, |b, _| b.delete_forward());
+            DocKey::Backspace | DocKey::Delete => {
+                let backward = key == DocKey::Backspace;
+                let collapsed = sel.start == sel.end;
+                let vis = (collapsed && !revealed_now)
+                    .then(|| Visible::of(&model, cur_ix, revealed_now))
+                    .flatten();
+                buffer.update(cx, |b, _| {
+                    // At the start of a list item Backspace peels the marker.
+                    if backward && vis.is_some() && b.list_backspace() {
+                        return;
+                    }
+                    let range = vis.as_ref().and_then(|v| v.char_range(caret_now, backward));
+                    // Hidden markup in the way (the visible char is not the
+                    // adjacent source char): delete the visible one. Otherwise
+                    // keep the buffer's smart backspace (pairs, indent stops).
+                    let plain = |r: &Range<usize>| {
+                        if backward {
+                            r.end == caret_now
+                        } else {
+                            r.start == caret_now
+                        }
+                    };
+                    match range {
+                        Some(r) if !plain(&r) => b.replace(r, "", false),
+                        _ if backward => b.backspace(),
+                        _ => b.delete_forward(),
+                    }
+                });
                 true
             }
             DocKey::Enter => {
@@ -1463,6 +1513,127 @@ fn caret_element(
         .bg(color)
 }
 
+/// Caret math that follows what is drawn. A rendered (non-raw) row hides
+/// markup, so source offsets inside hidden markers are not places the caret
+/// can be; these helpers map through the row's display projection.
+struct Visible {
+    display: Display,
+}
+
+impl Visible {
+    /// The rendered projection of row `ix`, or `None` when the row is shown
+    /// raw (then source and visible positions coincide).
+    fn of(model: &DocModel, ix: usize, revealed: bool) -> Option<Self> {
+        let row = &model.rows[ix];
+        (!revealed && row.kind != RowKind::Code).then(|| Self {
+            display: project(row, &model.text, false),
+        })
+    }
+
+    /// The nearest place the caret can actually be drawn.
+    fn canon(&self, src: usize) -> usize {
+        self.display.to_src(self.display.to_disp(src))
+    }
+
+    /// Next visible caret stop left/right of `from` within the row, or `None`
+    /// at the row's edge (the caller then crosses to the neighbouring row).
+    fn step(&self, text: &str, row: &Range<usize>, from: usize, forward: bool) -> Option<usize> {
+        let start = self.canon(from);
+        let mut p = from;
+        loop {
+            if forward {
+                if p >= row.end {
+                    return None;
+                }
+                p += text[p..].chars().next().map_or(1, char::len_utf8);
+            } else {
+                if p <= row.start {
+                    return None;
+                }
+                p -= text[..p].chars().next_back().map_or(1, char::len_utf8);
+            }
+            let c = self.canon(p);
+            if (forward && c > start) || (!forward && c < start) {
+                return Some(c);
+            }
+        }
+    }
+
+    /// Characters of rendered text left of the caret (the column Up/Down keep).
+    fn column(&self, caret: usize) -> usize {
+        self.display.text[..self.display.to_disp(caret).min(self.display.text.len())]
+            .chars()
+            .count()
+    }
+
+    /// Source offset of rendered-text column `col`.
+    fn offset(&self, col: usize) -> usize {
+        let at = self
+            .display
+            .text
+            .char_indices()
+            .nth(col)
+            .map_or(self.display.text.len(), |(i, _)| i);
+        self.display.to_src(at)
+    }
+
+    /// Source range to delete for the rendered character before / at the
+    /// caret. A character that stands for a hidden marker (a bullet glyph)
+    /// takes the whole marker with it.
+    fn char_range(&self, caret: usize, backward: bool) -> Option<Range<usize>> {
+        let d = &self.display;
+        let at = d.to_disp(self.canon(caret));
+        let ch_start = if backward {
+            d.text[..at].char_indices().next_back()?.0
+        } else {
+            if at >= d.text.len() {
+                return None;
+            }
+            at
+        };
+        let ch_len = d.text[ch_start..].chars().next()?.len_utf8();
+        let piece = d
+            .pieces
+            .iter()
+            .find(|p| !p.disp.is_empty() && p.disp.start <= ch_start && ch_start < p.disp.end)?;
+        Some(if piece.disp.len() == piece.src.len() {
+            let start = piece.src.start + (ch_start - piece.disp.start);
+            start..start + ch_len
+        } else {
+            piece.src.clone()
+        })
+    }
+}
+
+/// Whether row `ix` shows its raw markdown. Edit shows everything and Read
+/// nothing. In Live the editing line stays *rendered* (bullets, checkboxes,
+/// bold, links) so typing feels like a word processor; raw source appears only
+/// where the user is working on the markup itself: lines touched by a
+/// selection, headings (their `#`s), table rows, rules, and fence lines.
+pub(crate) fn row_is_revealed(
+    mode: Mode,
+    row: &Row,
+    ix: usize,
+    caret_row: usize,
+    selection: &Range<usize>,
+) -> bool {
+    match mode {
+        Mode::Edit => true,
+        Mode::Read => false,
+        Mode::Live => {
+            let selected = selection.start < selection.end
+                && selection.end > row.src.start
+                && selection.start <= row.src.end
+                && !(selection.start == row.src.end && row.src.end > row.src.start);
+            let structural = matches!(
+                row.kind,
+                RowKind::Heading(_) | RowKind::Table | RowKind::Rule
+            ) || row.fence.is_some();
+            selected || (ix == caret_row && structural)
+        }
+    }
+}
+
 /// Short fade when a note becomes the visible one (tab switch, open).
 trait OpenFade: Sized {
     fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement;
@@ -2060,7 +2231,10 @@ fn row_element(
         el = el.pb(base_font * 0.25);
     }
     if row.kind == RowKind::Code {
-        el = el.bg(code_bg(cx)).px(px(14.));
+        el = el
+            .bg(code_bg(cx))
+            .px(px(14.))
+            .min_h(window.text_style().line_height_in_pixels(window.rem_size()));
         text_x = px(14.);
         // One rounded container whatever is revealed: the block's first and
         // last rows carry the corners (also while the fences show as source).
@@ -2087,9 +2261,18 @@ fn row_element(
         px(0.)
     };
     let wrap = (col_width > px(0.)).then(|| (col_width - text_x - right_pad).max(px(40.)));
-    let caret_geo = caret_shape.and_then(|(text, runs, index)| {
-        caret_geometry(window, &text, &runs, font_size, index, wrap)
-    });
+    let wants_caret = caret_shape.is_some();
+    let caret_geo = caret_shape
+        .and_then(|(text, runs, index)| {
+            caret_geometry(window, &text, &runs, font_size, index, wrap)
+        })
+        .or_else(|| {
+            // An empty line (e.g. inside a code block) has nothing to shape.
+            (wants_caret && display_empty).then(|| {
+                let line_h = window.text_style().line_height_in_pixels(window.rem_size());
+                (px(0.), ((line_h - font_size) / 2.0).max(px(0.)), font_size)
+            })
+        });
     if let (Some(menu), Some((advance, y_offset, cheight))) = (slash, caret_geo) {
         // Drawn above the rows below it, anchored under the caret.
         el = el.child(

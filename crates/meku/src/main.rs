@@ -4483,8 +4483,8 @@ mod ui_tests {
         std::fs::write(dir.path().join("other.md"), "# other\n").unwrap();
         let rel = PathBuf::from("doc.md");
         let at = gpui_kit::point(px(10.), px(8.));
-        // Caret on the link's own row: the source is shown, a click edits.
-        move_doc_caret(cx, &view, 8);
+        // The row is selected (so its source is shown): a click edits.
+        select_doc_range(cx, &view, 6, 20);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.click_at(("doc-row", 1usize), at, cx);
@@ -4495,8 +4495,9 @@ mod ui_tests {
             Some(rel.clone()),
             "raw row: no navigation"
         );
-        // Caret elsewhere: the link is rendered text and one plain click opens it.
-        move_doc_caret(cx, &view, 0);
+        // Otherwise (even with the caret on that line) the link is rendered
+        // text and one plain click opens it.
+        move_doc_caret(cx, &view, 8);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.click_at(("doc-row", 1usize), at, cx);
@@ -5427,5 +5428,136 @@ mod ui_tests {
             view.read_with(&*cx, |s, _| s.palette.is_some()),
             "Ln/Col opens go-to-line"
         );
+    }
+
+    // -- seamless live editing ---------------------------------------------
+
+    /// Whether the caret's row currently shows raw markdown.
+    fn caret_row_raw(cx: &mut TestAppContext, view: &Entity<MekuShell>) -> bool {
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                let rel = s.doc_rel().unwrap();
+                let model = s.doc_model(&rel, cx).unwrap();
+                let (caret, sel) = {
+                    let b = s.buffers[&rel].read(cx);
+                    (b.caret(), b.selection())
+                };
+                let ix = meku_markdown::live::row_at(&model.rows, caret);
+                crate::document::row_is_revealed(s.tab_mode(), &model.rows[ix], ix, ix, &sel)
+            })
+        })
+    }
+
+    #[test]
+    fn typing_dash_space_shows_the_bullet_and_enter_continues_it() {
+        run_ui_test("live_bullets", live_bullets_body);
+    }
+
+    fn live_bullets_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        step(cx, window, |w, cx| w.input("-", cx));
+        step(cx, window, |w, cx| w.input(" ", cx));
+        step(cx, window, |w, cx| w.input("one", cx));
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- one");
+        assert!(
+            !caret_row_raw(cx, &view),
+            "the line you type on stays rendered (bullet, not `- `)"
+        );
+        let kind =
+            cx.update(|cx| view.update(cx, |s, cx| s.doc_model(&rel, cx).map(|m| m.rows[0].kind)));
+        assert_eq!(kind, Some(meku_markdown::live::RowKind::Item));
+        step(cx, window, |w, cx| w.press("enter", cx));
+        step(cx, window, |w, cx| w.input("two", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "- one\n- two",
+            "next line starts with a bullet"
+        );
+        assert!(!caret_row_raw(cx, &view));
+        // Same for a task and a numbered list.
+        step(cx, window, |w, cx| w.press("enter", cx));
+        step(cx, window, |w, cx| w.press("backspace", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "- one\n- two\n",
+            "Backspace at the item start peels the marker"
+        );
+        for c in ["- ", "[ ] ", "todo"] {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.input(c, cx);
+            })
+            .unwrap();
+        }
+        assert_eq!(buffer_text(cx, &view, &rel).0, "- one\n- two\n- [ ] todo");
+        assert!(
+            !caret_row_raw(cx, &view),
+            "task line shows its checkbox, not `- [ ]`"
+        );
+        step(cx, window, |w, cx| w.press("enter", cx));
+        assert!(
+            buffer_text(cx, &view, &rel)
+                .0
+                .ends_with("- [ ] todo\n- [ ] "),
+            "next task item"
+        );
+    }
+
+    #[test]
+    fn arrows_and_backspace_work_on_what_is_visible() {
+        run_ui_test("visible_editing", visible_editing_body);
+    }
+
+    fn visible_editing_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "**bold** tail\n");
+        focus_doc_for(cx, &view, window);
+        let rel = PathBuf::from("doc.md");
+        move_doc_caret(cx, &view, 0);
+        step(cx, window, |w, cx| w.press("right", cx));
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            3,
+            "one Right steps over the hidden ** to after `b`"
+        );
+        move_doc_caret(cx, &view, 6);
+        step(cx, window, |w, cx| w.press("backspace", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "**bol** tail\n",
+            "Backspace removes the last visible letter, not a hidden star"
+        );
+        step(cx, window, |w, cx| w.press("left", cx));
+        step(cx, window, |w, cx| w.press("left", cx));
+        assert_eq!(doc_caret(cx, &view, &rel), 3, "Left moves letter by letter");
+        // Selecting reveals the markup of the touched line.
+        select_doc_range(cx, &view, 2, 5);
+        assert!(
+            caret_row_raw(cx, &view),
+            "a selection shows the source of its line"
+        );
+        move_doc_caret(cx, &view, 3);
+        assert!(
+            !caret_row_raw(cx, &view),
+            "collapsing it renders the line again"
+        );
+    }
+
+    #[test]
+    fn headings_keep_their_raw_caret_row() {
+        run_ui_test("heading_raw", heading_raw_body);
+    }
+
+    fn heading_raw_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "## Title\nbody\n");
+        focus_doc_for(cx, &view, window);
+        move_doc_caret(cx, &view, 4);
+        assert!(
+            caret_row_raw(cx, &view),
+            "headings are unchanged: `##` shows while the caret is there"
+        );
+        move_doc_caret(cx, &view, 11);
+        assert!(!caret_row_raw(cx, &view));
     }
 }

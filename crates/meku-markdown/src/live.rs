@@ -631,6 +631,11 @@ fn classify(
     let line = &text[src.clone()];
     let trimmed = line.trim_start();
     if trimmed.is_empty() {
+        // An empty line inside a fence is still code, or the block would
+        // split into two containers.
+        if *in_fence {
+            return raw_row(src, RowKind::Code);
+        }
         return Row {
             src,
             kind: RowKind::Blank,
@@ -1478,5 +1483,24 @@ mod tests {
         assert_eq!(alt_and_width("plain alt"), ("plain alt", None));
         assert_eq!(alt_and_width("a|b"), ("a|b", None));
         assert_eq!(alt_and_width("|500"), ("", Some(500)));
+    }
+
+    #[test]
+    fn blank_lines_inside_a_fence_stay_code() {
+        let rows = build_rows("```\na\n\nb\n```\n\nafter\n");
+        let kinds: Vec<RowKind> = rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                RowKind::Code,
+                RowKind::Code,
+                RowKind::Code,
+                RowKind::Code,
+                RowKind::Code,
+                RowKind::Blank,
+                RowKind::Text,
+                RowKind::Blank
+            ]
+        );
     }
 }
