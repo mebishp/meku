@@ -336,15 +336,29 @@ impl MekuShell {
         };
         let active = row_at(&model.rows, caret);
         let count = model.rows.len();
+        // Unmeasured rows count as zero height to the scroll bar, so give
+        // every row an estimate; real heights replace it as rows are drawn.
+        let line_h = f32::from(_window.line_height()) * crate::theme::zoom(cx);
+        let hint = px(estimated_row_height(&model.rows, line_h));
+        let old_count = self.doc_list.item_count();
         if self.doc_list_rel.as_deref() != Some(rel) {
-            self.doc_list.reset(count);
+            self.doc_list.reset_with_uniform_height(count, hint);
+            self.doc_hint_width.set(0.0);
             self.doc_list_rel = Some(rel.to_path_buf());
-        } else if self.doc_list.item_count() != count {
-            // A reset forgets the scroll position (Enter would snap to the top).
-            let mut top = self.doc_list.logical_scroll_top();
-            self.doc_list.reset(count);
-            top.item_ix = top.item_ix.min(count.saturating_sub(1));
-            self.doc_list.scroll_to(top);
+        } else if old_count != count {
+            let delta = count.abs_diff(old_count);
+            if delta <= 50 {
+                // An edit added or removed a few rows at the caret: keep the
+                // measured rest, and the scroll position, as they are.
+                let at = active.min(old_count);
+                self.doc_list.splice(
+                    at..(at + old_count.saturating_sub(count)).min(old_count),
+                    count.saturating_sub(old_count),
+                );
+            } else {
+                self.doc_list.reset_with_uniform_height(count, hint);
+                self.doc_hint_width.set(0.0);
+            }
         }
         *self.doc_views.borrow_mut() = (0..count).map(|_| None).collect();
         // Startup scroll waits until the list has been measured.
@@ -477,6 +491,7 @@ impl MekuShell {
             .text_size(cx.theme().font_size * crate::theme::zoom(cx))
             .child(input_bridge)
             .child(list_body)
+            .child(self.row_estimates(hint))
             .child(crate::smooth::wheel(
                 &self.smooth.doc,
                 crate::smooth::for_list(&self.doc_list),
@@ -485,6 +500,31 @@ impl MekuShell {
             .children(self.render_find_bar(cx))
             .pipe_fade(rel, cx)
     }
+    /// The list forgets its row-height estimates whenever its width changes
+    /// (and on its first layout), which leaves the scroll bar with only the
+    /// rows drawn so far. This zero-size layer runs after the list has laid
+    /// out and puts the estimates back, once per width, keeping the scroll
+    /// position.
+    fn row_estimates(&self, hint: Pixels) -> impl IntoElement {
+        let list = self.doc_list.clone();
+        let applied = self.doc_hint_width.clone();
+        canvas(
+            move |_, window, _| {
+                let width = f32::from(list.viewport_bounds().size.width);
+                if width > 0.0 && (applied.get() - width).abs() > 0.5 {
+                    applied.set(width);
+                    let top = list.logical_scroll_top();
+                    list.reset_with_uniform_height(list.item_count(), hint);
+                    list.scroll_to(top);
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+    }
+
     /// Source byte offset for a point hit on row `ix`. Rows without a text
     /// layout (blank rules, spacers) resolve to their start.
     fn row_source(&self, ix: usize, pos: Point<Pixels>) -> Option<usize> {
@@ -1417,6 +1457,24 @@ fn column_em(cx: &App) -> f32 {
 }
 
 const COLUMN_EM: f32 = 37.5;
+
+/// Rough height of an average row, in pixels, for the scroll bar's first
+/// guess (measured on typical notes: blank 0.67 lines, text 1, items 1.15,
+/// headings 2 to 2.4).
+fn estimated_row_height(rows: &[Row], line_h: f32) -> f32 {
+    let lines: f32 = rows
+        .iter()
+        .map(|r| match r.kind {
+            RowKind::Blank => 0.67,
+            RowKind::Heading(1 | 2) => 2.4,
+            RowKind::Heading(3) => 2.0,
+            RowKind::Heading(_) => 1.6,
+            RowKind::Item => 1.15,
+            _ => 1.0,
+        })
+        .sum();
+    (lines / rows.len().max(1) as f32 * line_h).max(1.0)
+}
 
 fn heading_scale(kind: RowKind) -> f32 {
     match kind {

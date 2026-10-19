@@ -11,7 +11,7 @@ mod slash;
 mod smooth;
 mod theme;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -197,6 +197,8 @@ pub struct MekuShell {
     doc_list: ListState,
     /// File the list state currently describes.
     doc_list_rel: Option<PathBuf>,
+    /// Width the list last had its row-height estimates applied at (0: not yet).
+    doc_hint_width: Rc<Cell<f32>>,
     /// Rel path with unsaved edits that changed on disk underneath us.
     conflict: Option<PathBuf>,
     watcher: Option<notify::RecommendedWatcher>,
@@ -287,6 +289,7 @@ impl MekuShell {
             copied: None,
             doc_list: ListState::new(0, ListAlignment::Top, px(600.)),
             doc_list_rel: None,
+            doc_hint_width: Rc::new(Cell::new(0.0)),
             conflict: None,
             watcher: None,
             watcher_rx: None,
@@ -6615,6 +6618,83 @@ mod ui_tests {
         assert!(
             (max1 - max0).abs() < 1.0,
             "scrolling must not change the content size: {max0} -> {max1}"
+        );
+    }
+
+    #[test]
+    fn the_scroll_bar_knows_roughly_how_long_a_big_note_is() {
+        run_ui_test("sb_estimate", sb_estimate_body);
+    }
+
+    fn sb_estimate_body(cx: &mut TestAppContext) {
+        let body: String = (0..2000)
+            .map(|i| format!("Line {i} of a long note\n"))
+            .collect();
+        let (view, window, _dir) = open_note_in(cx, 1100.0, 700.0, &body);
+        for _ in 0..3 {
+            step(cx, window, |_, _| {});
+        }
+        let max = view.read_with(&*cx, |s, _| {
+            f32::from(s.doc_list.max_offset_for_scrollbar().y)
+        });
+        assert!(
+            max > 2000.0 * 20.0,
+            "unmeasured rows still count toward the scroll range: {max}"
+        );
+        // Editing keeps the scroll position and the estimate.
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.doc_list.scroll_to(gpui_kit::ListOffset {
+                    item_ix: 1000,
+                    offset_in_item: gpui_kit::px(0.),
+                })
+            })
+        });
+        step(cx, window, |_, _| {});
+        let max2 = view.read_with(&*cx, |s, _| {
+            f32::from(s.doc_list.max_offset_for_scrollbar().y)
+        });
+        assert!(
+            (max2 - max).abs() < max * 0.2,
+            "scrolling does not collapse the range: {max} -> {max2}"
+        );
+    }
+
+    #[test]
+    fn dragging_the_scroll_bar_reaches_the_middle_and_the_end_of_a_big_note() {
+        run_ui_test("sb_drag", sb_drag_body);
+    }
+
+    fn sb_drag_body(cx: &mut TestAppContext) {
+        use gpui_kit::component::scroll::ScrollbarHandle;
+        let body: String = (0..5000)
+            .map(|i| format!("Line {i} of a long note\n"))
+            .collect();
+        let (view, window, _dir) = open_note_in(cx, 1100.0, 700.0, &body);
+        for _ in 0..3 {
+            step(cx, window, |_, _| {});
+        }
+        let list = view.read_with(&*cx, |s, _| s.doc_list.clone());
+        let content = list.content_size().height;
+        let view_h = list.viewport_bounds().size.height;
+        list.start_drag();
+        // Thumb dragged to the middle of the track.
+        list.set_offset(gpui_kit::point(gpui_kit::px(0.), -(content - view_h) / 2.0));
+        list.end_drag();
+        step(cx, window, |_, _| {});
+        let mid = list.logical_scroll_top().item_ix;
+        assert!(
+            (2000..3000).contains(&mid),
+            "the middle of the bar is the middle of the note: row {mid}"
+        );
+        list.start_drag();
+        list.set_offset(gpui_kit::point(gpui_kit::px(0.), -(content - view_h)));
+        list.end_drag();
+        step(cx, window, |_, _| {});
+        let end = list.logical_scroll_top().item_ix;
+        assert!(
+            end > 4900,
+            "the end of the bar is the end of the note: row {end}"
         );
     }
 }
