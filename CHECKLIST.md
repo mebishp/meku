@@ -378,3 +378,11 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] Themes: `Ctrl+Alt+Z` / "Theme: undo last change" (a second press redoes); "Theme: copy as JSON" puts the active theme on the clipboard as a `themes` entry; "Theme: add from clipboard" validates it, adds it to the global themes and applies it.
 - [x] **Wheel scrolling everywhere** (`smooth.rs`): precise, not floaty. Half of each notch lands instantly, the rest settles in ~100ms (30ms time constant), whole pixels only, direction reversal cancels the old tail. Document, tree, outline, tabs, settings, palette, lightbox; touchpads untouched. Tune `TAU_SECS` / `NOTCH_LINES` / `INSTANT`.
 - [x] **List markers convert on completion**: `-`, `+`, `1.` stay literal text until the space is typed (then become a bullet / number); the checkbox appears once `[ ] ` is complete. `*` is never a bullet (emphasis only), in both the live view and Enter/Tab list handling.
+
+### 14. Session and tabs
+
+- [x] The app reopens the last mekuto at launch (`state.json` beside the global settings; setting **Reopen last mekuto**, default on). A command-line folder still wins; a deleted folder is skipped.
+- [x] Tabs restore from `.meku/session.json` (setting **Reopen last tabs**) as placeholders: only the active note is read at launch, others load when first activated; a note that vanished loses its tab.
+- [x] Back/forward moved from the title bar to the head of the tab strip.
+- [x] Tabs shrink to fit the strip (floor 40px, then it scrolls); the active tab keeps its width, inactive ones drop the icon and show close on hover when crowded, with a full-title tooltip.
+

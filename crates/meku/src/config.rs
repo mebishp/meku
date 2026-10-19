@@ -427,10 +427,18 @@ pub const DEFS: &[Def] = &[
         Dv::B(true),
     ),
     def(
+        "reopen_last_mekuto",
+        Section::Files,
+        "Reopen last mekuto",
+        "Open the mekuto you had at last quit when the app starts.",
+        Kind::Bool,
+        Dv::B(true),
+    ),
+    def(
         "restore_session",
         Section::Files,
         "Reopen last tabs",
-        "Restore the open notes when a mekuto opens.",
+        "Restore the tabs that were open in a mekuto. Only the active tab is read until you switch to the others.",
         Kind::Bool,
         Dv::B(true),
     ),
@@ -811,11 +819,51 @@ pub fn global_path() -> Option<PathBuf> {
     Some(base.join("meku").join("settings.json"))
 }
 
+/// App state that is not a setting (the mekuto open at last quit).
+fn state_path() -> Option<PathBuf> {
+    global_path().map(|p| p.with_file_name("state.json"))
+}
+
+/// The mekuto that was open when the app last ran, if it still exists.
+pub fn last_mekuto() -> Option<PathBuf> {
+    read_last_mekuto(&state_path()?)
+}
+
+fn read_last_mekuto(state: &Path) -> Option<PathBuf> {
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(state).ok()?).ok()?;
+    let dir = PathBuf::from(value.get("last_mekuto")?.as_str()?);
+    dir.is_dir().then_some(dir)
+}
+
+/// Remember `root` as the mekuto to reopen. Best effort.
+pub fn remember_mekuto(root: &Path) {
+    if let Some(path) = state_path() {
+        write_last_mekuto(&path, root);
+    }
+}
+
+fn write_last_mekuto(state: &Path, root: &Path) {
+    let body = serde_json::json!({ "last_mekuto": root.to_string_lossy() });
+    if let Some(dir) = state.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = state.with_extension("json.tmp");
+    if std::fs::write(&tmp, body.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, state);
+    }
+}
+
 pub fn mekuto_path(root: &Path) -> PathBuf {
     root.join(".meku").join("settings.json")
 }
 
 impl ConfigState {
+    /// Whether settings live in real files (false for the in-memory state
+    /// the tests use), so app state may be written too.
+    pub fn persists(&self) -> bool {
+        self.global.path.is_some()
+    }
+
     /// No files at all: defaults only, nothing is ever written. Used by
     /// tests and before anything is loaded.
     pub fn in_memory() -> Self {
@@ -1335,5 +1383,24 @@ mod tests {
         s.write(Scope::Mekuto, "zoom", json!(1.5)).unwrap();
         assert_eq!(s.effective.f64("zoom"), 1.5);
         assert!(std::fs::read_to_string(&file).unwrap().contains("1.5"));
+    }
+
+    #[test]
+    fn the_last_mekuto_round_trips_and_vanishes_with_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("cfg").join("state.json");
+        let vault = dir.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        assert_eq!(read_last_mekuto(&state), None);
+        write_last_mekuto(&state, &vault);
+        assert_eq!(read_last_mekuto(&state), Some(vault.clone()));
+        std::fs::remove_dir(&vault).unwrap();
+        assert_eq!(
+            read_last_mekuto(&state),
+            None,
+            "a deleted folder is not reopened"
+        );
+        std::fs::write(&state, "{ broken").unwrap();
+        assert_eq!(read_last_mekuto(&state), None);
     }
 }

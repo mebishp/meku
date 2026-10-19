@@ -149,40 +149,6 @@ impl MekuShell {
             breadcrumb = breadcrumb.child(crumb);
         }
 
-        let back_shell = shell.clone();
-        let forward_shell = shell.clone();
-        let (can_back, can_forward) = (self.can_nav(-1), self.can_nav(1));
-        let nav_buttons = h_flex()
-            .gap(px(1.))
-            .child(
-                div()
-                    .opacity(if can_back { 1.0 } else { 0.35 })
-                    .child(icon_button(
-                        "nav-back",
-                        Ico::Back,
-                        false,
-                        "Back (Alt+←)",
-                        cx,
-                        move |_, cx| {
-                            back_shell.update(cx, |v, cx| v.nav_step(-1, cx));
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .opacity(if can_forward { 1.0 } else { 0.35 })
-                    .child(icon_button(
-                        "nav-forward",
-                        Ico::Forward,
-                        false,
-                        "Forward (Alt+→)",
-                        cx,
-                        move |_, cx| {
-                            forward_shell.update(cx, |v, cx| v.nav_step(1, cx));
-                        },
-                    )),
-            );
-
         let mut right = h_flex().gap_1().items_center().flex_none();
         if self.doc_rel().is_some() {
             right = right.child(self.render_doc_menu(cx));
@@ -244,7 +210,6 @@ impl MekuShell {
                             });
                         },
                     ))
-                    .child(nav_buttons)
                     .child(breadcrumb),
             )
             .child(right)
@@ -294,6 +259,45 @@ impl MekuShell {
             .into_any_element()
     }
 
+    /// Back / forward through visited notes, at the head of the tab strip.
+    fn render_nav_buttons(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let shell = cx.entity();
+        let back_shell = shell.clone();
+        let forward_shell = shell.clone();
+        let (can_back, can_forward) = (self.can_nav(-1), self.can_nav(1));
+        h_flex()
+            .gap(px(1.))
+            .child(
+                div()
+                    .opacity(if can_back { 1.0 } else { 0.35 })
+                    .child(icon_button(
+                        "nav-back",
+                        Ico::Back,
+                        false,
+                        "Back (Alt+←)",
+                        cx,
+                        move |_, cx| {
+                            back_shell.update(cx, |v, cx| v.nav_step(-1, cx));
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .opacity(if can_forward { 1.0 } else { 0.35 })
+                    .child(icon_button(
+                        "nav-forward",
+                        Ico::Forward,
+                        false,
+                        "Forward (Alt+→)",
+                        cx,
+                        move |_, cx| {
+                            forward_shell.update(cx, |v, cx| v.nav_step(1, cx));
+                        },
+                    )),
+            )
+            .into_any_element()
+    }
+
     // -- tab strip ------------------------------------------------------------
 
     pub(crate) fn render_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -306,6 +310,7 @@ impl MekuShell {
         let hover_bg = theme_colors.list_hover;
         let accent = theme::accent_alpha(cx, 1.0);
 
+        let tabs_total = self.tabs.len();
         let tabs: Vec<AnyElement> = self
             .tabs
             .iter()
@@ -318,6 +323,11 @@ impl MekuShell {
                 let mid_shell = shell.clone();
                 let group = SharedString::from(format!("tab-{index}"));
                 let title = tab.title.trim_end_matches(".md").to_string();
+                // With many tabs the room goes to the titles: inactive tabs
+                // lose the file icon, and their close button floats over the
+                // title's end only while hovered.
+                let crowded = tabs_total > 5;
+                let tip = title.clone();
                 let ico = if tab.rel.is_some() {
                     Ico::Note
                 } else {
@@ -350,20 +360,35 @@ impl MekuShell {
                         cx.stop_propagation();
                         close_shell.update(cx, |view, cx| view.close_tab(index, cx));
                     });
+                let floating_close = crowded && !active && !dirty;
+                let close = if floating_close {
+                    close
+                        .absolute()
+                        .right(px(4.))
+                        .top(px(7.))
+                        .bg(hover_bg)
+                        .invisible()
+                        .group_hover(group.clone(), |s| s.visible())
+                } else {
+                    close
+                };
                 let mut el = h_flex()
                     .id(("tab", index))
                     .test_support()
                     .group(group.clone())
-                    .flex_none()
+                    .flex_shrink(if active { 0. } else { 1. })
+                    .min_w(px(40.))
                     .items_center()
                     .gap_1p5()
                     .h(px(32.))
                     .max_w(px(200.))
-                    .pl(px(10.))
+                    .pl(px(8.))
                     .pr(px(6.))
                     .rounded_t(px(8.))
                     .cursor_pointer()
+                    .relative()
                     .text_sm()
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .on_mouse_down(MouseButton::Middle, move |_, _, cx| {
                         mid_shell.update(cx, |view, cx| view.close_tab(index, cx));
                     })
@@ -375,10 +400,14 @@ impl MekuShell {
                             cx.notify();
                         });
                     })
-                    .child(icon(ico, px(14.), if active { accent } else { muted }))
+                    .children(
+                        (!crowded || active)
+                            .then(|| icon(ico, px(14.), if active { accent } else { muted })),
+                    )
                     .child(
                         div()
                             .truncate()
+                            .min_w_0()
                             .text_color(if active { fg } else { muted })
                             .child(title),
                     )
@@ -444,17 +473,13 @@ impl MekuShell {
             .collect();
 
         let new_shell = shell.clone();
-        let strip = h_flex()
+        let scroller = h_flex()
             .id("tabs-scroll")
             .test_support()
-            .flex_none()
-            .w_full()
+            .flex_1()
             .min_w_0()
             .items_end()
             .gap(px(2.))
-            .pt(px(6.))
-            .px(px(8.))
-            .bg(bar_bg)
             .relative()
             .overflow_x_scroll()
             .track_scroll(&self.tabs_scroll)
@@ -473,6 +498,22 @@ impl MekuShell {
                     new_shell.update(cx, |view, cx| view.new_tab_action(cx));
                 },
             )));
+        let strip = h_flex()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .items_end()
+            .gap(px(6.))
+            .pt(px(6.))
+            .px(px(8.))
+            .bg(bar_bg)
+            .child(
+                div()
+                    .flex_none()
+                    .pb(px(2.))
+                    .child(self.render_nav_buttons(cx)),
+            )
+            .child(scroller);
         // Keep the active tab in view after switching.
         if self.tabs_scrolled_to != Some(self.active_tab) {
             self.tabs_scroll.scroll_to_item(self.active_tab);

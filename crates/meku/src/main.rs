@@ -881,11 +881,18 @@ impl MekuShell {
                 self.doc_models.clear();
                 self.conflict = None;
                 let restore = theme::cfg(cx).bool("restore_session");
+                // Tabs come back as placeholders; only the active one is read.
+                let mode = Mode::from_setting(theme::cfg(cx).str("default_mode"));
                 for tab in session.open_tabs.iter().filter(|_| restore) {
                     if root.join(&tab.path).is_file() {
-                        self.open_file_inner(&tab.path, cx);
+                        self.tabs.push(EditorTab {
+                            rel: Some(tab.path.clone()),
+                            title: Self::tab_title(&tab.path),
+                            mode,
+                        });
                     }
                 }
+                self.active_tab = self.tabs.len().saturating_sub(1);
                 if let Some(active) = &session.active_tab
                     && let Some(ix) = self
                         .tabs
@@ -893,6 +900,11 @@ impl MekuShell {
                         .position(|t| t.rel.as_ref() == Some(active))
                 {
                     self.active_tab = ix;
+                }
+                self.ensure_active_loaded(cx);
+                if let Some(rel) = self.doc_rel() {
+                    self.explorer.reveal(&rel);
+                    self.record_visit();
                 }
                 if self.tabs.is_empty() {
                     self.tabs.push(EditorTab {
@@ -903,12 +915,47 @@ impl MekuShell {
                     self.active_tab = 0;
                 }
                 self.notice = None;
+                if theme::state(cx).persists() {
+                    config::remember_mekuto(&root);
+                }
                 self.save_session();
                 cx.notify();
             }
             Err(e) => {
                 self.notice = Some(format!("Cannot open {}: {e}", dir.display()));
                 cx.notify();
+            }
+        }
+    }
+
+    /// Read the active tab's note if its tab was restored without one.
+    /// A note that vanished since the session was saved loses its tab.
+    fn ensure_active_loaded(&mut self, cx: &mut Context<Self>) {
+        let Some(rel) = self.tabs.get(self.active_tab).and_then(|t| t.rel.clone()) else {
+            return;
+        };
+        if self.buffers.contains_key(&rel) {
+            return;
+        }
+        let loaded = self
+            .explorer
+            .abs(&rel)
+            .and_then(|abs| OpenBuffer::load(rel.clone(), &abs).ok());
+        match loaded {
+            Some(buffer) => {
+                self.buffers.insert(rel, cx.new(|_| buffer));
+            }
+            None => {
+                self.notice = Some(format!("Cannot open {}", rel.display()));
+                self.tabs.remove(self.active_tab);
+                if self.tabs.is_empty() {
+                    self.tabs.push(EditorTab {
+                        rel: None,
+                        title: "Welcome".to_string(),
+                        mode: Mode::Live,
+                    });
+                }
+                self.active_tab = self.active_tab.min(self.tabs.len() - 1);
             }
         }
     }
@@ -2051,6 +2098,7 @@ impl MekuShell {
 
 impl Render for MekuShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_active_loaded(cx);
         self.ensure_naming_input(window, cx);
         self.ensure_title_input(window, cx);
         self.ensure_palette(window, cx);
@@ -2261,6 +2309,13 @@ fn main() {
         gpui_kit::init(cx);
         theme::init(initial_root.as_deref(), cx);
         apply_fonts(cx);
+        let initial_dir = initial_dir.clone().or_else(|| {
+            theme::cfg(cx)
+                .bool("reopen_last_mekuto")
+                .then(config::last_mekuto)
+                .flatten()
+                .map(|p| p.to_string_lossy().into_owned())
+        });
 
         cx.bind_keys([
             KeyBinding::new("ctrl-\\", ToggleSidebar, Some("Meku")),
@@ -6397,5 +6452,77 @@ mod ui_tests {
             after.abs_diff(before) <= 2,
             "Enter must not snap the page: {before} -> {after}"
         );
+    }
+
+    #[test]
+    fn restored_tabs_load_lazily_and_the_strip_fits_them() {
+        run_ui_test("lazy_tabs", lazy_tabs_body);
+    }
+
+    fn lazy_tabs_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot_sized(cx, 900.0, 600.0);
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..10)
+            .map(|i| format!("A fairly long note title {i}.md"))
+            .collect();
+        for n in &names {
+            std::fs::write(dir.path().join(n), "body\n").unwrap();
+        }
+        let session = meku_vault::Session {
+            version: 1,
+            active_tab: Some(PathBuf::from(&names[3])),
+            open_tabs: names
+                .iter()
+                .map(|n| meku_vault::OpenTab {
+                    path: PathBuf::from(n),
+                    cursor: 0,
+                    scroll_px: 0.0,
+                })
+                .collect(),
+        };
+        meku_vault::save_session_atomic(dir.path(), &session).unwrap();
+        let root = dir.path().to_path_buf();
+        cx.update(|cx| view.update(cx, |s, cx| s.open_mekuto(&root, cx)));
+        let (tabs, loaded, active) = cx
+            .update(|cx| view.read_with(cx, |s, _| (s.tabs.len(), s.buffers.len(), s.active_tab)));
+        assert_eq!(
+            (tabs, loaded, active),
+            (10, 1, 3),
+            "only the active tab is read"
+        );
+
+        // Tabs shrink to fit the strip instead of overflowing it, and the
+        // back/forward buttons sit in the strip.
+        step(cx, window, |_, _| {});
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let strip = w.find("tabs-scroll").bounds();
+            let last = w.find(("tab", 9usize)).bounds();
+            assert!(
+                last.right() <= strip.right() + gpui_kit::px(1.0),
+                "all tabs fit: tab right {:?} vs strip {:?}",
+                last.right(),
+                strip.right()
+            );
+            let back = w.find("nav-back").bounds();
+            let first = w.find(("tab", 0usize)).bounds();
+            assert!(back.right() <= first.left(), "nav buttons lead the tabs");
+            assert!(
+                back.origin.y > gpui_kit::px(30.0),
+                "and are below the title bar"
+            );
+        })
+        .unwrap();
+
+        // Switching to another tab reads it then.
+        cx.update_window(window, |_, w, cx| {
+            w.click(("tab", 7usize), cx);
+        })
+        .unwrap();
+        step(cx, window, |_, _| {});
+        let (loaded, active) =
+            cx.update(|cx| view.read_with(cx, |s, _| (s.buffers.len(), s.active_tab)));
+        assert_eq!((loaded, active), (2, 7));
     }
 }
