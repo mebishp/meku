@@ -3,34 +3,44 @@ import { AbsoluteFill, Easing, Freeze, OffthreadVideo, Sequence, interpolate, sp
 import { CameraMotionBlur } from '@remotion/motion-blur';
 import data from './events.json';
 
-export const FPS = 30;
-const VIDEO_SECONDS = 31.1;
+export const FPS = 60;
+const OFFSET = 2.46;            // the recording starts this long before the event log's t=0
+const LEAD = 0.7;               // seconds of idle window kept before the log starts
+const TRIM = OFFSET - LEAD;     // video seconds cut from the start
+const SHIFT = LEAD;             // event time -> composition time
+const TAIL = 0.5;
+const VIDEO_SECONDS = data.duration + LEAD + TAIL;
 const VIDEO_FRAMES = Math.floor(VIDEO_SECONDS * FPS);
-const OUTRO = 78;
+const OUTRO = Math.round(2.6 * FPS);
 export const TOTAL_FRAMES = VIDEO_FRAMES + OUTRO;
 
 // The recorded window (screen px) and where it sits on the canvas.
 const [AX, AY, AW, AH] = data.area;
-const CANVAS = { w: 1600, h: 900 };
-const WIN = { x: (CANVAS.w - AW) / 2, y: (CANVAS.h - AH) / 2 - 10 };
-const toComp = (x: number, y: number) => ({ x: x - AX + WIN.x, y: y - AY + WIN.y });
-// Window-local point -> canvas point.
-const W = (x: number, y: number) => ({ x: WIN.x + x, y: WIN.y + y });
+const CANVAS = { w: 1920, h: 1080 };
+const K = 0.88;                                       // window scale on the canvas
+const WIN = { x: (CANVAS.w - AW * K) / 2, y: (CANVAS.h - AH * K) / 2 - 6 };
+const toComp = (x: number, y: number) => ({ x: WIN.x + (x - AX) * K, y: WIN.y + (y - AY) * K });
+// Point inside the recorded window (video px) -> canvas point.
+const W = (x: number, y: number) => ({ x: WIN.x + x * K, y: WIN.y + y * K });
+const M = Object.fromEntries(Object.entries(data.marks as Record<string, number>).map(([k, v]) => [k, v + SHIFT])) as Record<string, number>;
 
 // ---------- camera: eased zooms between keyframes ----------
 type Key = { t: number; s: number; c: { x: number; y: number } };
 const mid = { x: CANVAS.w / 2, y: CANVAS.h / 2 };
+const TEXT = W(1160, 300), BOX = W(960, 349), CALL = W(1160, 400);
 const KEYS: Key[] = [
-  { t: 0.0, s: 1.0, c: mid },
-  { t: 1.9, s: 1.0, c: mid },
-  { t: 3.3, s: 1.35, c: W(555, 300) },
-  { t: 12.0, s: 1.42, c: W(560, 330) },
-  { t: 17.2, s: 1.38, c: W(560, 330) },
-  { t: 18.3, s: 1.65, c: W(470, 290) },
-  { t: 19.9, s: 1.65, c: W(470, 290) },
-  { t: 21.3, s: 1.0, c: mid },
-  { t: 29.6, s: 1.04, c: mid },
-  { t: 31.1, s: 1.0, c: mid },
+  { t: 0, s: 1.0, c: mid },
+  { t: M.doc_click - 0.5, s: 1.0, c: mid },
+  { t: M.doc_click + 1.0, s: 1.45, c: TEXT },
+  { t: M.cb_click - 1.4, s: 1.5, c: TEXT },
+  { t: M.cb_click - 0.4, s: 2.0, c: BOX },
+  { t: M.cb_click + 0.9, s: 2.0, c: BOX },
+  { t: M.callout_start - 0.1, s: 1.5, c: CALL },
+  { t: M.callout_end + 0.5, s: 1.5, c: CALL },
+  { t: M.themes_start + 0.8, s: 1.0, c: mid },
+  { t: M.themes_end, s: 1.05, c: mid },
+  { t: M.themes_end + 1.0, s: 1.0, c: mid },
+  { t: 1e9, s: 1.0, c: mid },
 ];
 const ease = Easing.inOut(Easing.cubic);
 const camera = (t: number) => {
@@ -47,7 +57,7 @@ const camera = (t: number) => {
 
 // ---------- cursor path from the logged real pointer ----------
 type Ev = { t: number; x?: number; y?: number; click?: boolean; theme?: boolean };
-const events = data.events as Ev[];
+const events = (data.events as Ev[]).map((e) => ({ ...e, t: e.t + SHIFT }));
 const moves = events.filter((e) => e.x !== undefined && e.y !== undefined && !e.click) as Required<Pick<Ev, 't' | 'x' | 'y'>>[];
 const clicks = events.filter((e) => e.click) as Required<Pick<Ev, 't' | 'x' | 'y'>>[];
 const themeTimes = events.filter((e) => e.theme).map((e) => e.t);
@@ -113,10 +123,11 @@ const Background: React.FC<{ t: number }> = ({ t }) => {
 
 // ---------- captions ----------
 const CAPTIONS: [number, number, string][] = [
-  [0.9, 3.1, 'A fast, simple markdown editor'],
-  [3.3, 17.0, 'Type markdown and see it come alive'],
-  [17.4, 20.2, 'Tick a checkbox with a click'],
-  [20.6, 30.4, 'Change the whole look with one shortcut'],
+  [0.7, M.doc_click, 'A fast, simple markdown editor'],
+  [M.type_start, M.type1_end, 'Type markdown and see it come alive'],
+  [M.cb_click - 0.7, M.cb_click + 1.7, 'Tick a checkbox with a click'],
+  [M.callout_start, M.callout_end + 0.7, 'Callouts, lists and more'],
+  [M.themes_start, M.themes_end, 'Change the whole look with one shortcut'],
 ];
 const Caption: React.FC<{ t: number }> = ({ t }) => {
   const cur = CAPTIONS.find(([a, b]) => t >= a && t < b);
@@ -151,12 +162,12 @@ const Stage: React.FC<{ frame: number }> = ({ frame }) => {
   return (
     <AbsoluteFill>
       <AbsoluteFill style={{ transform: `translate(${tx}px, ${ty}px) scale(${cam.s})`, transformOrigin: '0 0' }}>
-        <div style={{ position: 'absolute', left: WIN.x, top: WIN.y, width: AW, height: AH, borderRadius: 13, overflow: 'hidden', opacity: winOpacity, transform: `scale(${winScale})`, transformOrigin: '50% 50%', boxShadow: '0 50px 110px rgba(8,6,30,0.55), 0 12px 30px rgba(8,6,30,0.35), 0 0 0 1px rgba(255,255,255,0.12)' }}>
+        <div style={{ position: 'absolute', left: WIN.x, top: WIN.y, width: AW * K, height: AH * K, borderRadius: 13, overflow: 'hidden', opacity: winOpacity, transform: `scale(${winScale})`, transformOrigin: '50% 50%', boxShadow: '0 50px 110px rgba(8,6,30,0.55), 0 12px 30px rgba(8,6,30,0.35), 0 0 0 1px rgba(255,255,255,0.12)' }}>
           {frame < VIDEO_FRAMES ? (
-            <OffthreadVideo src={staticFile('raw.mp4')} muted style={{ width: AW, height: AH }} />
+            <OffthreadVideo src={staticFile('raw.mp4')} trimBefore={Math.round(TRIM * FPS)} muted style={{ width: AW * K, height: AH * K }} />
           ) : (
             <Freeze frame={VIDEO_FRAMES - 1}>
-              <OffthreadVideo src={staticFile('raw.mp4')} muted style={{ width: AW, height: AH }} />
+              <OffthreadVideo src={staticFile('raw.mp4')} trimBefore={Math.round(TRIM * FPS)} muted style={{ width: AW * K, height: AH * K }} />
             </Freeze>
           )}
         </div>

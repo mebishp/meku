@@ -28,7 +28,7 @@
 <p align="center">
   <img src="docs/images/meku-demo.gif" alt="A short demo: typing markdown in Meku and watching it format live, ticking a checkbox, then switching between themes" width="100%">
   <br>
-  <sub>Typing markdown, live formatting, and switching themes. A real recording of Meku.</sub>
+  <sub>Typing markdown, live formatting, and switching themes. A real recording of Meku. <a href="docs/images/meku-demo.mp4">Watch it in full quality (MP4)</a>.</sub>
 </p>
 
 <p align="center">
