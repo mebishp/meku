@@ -121,7 +121,7 @@ Meku is a native app, not a web page in a box, and it draws the screen on your g
   <tr>
     <td width="33%" valign="top">
       <h4>✍️ Writing</h4>
-      Live preview, Edit and Read views · headings, bold, italic, strikethrough, highlights and inline code · bullet, numbered and task lists · tables · callouts · code blocks with colours · images (paste or drop them in) · a <code>/</code> menu for quick inserts · find and replace · go to line · autosave
+      Live preview, Edit and Read views · headings, bold, italic, strikethrough, highlights and inline code · bullet, numbered and task lists · tables · callouts · code blocks with colours · images (paste a screenshot, paste picture files from your file manager, or drop them in; copy a picture out with `Ctrl+C` on its line) · a <code>/</code> menu for quick inserts · find and replace · go to line · autosave
     </td>
     <td width="33%" valign="top">
       <h4>🗂️ Organising</h4>
@@ -134,7 +134,7 @@ Meku is a native app, not a web page in a box, and it draws the screen on your g
   </tr>
 </table>
 
-**Good to know:** Meku notices when a note is changed by another program while it is open, and it never renames or rewrites your files behind your back.
+**Good to know:** on Linux with Wayland (GNOME, for example), copying a picture out of Meku needs `xclip` or `wl-clipboard` installed. Pasting works everywhere.  Meku notices when a note is changed by another program while it is open, and it never renames or rewrites your files behind your back.
 
 **Not in this first version:** links between notes, plugins and sync.
 

@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod chrome;
+mod clipboard;
 mod config;
 mod document;
 mod explorer;
@@ -1410,6 +1411,10 @@ impl MekuShell {
         self.doc_key(document::DocKey::Redo, false, window, cx);
     }
     fn on_doc_copy(&mut self, _: &DocCopy, window: &mut Window, cx: &mut Context<Self>) {
+        if self.lightbox.is_some() {
+            self.copy_lightbox_image(cx);
+            return;
+        }
         self.doc_key(document::DocKey::Copy, false, window, cx);
     }
     fn on_doc_cut(&mut self, _: &DocCut, window: &mut Window, cx: &mut Context<Self>) {
@@ -5546,7 +5551,12 @@ mod ui_tests {
         );
         std::fs::write(dir.path().join("pic one.png"), PNG_1X1).unwrap();
         // Rebuild the model so the file's size is probed.
-        cx.update(|cx| view.update(cx, |s, _| s.doc_models.clear()));
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
         let state = |cx: &mut TestAppContext| {
             view.read_with(&*cx, |s, _| (s.lightbox.is_some(), s.lightbox_zoom))
         };
@@ -5854,7 +5864,12 @@ mod ui_tests {
         std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
         std::fs::write(dir.path().join("attachments/Pasted image 1.png"), PNG_1X1).unwrap();
         std::fs::write(dir.path().join("Pasted image 2.png"), PNG_1X1).unwrap();
-        cx.update(|cx| view.update(cx, |s, _| s.doc_models.clear()));
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
         let rel = PathBuf::from("doc.md");
         let imgs = cx
             .update(|cx| {
@@ -5901,7 +5916,12 @@ mod ui_tests {
         let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "a\n![[p.png]] ![[q.png]]\nb\n");
         std::fs::write(dir.path().join("p.png"), PNG_1X1).unwrap();
         std::fs::write(dir.path().join("q.png"), PNG_1X1).unwrap();
-        cx.update(|cx| view.update(cx, |s, _| s.doc_models.clear()));
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
         focus_doc_for(cx, &view, window);
         let rel = PathBuf::from("doc.md");
         // Down from the first line lands after the images, not inside the token.
@@ -6765,5 +6785,84 @@ mod ui_tests {
             (start..=start + "last words here!".len()).contains(&c),
             "the margin press lands on the row: {c}"
         );
+    }
+
+    #[test]
+    fn pasting_picture_files_copies_them_in_and_links_them() {
+        run_ui_test("paste_files", paste_files_body);
+    }
+
+    fn paste_files_body(cx: &mut TestAppContext) {
+        use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths};
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "intro\n");
+        focus_doc_for(cx, &view, window);
+        let outside = tempfile::tempdir().unwrap();
+        let a = outside.path().join("my shot.png");
+        let b = outside.path().join("other.png");
+        std::fs::write(&a, PNG_1X1).unwrap();
+        std::fs::write(&b, PNG_1X1).unwrap();
+        let rel = PathBuf::from("doc.md");
+
+        // A file manager that puts `file://` links on the clipboard as text.
+        let link = format!("file://{}", a.to_string_lossy().replace(' ', "%20"));
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(link)));
+        step(cx, window, |w, cx| w.press("ctrl-v", cx));
+        assert!(dir.path().join("attachments/my shot.png").exists());
+        let text = buffer_text(cx, &view, &rel).0;
+        assert!(text.contains("![[my shot.png]]"), "{text:?}");
+
+        // A file manager that hands over real paths (macOS, Windows).
+        cx.update(|cx| {
+            cx.write_to_clipboard(ClipboardItem {
+                entries: vec![ClipboardEntry::ExternalPaths(ExternalPaths(
+                    vec![b.clone()].into(),
+                ))],
+            })
+        });
+        step(cx, window, |w, cx| w.press("ctrl-v", cx));
+        assert!(dir.path().join("attachments/other.png").exists());
+        assert!(buffer_text(cx, &view, &rel).0.contains("![[other.png]]"));
+
+        // Plain text that is not a file list still pastes as text.
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("just words".into())));
+        step(cx, window, |w, cx| w.press("ctrl-v", cx));
+        assert!(buffer_text(cx, &view, &rel).0.contains("just words"));
+    }
+
+    #[test]
+    fn copying_on_an_image_line_puts_the_picture_on_the_clipboard() {
+        run_ui_test("copy_image", copy_image_body);
+    }
+
+    fn copy_image_body(cx: &mut TestAppContext) {
+        use gpui_kit::{ClipboardEntry, ImageFormat};
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "![[pic.png]]\n\ntext\n");
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::fs::write(dir.path().join("attachments/pic.png"), PNG_1X1).unwrap();
+        // Rebuild the rows so the embed resolves to the file just written.
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        move_doc_caret(cx, &view, 3);
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.press("ctrl-c", cx));
+        let clip = cx.update(|cx| cx.read_from_clipboard());
+        let image = clip
+            .as_ref()
+            .and_then(|c| {
+                c.entries().iter().find_map(|e| match e {
+                    ClipboardEntry::Image(i) => Some(i.clone()),
+                    _ => None,
+                })
+            })
+            .expect("the picture is on the clipboard");
+        assert_eq!(image.format, ImageFormat::Png);
+        assert_eq!(image.bytes, PNG_1X1);
+        let notice = view.read_with(&*cx, |s, _| s.notice.clone());
+        assert_eq!(notice.as_deref(), Some("Image copied"));
     }
 }
