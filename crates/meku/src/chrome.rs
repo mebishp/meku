@@ -74,6 +74,19 @@ impl Mode {
     }
 }
 
+/// Wrap a title-bar control so it is not part of the draggable bar: presses on
+/// it never start a window move or count toward the bar's double click
+/// (maximize), and on Windows its area is not the caption, so the first click
+/// reaches the control instead of the system's title-bar handling.
+fn no_drag(el: impl IntoElement) -> Div {
+    div()
+        .occlude()
+        .min_w_0()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(el)
+}
+
 impl MekuShell {
     // -- title bar ----------------------------------------------------------
 
@@ -132,6 +145,7 @@ impl MekuShell {
                 .text_color(if current { fg } else { muted })
                 .when_weight(current)
                 .child(name);
+            let clickable = folder.is_some();
             if let Some(folder) = folder {
                 let crumb_shell = shell.clone();
                 crumb = crumb
@@ -146,15 +160,19 @@ impl MekuShell {
                         });
                     });
             }
-            breadcrumb = breadcrumb.child(crumb);
+            breadcrumb = breadcrumb.child(if clickable {
+                no_drag(crumb).into_any_element()
+            } else {
+                crumb.into_any_element()
+            });
         }
 
         let mut right = h_flex().gap_1().items_center().flex_none();
         if self.doc_rel().is_some() {
-            right = right.child(self.render_doc_menu(cx));
+            right = right.child(no_drag(self.render_doc_menu(cx)));
         }
         if !self.show_sidebar {
-            right = right.child(icon_button(
+            right = right.child(no_drag(icon_button(
                 "title-search",
                 Ico::Search,
                 false,
@@ -165,9 +183,9 @@ impl MekuShell {
                         v.open_palette(crate::palette::PaletteKind::Files, cx)
                     });
                 },
-            ));
+            )));
         }
-        right = right.child(icon_button(
+        right = right.child(no_drag(icon_button(
             "title-commands",
             Ico::Terminal,
             false,
@@ -178,7 +196,7 @@ impl MekuShell {
                     v.open_palette(crate::palette::PaletteKind::Commands, cx)
                 });
             },
-        ));
+        )));
 
         h_flex()
             .size_full()
@@ -192,7 +210,7 @@ impl MekuShell {
                     .gap_2()
                     .items_center()
                     .min_w_0()
-                    .child(icon_button(
+                    .child(no_drag(icon_button(
                         "sidebar-toggle",
                         if self.show_sidebar {
                             Ico::SidebarCollapse
@@ -209,7 +227,7 @@ impl MekuShell {
                                 cx.notify();
                             });
                         },
-                    ))
+                    )))
                     .child(breadcrumb),
             )
             .child(right)

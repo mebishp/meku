@@ -6907,4 +6907,26 @@ mod ui_tests {
         }
         assert!(caret_drawn(cx), "the body caret appears after Enter");
     }
+
+    #[test]
+    fn double_clicking_title_bar_buttons_does_not_maximize_the_window() {
+        run_ui_test("titlebar_buttons", titlebar_buttons_body);
+    }
+
+    fn titlebar_buttons_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (_view, window) = boot(cx);
+        step(cx, window, |_, _| {});
+        // The test window cannot zoom (`zoom_window` panics there), so any
+        // double click that reaches the title bar's own handler fails this.
+        for id in ["sidebar-toggle", "title-commands"] {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                if w.try_find(id).is_some() {
+                    w.double_click(id, cx);
+                }
+            })
+            .unwrap();
+        }
+    }
 }
