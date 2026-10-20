@@ -144,12 +144,20 @@ Download the file for your system from the [latest release](https://github.com/m
 
 | System | File | How |
 |---|---|---|
-| Ubuntu, Debian | `.deb` | `sudo apt install ./meku_0.1.0_amd64.deb` |
-| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-0.1.0-1-x86_64.pkg.tar.zst` |
+| macOS (Apple silicon) | `.dmg` | Open it and drag Meku to Applications |
+| Windows (64-bit) | `.zip` | Unzip it and run `Meku.exe` |
+| Ubuntu, Debian | `.deb` | `sudo apt install ./meku_1.0.1_amd64.deb` |
+| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.1-1-x86_64.pkg.tar.zst` |
 | Any Linux | `.AppImage` | Make it executable, then run it |
 | Any Linux | `.tar.gz` | Unpack it and run `meku` |
 
-Meku needs a graphics driver with Vulkan support, which most computers already have. It runs on Linux today; macOS and Windows may come later. Every file has a checksum in `SHA256SUMS`.
+Meku needs a graphics card driver with modern graphics support (Vulkan on Linux,
+Metal on macOS, DirectX on Windows), which most computers already have. Intel Macs
+are not supported yet. Every file has a checksum in `SHA256SUMS`.
+
+The macOS and Windows builds are not signed yet. macOS may say the app is from an
+unidentified developer: right-click Meku, choose **Open**, then confirm. Windows may
+show a SmartScreen warning: choose **More info**, then **Run anyway**.
 
 Start it from your app menu, or give it a folder:
 
@@ -170,7 +178,7 @@ meku ~/Notes
 | `Ctrl+Shift+F` | Search every note |
 | `Ctrl+,` | Settings |
 
-The full list is in the `⋯` menu at the top of the editor.
+On a Mac, use `Cmd` where this says `Ctrl`. The full list is in the `⋯` menu at the top of the editor.
 
 ## Build from source
 
