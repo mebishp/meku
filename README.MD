@@ -26,6 +26,12 @@
 <br>
 
 <p align="center">
+  <img src="docs/images/meku-demo.gif" alt="A short demo: typing markdown in Meku and watching it format live, ticking a checkbox, then switching between themes" width="100%">
+  <br>
+  <sub>Typing markdown, live formatting, and switching themes. A real recording of Meku.</sub>
+</p>
+
+<p align="center">
   <img src="docs/images/meku-hero.png" alt="Meku showing a note in live preview, with the folder on the left, tabs along the top and the headings of the note below the folder" width="100%">
   <br>
   <sub>Live preview, tabs, a folder sidebar and a note outline.</sub>
