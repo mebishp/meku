@@ -146,10 +146,10 @@ Download the file for your system from the [latest release](https://github.com/m
 |---|---|---|
 | macOS (Apple silicon) | `.dmg` | Open it and drag Meku to Applications |
 | Windows (64-bit) | `.zip` | Unzip it and run `Meku.exe` |
-| Ubuntu, Debian | `.deb` | `sudo apt install ./meku_1.0.1_amd64.deb` |
-| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.1-1-x86_64.pkg.tar.zst` |
-| Any Linux | `.AppImage` | Make it executable, then run it |
-| Any Linux | `.tar.gz` | Unpack it and run `meku` |
+| Ubuntu 22.04+, Debian 12+ | `.deb` | `sudo apt install ./meku_1.0.2_amd64.deb` |
+| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.2-1-x86_64.pkg.tar.zst` |
+| Any Linux (glibc 2.35+) | `.AppImage` | Make it executable, then run it |
+| Any Linux (glibc 2.35+) | `.tar.gz` | Unpack it and run `meku` (`INSTALL.txt` lists what to install) |
 
 Meku needs a graphics card driver with modern graphics support (Vulkan on Linux,
 Metal on macOS, DirectX on Windows), which most computers already have. Intel Macs

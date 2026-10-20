@@ -1,6 +1,7 @@
 name: Release
 
-# Builds the macOS (Apple silicon) and Windows (x64) packages.
+# Builds the Linux (deb, AppImage, Arch, tar.gz), macOS (Apple silicon) and Windows (x64) packages.
+# Linux is built on ubuntu-22.04 on purpose: a binary runs on any system with the same or a newer glibc.
 #  - Push a tag like v1.0.1: builds both and attaches them to that tag's GitHub release.
 #  - Run it by hand (Actions > Release > Run workflow): builds both and keeps the files
 #    as workflow artifacts, without publishing anything.
@@ -16,6 +17,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  linux:
+    name: Linux (deb, AppImage, Arch, tar.gz)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang pkg-config librsvg2-bin zstd binutils curl \
+            libfontconfig-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libssl-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and package
+        run: tools/package.sh
+
+      - name: Smoke test the packages
+        run: |
+          ls -la dist
+          # The .deb installs, pulling in its dependencies, and nothing is left unresolved.
+          sudo apt-get install -y ./dist/meku_*_amd64.deb
+          if ldd /usr/bin/meku | grep "not found"; then echo "unresolved libraries in the .deb"; exit 1; fi
+          dpkg -s meku | grep -E '^(Package|Version|Depends)'
+          # The AppImage carries its libraries and they resolve.
+          chmod +x dist/Meku-*.AppImage
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/dist/Meku-*.AppImage --appimage-extract >/dev/null)
+          LD_LIBRARY_PATH="$RUNNER_TEMP/squashfs-root/usr/lib" ldd "$RUNNER_TEMP/squashfs-root/usr/bin/meku" | tee /dev/stderr | { ! grep "not found"; }
+          # The Arch package and tarball hold what they should.
+          tar -I zstd -tf dist/meku-*-x86_64.pkg.tar.zst | grep -x '.PKGINFO'
+          tar -tzf dist/meku-*-x86_64-linux.tar.gz | grep INSTALL.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            dist/meku_*_amd64.deb
+            dist/Meku-*-x86_64.AppImage
+            dist/meku-*-x86_64.pkg.tar.zst
+            dist/meku-*-x86_64-linux.tar.gz
+          if-no-files-found: error
+
   macos:
     name: macOS (Apple silicon)
     runs-on: macos-14
@@ -76,7 +126,7 @@ jobs:
 
   publish:
     name: Attach to the release
-    needs: [macos, windows]
+    needs: [linux, macos, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -91,6 +141,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          ls -la packages
+          (cd packages && sha256sum * > SHA256SUMS)
+          cat packages/SHA256SUMS
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Meku ${TAG#v}" --generate-notes
           gh release upload "$TAG" packages/* --clobber
