@@ -1,0 +1,3 @@
+- The Pragmatic Programmer
+- A Philosophy of Software Design
+- Designing Data-Intensive Applications

@@ -21,6 +21,7 @@ ROOT = os.environ.get("CLIPS_DIR", "/tmp/claude-1000/clips")
 VAULT = os.environ.get("CLIPS_VAULT", "/tmp/claude-1000/clips-vault")
 BIN = os.environ.get("MEKU_BIN", os.path.abspath("target/release/meku"))
 CFG = os.path.join(ROOT, "cfg")
+SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vault")
 FPS = int(os.environ.get("CLIPS_FPS", "50"))
 SCREEN = (1280, 840)
 os.makedirs(ROOT, exist_ok=True)
@@ -37,13 +38,27 @@ def start_display():
     return proc
 
 
+def long_note(path):
+    """The 10,000-line note for the speed clip (not kept in the repository)."""
+    import random
+    rnd = random.Random(1)
+    words = "the quick note about plans and ideas for a long project that keeps growing every single week".split()
+    out = []
+    for i in range(1, 10001):
+        if i % 60 == 0:
+            out.append("\n## Section %d\n" % (i // 60))
+        out.append(" ".join(rnd.choice(words) for _ in range(rnd.randint(8, 16))).capitalize() + ".\n")
+    open(path, "w").write("\n".join(out))
+
+
 def settings(theme, extra=None):
     d = os.path.join(CFG, "meku")
     shutil.rmtree(CFG, ignore_errors=True)
     os.makedirs(d)
     # every clip starts from the same pristine notes
     shutil.rmtree(VAULT, ignore_errors=True)
-    shutil.copytree(VAULT + ".orig", VAULT)
+    shutil.copytree(SRC, VAULT)
+    long_note(os.path.join(VAULT, "Long note.md"))
     cfg = {"theme": theme, "follow_system": False, "check_updates": False,
            "reopen_last_mekuto": False}
     cfg.update(extra or {})

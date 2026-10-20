@@ -10,8 +10,9 @@ and the clips do not depend on your desktop, window manager or theme.
 Needs `Xwayland`, `python-xlib`, `ffmpeg`, [gifski](https://gif.ski) and a release
 build of Meku (`cargo build --release`). Run from the repository root.
 
-1. Put the demo notes in `/tmp/claude-1000/clips-vault.orig` (set `CLIPS_VAULT`
-   and `CLIPS_DIR` to use other places). Every clip starts from a fresh copy.
+1. The demo notes are in `tools/demo/vault`. Every clip starts from a fresh copy in
+   `$CLIPS_VAULT` (the 10,000-line note is generated). `CLIPS_DIR` is where the
+   recordings go.
 2. `python3 tools/demo/clips.py live menu themes navigate speed` records
    `$CLIPS_DIR/<name>.mp4`. `python3 tools/demo/clips.py still menu` saves a frame
    at each step instead, which is how click positions are found.
