@@ -18,7 +18,7 @@ mod theme;
 mod update;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -220,6 +220,11 @@ pub struct MekuShell {
     update_checking: bool,
     /// The right-click menu of the document, while open.
     doc_menu: Option<context_menu::DocMenu>,
+    /// Decoded pictures of the open notes. GPUI keeps every picture it has
+    /// ever drawn unless told otherwise, so closed notes' pictures are evicted
+    /// from here (see `prune_closed`).
+    images: Entity<RetainAllImageCache>,
+    evict_images: Vec<document::ImageSrc>,
     doc_menu_serial: usize,
     notice: Option<String>,
     /// Caret blink phase and the last keystroke/click (blink holds solid
@@ -315,6 +320,8 @@ impl MekuShell {
             update_open: false,
             update_checking: false,
             doc_menu: None,
+            images: RetainAllImageCache::new(cx),
+            evict_images: Vec::new(),
             doc_menu_serial: 0,
             notice: None,
             caret_on: true,
@@ -731,6 +738,7 @@ impl MekuShell {
             self.title_inputs.remove(&rel);
             self.title_subs.remove(&rel);
         }
+        self.prune_closed(cx);
         if self.tabs.is_empty() {
             self.tabs.push(EditorTab {
                 rel: None,
@@ -747,6 +755,56 @@ impl MekuShell {
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         self.close_tab(self.active_tab, cx);
+    }
+
+    /// Let go of notes no tab shows any more: their text, undo history and
+    /// parsed rows. A note with unsaved changes is kept until it is saved, so
+    /// closing a tab never loses an edit; reopening one reads it from disk.
+    fn prune_closed(&mut self, cx: &App) {
+        let shown: HashSet<&PathBuf> = self.tabs.iter().filter_map(|t| t.rel.as_ref()).collect();
+        let gone: Vec<PathBuf> = self
+            .buffers
+            .iter()
+            .filter(|(rel, b)| !shown.contains(rel) && !b.read(cx).dirty)
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        for rel in gone {
+            self.buffers.remove(&rel);
+            if let Some(model) = self.doc_models.remove(&rel) {
+                self.evict_images.extend(
+                    model
+                        .images
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .map(|info| info.src.clone()),
+                );
+            }
+            self.last_edit.remove(&rel);
+        }
+        // A picture another loaded note still shows stays cached.
+        if !self.evict_images.is_empty() {
+            let kept: HashSet<document::ImageSrc> = self
+                .doc_models
+                .values()
+                .flat_map(|m| m.images.iter().flatten().flatten())
+                .map(|info| info.src.clone())
+                .collect();
+            self.evict_images.retain(|src| !kept.contains(src));
+        }
+    }
+
+    /// Drop the decoded pictures queued by `prune_closed` (needs the window,
+    /// so it runs while rendering).
+    fn evict_pictures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for src in std::mem::take(&mut self.evict_images) {
+            let resource: Resource = match src {
+                document::ImageSrc::Path(path) => path.into(),
+                document::ImageSrc::Url(url) => SharedUri::from(url).into(),
+            };
+            self.images
+                .update(cx, |cache, cx| cache.remove(&resource, window, cx));
+        }
     }
 
     /// Remember the visible note for back/forward.
@@ -1501,6 +1559,7 @@ impl MekuShell {
         for rel in due {
             self.save_buffer(&rel, cx);
         }
+        self.prune_closed(cx);
         let idle_title = self
             .title_pending
             .as_ref()
@@ -2350,6 +2409,7 @@ impl MekuShell {
 impl Render for MekuShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_active_loaded(cx);
+        self.evict_pictures(window, cx);
         self.ensure_naming_input(window, cx);
         self.ensure_title_input(window, cx);
         self.ensure_palette(window, cx);
@@ -7205,6 +7265,94 @@ mod ui_tests {
         cx.update(|cx| view.update(cx, |s, cx| s.insert_block("Divider", cx)));
         let text = buffer_text(cx, &view, &rel).0;
         assert!(text.starts_with("int\n---\nro"), "{text:?}");
+    }
+
+    #[test]
+    fn closing_a_tab_releases_the_note_unless_it_has_unsaved_changes() {
+        run_ui_test("prune_closed", prune_closed_body);
+    }
+
+    fn prune_closed_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "first\n");
+        std::fs::write(dir.path().join("b.md"), "second\n").unwrap();
+        cx.update(|cx| view.update(cx, |s, _| s.explorer.refresh()));
+        focus_doc_for(cx, &view, window);
+        let a = PathBuf::from("doc.md");
+        let b = PathBuf::from("b.md");
+        let loaded = |cx: &mut TestAppContext, rel: &PathBuf| {
+            view.read_with(&*cx, |s, _| s.buffers.contains_key(rel))
+        };
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&b, cx)));
+        step(cx, window, |_, _| {});
+        assert!(loaded(cx, &a) && loaded(cx, &b));
+
+        // A clean note is let go as soon as its tab closes ...
+        cx.update(|cx| view.update(cx, |s, cx| s.close_tab(0, cx)));
+        assert!(!loaded(cx, &a), "closed clean note is released");
+        assert!(loaded(cx, &b), "the shown note stays");
+
+        // ... a dirty one stays until it is saved, so no edit can be lost.
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&a, cx)));
+        step(cx, window, |w, cx| w.input("edited ", cx));
+        assert!(buffer_text(cx, &view, &a).1, "dirty after typing");
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                let ix = s
+                    .tabs
+                    .iter()
+                    .position(|t| t.rel.as_deref() == Some(a.as_path()))
+                    .unwrap();
+                s.close_tab(ix, cx)
+            })
+        });
+        assert!(loaded(cx, &a), "unsaved note is kept");
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.save_buffer(&a, cx);
+                s.prune_closed(cx);
+            })
+        });
+        assert!(!loaded(cx, &a), "saved note is released");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("doc.md")).unwrap(),
+            "edited first\n"
+        );
+
+        // Reopening reads it back from disk.
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&a, cx)));
+        assert!(buffer_text(cx, &view, &a).0.starts_with("edited first"));
+    }
+
+    #[test]
+    fn closing_a_note_drops_its_decoded_pictures() {
+        run_ui_test("evict_pictures", evict_pictures_body);
+    }
+
+    fn evict_pictures_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "![[pic.png]]\n\ntext\n");
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::fs::write(dir.path().join("attachments/pic.png"), PNG_1X1).unwrap();
+        std::fs::write(dir.path().join("b.md"), "other\n").unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |_, _| {});
+        let cached = |cx: &mut TestAppContext| {
+            cx.update(|cx| view.read_with(cx, |s, cx| s.images.read(cx).len()))
+        };
+        let shown = cached(cx);
+        assert!(shown >= 1, "the shown picture is cached");
+
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&PathBuf::from("b.md"), cx)));
+        step(cx, window, |_, _| {});
+        assert_eq!(cached(cx), shown, "still cached while its note is open");
+        cx.update(|cx| view.update(cx, |s, cx| s.close_tab(0, cx)));
+        step(cx, window, |_, _| {});
+        assert!(cached(cx) < shown, "closing the note frees its picture");
     }
 
     #[test]

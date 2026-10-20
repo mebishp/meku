@@ -51,14 +51,15 @@ def long_note(path):
     open(path, "w").write("\n".join(out))
 
 
-def settings(theme, extra=None):
+def settings(theme, extra=None, keep_vault=False):
     d = os.path.join(CFG, "meku")
     shutil.rmtree(CFG, ignore_errors=True)
     os.makedirs(d)
     # every clip starts from the same pristine notes
-    shutil.rmtree(VAULT, ignore_errors=True)
-    shutil.copytree(SRC, VAULT)
-    long_note(os.path.join(VAULT, "Long note.md"))
+    if not keep_vault:
+        shutil.rmtree(VAULT, ignore_errors=True)
+        shutil.copytree(SRC, VAULT)
+        long_note(os.path.join(VAULT, "Long note.md"))
     cfg = {"theme": theme, "follow_system": False, "check_updates": False,
            "reopen_last_mekuto": False}
     cfg.update(extra or {})
@@ -77,8 +78,8 @@ def window_box(xd):
 
 
 class Session:
-    def __init__(self, note, theme="Meku Dark", extra=None):
-        settings(theme, extra)
+    def __init__(self, note, theme="Meku Dark", extra=None, keep_vault=False):
+        settings(theme, extra, keep_vault)
         env = dict(os.environ, XDG_CONFIG_HOME=CFG)
         self.proc = subprocess.Popen([BIN, VAULT, note], env=env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

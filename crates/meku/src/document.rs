@@ -398,6 +398,7 @@ impl MekuShell {
         // While the title field has focus the typing goes there, so the body
         // must not draw a caret of its own on the first line.
         let title_has_focus = self.title_focused(window, cx);
+        let picture_cache = self.images.clone();
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
             let is_caret_row = mode != Mode::Read && ix == active && !title_has_focus;
@@ -433,6 +434,7 @@ impl MekuShell {
                     None
                 },
                 &shell,
+                &picture_cache,
                 &views,
                 window,
                 cx,
@@ -1648,7 +1650,7 @@ fn heading_scale(kind: RowKind) -> f32 {
 }
 
 /// Where an `![alt](target)` row's pixels come from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ImageSrc {
     Url(String),
     Path(PathBuf),
@@ -2445,6 +2447,7 @@ fn row_element(
     caret_on: bool,
     slash: Option<&crate::slash::SlashView>,
     shell: &Entity<MekuShell>,
+    pictures: &Entity<RetainAllImageCache>,
     views: &RowViews,
     window: &mut Window,
     cx: &mut App,
@@ -2516,6 +2519,7 @@ fn row_element(
                 caret.is_some(),
                 avail,
                 shell,
+                pictures,
                 cx,
             ))
             .into_any_element();
@@ -2869,7 +2873,18 @@ pub(crate) fn image_frame_size(info: &ImageInfo, avail: Pixels, max_h: f32) -> (
 
 /// The image picture itself, `Contain`-fit into whatever box it is given,
 /// with loading / unavailable states. Shared by the row and the lightbox.
-pub(crate) fn picture(src: &ImageSrc, cx: &App) -> AnyElement {
+fn with_cache(img: Img, cache: Option<&Entity<RetainAllImageCache>>) -> Img {
+    match cache {
+        Some(cache) => img.image_cache(cache),
+        None => img,
+    }
+}
+
+pub(crate) fn picture(
+    src: &ImageSrc,
+    pictures: Option<&Entity<RetainAllImageCache>>,
+    cx: &App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let note = move |text: &'static str| {
         move || {
@@ -2885,12 +2900,12 @@ pub(crate) fn picture(src: &ImageSrc, cx: &App) -> AnyElement {
         }
     };
     match src {
-        ImageSrc::Path(path) => img(path.clone())
+        ImageSrc::Path(path) => with_cache(img(path.clone()), pictures)
             .size_full()
             .object_fit(ObjectFit::Contain)
             .with_fallback(note("Image unavailable"))
             .into_any_element(),
-        ImageSrc::Url(url) => img(url.clone())
+        ImageSrc::Url(url) => with_cache(img(url.clone()), pictures)
             .size_full()
             .object_fit(ObjectFit::Contain)
             .with_loading(note("Loading…"))
@@ -2908,6 +2923,7 @@ fn image_row_element(
     focused: bool,
     avail: Pixels,
     shell: &Entity<MekuShell>,
+    pictures: &Entity<RetainAllImageCache>,
     cx: &App,
 ) -> AnyElement {
     let theme_colors = cx.theme();
@@ -2963,7 +2979,7 @@ fn image_row_element(
                     view.open_lightbox(open, cx);
                 });
             })
-            .child(picture(&info.src, cx));
+            .child(picture(&info.src, Some(pictures), cx));
         let mut column = v_flex().gap_1().child(frame);
         if !info.caption.is_empty() {
             column = column.child(

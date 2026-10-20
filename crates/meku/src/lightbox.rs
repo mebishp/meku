@@ -83,6 +83,7 @@ impl MekuShell {
     ) -> Option<AnyElement> {
         let info = self.lightbox.clone()?;
         let shell = cx.entity();
+        let pictures = self.images.clone();
         let fit = self.lightbox_fit(window);
         let zoom = self.lightbox_zoom;
         let shown_scale = zoom.or(fit);
@@ -243,7 +244,7 @@ impl MekuShell {
                                 cx.stop_propagation();
                                 toggle_shell.update(cx, |v, cx| v.lightbox_toggle(window, cx));
                             })
-                            .child(picture(&info.src, cx)),
+                            .child(picture(&info.src, Some(&pictures), cx)),
                     ),
             );
         let root = div()
