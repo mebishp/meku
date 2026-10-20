@@ -1,163 +1,133 @@
-<p align="center">
-  <img alt="Meku" src="docs/images/meku-icon.svg" width="96">
-</p>
+<div align="center">
 
-<h1 align="center">Meku</h1>
+<img src="docs/images/meku-icon.svg" alt="" width="72">
 
-<p align="center">
-  <b>A fast, simple markdown editor for your notes.</b><br>
-  Open a folder of plain <code>.md</code> files and write in a clean live preview.<br>
-  A native app, with no browser inside. Free, offline, and yours.
-</p>
+# Meku
 
-<p align="center">
-  <img alt="Made with Rust" src="https://img.shields.io/badge/made%20with-Rust-b7410e?style=flat-square&logo=rust">
-  <img alt="Linux" src="https://img.shields.io/badge/Linux-native-2f7bf5?style=flat-square&logo=linux&logoColor=white">
-  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-3a3a3a?style=flat-square">
-  <img alt="Version 0.1" src="https://img.shields.io/badge/version-0.1-d69e2e?style=flat-square">
-</p>
+**A native markdown editor for folders of notes.**<br>
+Live preview, tabs, an outline and themes. Written in Rust and drawn on the GPU.
 
-<p align="center">
-  <a href="https://github.com/mebishp/meku/releases/latest"><b>Download Meku</b></a> ·
-  <a href="#install">Install</a> ·
-  <a href="#features">Features</a>
-</p>
+[![Release](https://img.shields.io/github/v/release/mebishp/meku?style=flat&color=2f7bf5&label=release)](https://github.com/mebishp/meku/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/mebishp/meku/ci.yml?style=flat&label=CI)](https://github.com/mebishp/meku/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-555?style=flat)](LICENSE)
+![Platforms](https://img.shields.io/badge/Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-555?style=flat)
+
+[Download](https://github.com/mebishp/meku/releases/latest) &nbsp;·&nbsp; [Features](#features) &nbsp;·&nbsp; [Install](#install) &nbsp;·&nbsp; [Build](#build-from-source)
 
 <br>
 
-<p align="center">
-  <img src="docs/images/meku-demo.gif" alt="A short demo: typing markdown in Meku and watching it format live, ticking a checkbox, then switching between themes" width="100%">
-  <br>
-  <sub>Typing markdown, live formatting, and switching themes. </sub>
-</p>
+<img src="docs/images/meku-live.gif" alt="Typing markdown in Meku: a heading, bold and italic text, a task list with a ticked box and a callout all format as they are typed" width="100%">
 
-<p align="center">
-  <img src="docs/images/meku-hero.png" alt="Meku showing a note in live preview, with the folder on the left, tabs along the top and the headings of the note below the folder" width="100%">
-  <br>
-  <sub>Live preview, tabs, a folder sidebar and a note outline.</sub>
-</p>
-
-<p align="center">
-  <a href="#features">Features</a> ·
-  <a href="#fast">Fast</a> ·
-  <a href="#whats-in-version-01">What's in 0.1</a> ·
-  <a href="#install">Install</a> ·
-  <a href="#build-from-source">Build</a> ·
-  <a href="#license">License</a>
-</p>
+</div>
 
 <br>
 
-<table>
-  <tr>
-    <td width="25%" valign="top">
-      <h3>⚡ Fast</h3>
-      Stays smooth, even in very long notes. Typing never waits.
-    </td>
-    <td width="25%" valign="top">
-      <h3>📄 Plain files</h3>
-      Your notes are ordinary <code>.md</code> files in a folder. Open them in any editor, any time.
-    </td>
-    <td width="25%" valign="top">
-      <h3>✍️ Live preview</h3>
-      Write markdown and see it formatted as you type. The markup only shows on the line you are on.
-    </td>
-    <td width="25%" valign="top">
-      <h3>🔖 Remembers</h3>
-      Opens your last folder and your tabs, right where you left them.
-    </td>
-  </tr>
-</table>
+Open a folder and it becomes your notes. Every note is an ordinary `.md` file, so
+you can open it in any other editor, sync it with whatever you already use, and
+keep it in git. There is no database and no account, and Meku does not rewrite
+your files behind your back.
 
-<br>
+- **Plain files.** A folder of markdown is the whole format.
+- **Native.** No browser engine. The window is drawn on your graphics card.
+- **Offline.** The only network use is an update check once a day, which you can
+  [turn off](#updates-and-privacy).
+- **Linux, macOS (Apple silicon) and Windows.**
 
 ## Features
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/images/meku-code.png" alt="A note with a checklist, a tip callout, a table and a code block, all formatted" width="100%">
-      <h3>Write, don't format</h3>
-      Headings, lists, checkboxes, tables, callouts and code blocks all look right as you type. Lists keep going when you press Enter, and brackets close themselves.
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/images/meku-edit.png" alt="The same note shown as plain markdown in Edit view" width="100%">
-      <h3>See the markdown when you want</h3>
-      Switch to Edit to see every symbol, or stay in Live and let the markup appear only on the line you are editing. Nothing is hidden from you.
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/images/meku-read.png" alt="The same note in Read view, with no cursor and nothing to edit" width="100%">
-      <h3>Read without distractions</h3>
-      Read view shows the finished note, with nothing to click by accident. Links open with a plain click.
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/images/meku-light.png" alt="Meku in its light theme" width="100%">
-      <h3>Light, dark, or yours</h3>
-      Pick a light or dark theme, follow your system, or make your own. Change the look and feel in the settings (<code>Ctrl+,</code>), for every folder or just one.
-    </td>
-  </tr>
-</table>
+### Live preview
 
-<br>
+Markdown turns into formatted text as you type. The symbols only show on the line
+you are editing, so you can always see exactly what is in the file. Switch to
+**Edit** to see every symbol, or **Read** for a finished page with nothing to edit
+by accident (`Ctrl+E` cycles the three).
 
-## Fast
+Headings, bold, italic, strikethrough, highlights, inline code, bullet, numbered
+and task lists, tables, callouts, and code blocks with syntax colours all render
+in place. Lists continue when you press Enter, and brackets close themselves. Type `/` for a menu of blocks to insert.
 
-<p align="center">
-  <img src="docs/images/meku-speed.svg" alt="Typing in a 10,000-line note takes about 5 milliseconds, well under the 16 milliseconds of one frame at 60 frames per second" width="760">
-</p>
+### Right-click menu
 
-Meku is a native app, not a web page in a box, and it draws the screen on your graphics card. A few things keep it quick:
+<img src="docs/images/meku-menu.gif" alt="Selecting a word and right-clicking opens a menu; Bold turns it bold. Right-clicking a picture opens a menu with a Size submenu, and Small shrinks the picture" width="100%">
 
-- **Only what you see is drawn.** A note with tens of thousands of lines scrolls as easily as a short one.
-- **Only what you change is re-read.** Edit a line and Meku updates just that part of the note, so typing stays instant in long files. Re-reading a 47,500-line note from scratch takes about a fiftieth of a second.
-- **Tabs wait their turn.** When you reopen Meku, only the note you are looking at is loaded. The other tabs load when you click them.
-- **Scrolling feels precise.** Mouse wheel scrolling is short and exact, and you can set how far each notch moves.
+What the menu offers depends on what you clicked.
 
-## What's in version 0.1
+- **Selected text:** cut, copy, paste, the inline formats, paragraph styles
+  (headings, quote, lists) and find.
+- **A link:** open it, copy the address, or remove the link and keep the text.
+- **A picture:** zoom, copy the image, copy its path, show it in your file
+  manager, resize it, or remove it from the note. The file stays on disk, and
+  `Ctrl+Z` brings the picture back.
+- **A code block:** copy the code.
+- **Anywhere else:** undo, paste, and inserts such as a table, a callout or a divider.
 
-<table>
-  <tr>
-    <td width="33%" valign="top">
-      <h4>✍️ Writing</h4>
-      Live preview, Edit and Read views · headings, bold, italic, strikethrough, highlights and inline code · bullet, numbered and task lists · tables · callouts · code blocks with colours · images (paste a screenshot, paste picture files from your file manager, or drop them in; copy a picture out with `Ctrl+C` on its line) · a <code>/</code> menu for quick inserts · find and replace · go to line · autosave
-    </td>
-    <td width="33%" valign="top">
-      <h4>🗂️ Organising</h4>
-      Open any folder as a notes library · a sidebar to browse, create, rename and delete notes and folders · tabs · an outline of the open note · jump to any note with <code>Ctrl+P</code> · search every note with <code>Ctrl+Shift+F</code> · back and forward through the notes you visited · reopens your last folder and tabs
-    </td>
-    <td width="33%" valign="top">
-      <h4>🎨 Make it yours</h4>
-      Light and dark themes, or follow your system · your own themes · choose your fonts and text size · zoom · a narrow, comfortable, wide or full-width page · scroll bars and scroll speed · settings for every folder, or just one · a command palette (<code>Ctrl+Shift+P</code>) for everything else
-    </td>
-  </tr>
-</table>
+Entries show their keyboard shortcut where there is one.
 
-**Good to know:** on Linux with Wayland (GNOME, for example), copying a picture out of Meku needs `xclip` or `wl-clipboard` installed. Pasting works everywhere.  Meku notices when a note is changed by another program while it is open, and it never renames or rewrites your files behind your back.
+### Themes
 
-**Not in this first version:** links between notes, plugins and sync.
+<img src="docs/images/meku-themes.gif" alt="Cycling through Meku's light and dark themes on the same note" width="100%">
+
+Light and dark themes are built in, and Meku can follow your system setting.
+`Ctrl+Alt+T` steps through them. You can make your own, choose the fonts and text
+size, zoom, and pick a narrow, comfortable, wide or full-width page. Settings
+(`Ctrl+,`) can apply to every folder or just one.
+
+### Getting around
+
+<img src="docs/images/meku-navigate.gif" alt="Ctrl+P opens a note by name, and Ctrl+Shift+F searches the text of every note" width="100%">
+
+`Ctrl+P` jumps to any note by name. `Ctrl+Shift+F` searches the text of every
+note. `Ctrl+Shift+P` opens a palette of every command. There are tabs, a folder
+sidebar, an outline of the open note, and back and forward buttons for the notes
+you visited. When you reopen Meku it brings back your folder and tabs, loading
+only the note you are looking at until you click the others.
+
+### Long notes stay fast
+
+<img src="docs/images/meku-speed.gif" alt="Dragging the scroll bar through a 10,000 line note, then typing in the middle of it" width="100%">
+
+Only the lines on screen are drawn, and an edit only re-reads the part of the
+note it touched. In our tests, typing in a 10,000-line note is handled in about
+5 ms, well under the 16 ms of one frame at 60 Hz. Re-reading a 47,500-line note
+from scratch takes about 20 ms.
+
+### Pictures
+
+Paste a screenshot, paste picture files from your file manager, or drop files on
+the window. They are copied into an `attachments` folder next to the note and
+linked. Click a picture to see it full size. `Ctrl+C` on a picture's line copies
+the picture itself.
+
+### And
+
+- Find and replace, go to line, autosave
+- Notices when another program changes an open note
+- Scroll bars, adjustable wheel speed
+- Settings for every folder, or just one
+
+Not in this version: links between notes, plugins and sync.
 
 ## Install
 
-Download the file for your system from the [latest release](https://github.com/mebishp/meku/releases/latest).
+Download the file for your system from the
+[latest release](https://github.com/mebishp/meku/releases/latest).
 
 | System | File | How |
 |---|---|---|
 | macOS (Apple silicon) | `.dmg` | Open it and drag Meku to Applications |
-| Windows (64-bit) | `.zip` | Unzip it and run `Meku.exe` |
-| Ubuntu 22.04+, Debian 12+ | `.deb` | `sudo apt install ./meku_1.0.2_amd64.deb` |
-| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.2-1-x86_64.pkg.tar.zst` |
-| Any Linux (glibc 2.35+) | `.AppImage` | Make it executable, then run it |
-| Any Linux (glibc 2.35+) | `.tar.gz` | Unpack it and run `meku` (`INSTALL.txt` lists what to install) |
+| Windows (64-bit) | `.zip` | Unzip and run `Meku.exe` |
+| Ubuntu 22.04+, Debian 12+ | `.deb` | `sudo apt install ./meku_1.0.3_amd64.deb` |
+| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.3-1-x86_64.pkg.tar.zst` |
+| Other Linux (glibc 2.35+) | `.AppImage` | `chmod +x` it, then run it |
+| Other Linux (glibc 2.35+) | `.tar.gz` | Unpack and run `meku`; `INSTALL.txt` lists the libraries |
 
-Meku needs a graphics card driver with modern graphics support (Vulkan on Linux,
-Metal on macOS, DirectX on Windows), which most computers already have. Intel Macs
-are not supported yet. Every file has a checksum in `SHA256SUMS`.
+Meku needs a graphics driver with modern API support: Vulkan on Linux, Metal on
+macOS, DirectX on Windows. Most computers already have one. Intel Macs are not
+supported yet. Each release includes `SHA256SUMS`.
 
-The macOS and Windows builds are not signed yet. macOS may say the app is from an
-unidentified developer: right-click Meku, choose **Open**, then confirm. Windows may
-show a SmartScreen warning: choose **More info**, then **Run anyway**.
+The macOS and Windows builds are not signed yet. On macOS, right-click Meku,
+choose **Open**, and confirm. On Windows, choose **More info** then **Run anyway**
+in the SmartScreen warning.
 
 Start it from your app menu, or give it a folder:
 
@@ -165,24 +135,46 @@ Start it from your app menu, or give it a folder:
 meku ~/Notes
 ```
 
-### A few shortcuts
+### Updates and privacy
 
-| Keys | What it does |
+Once a day Meku asks GitHub for the public list of releases. Nothing about you or
+your notes is sent. If a newer version exists, a chip appears in the status bar,
+and clicking it shows the steps for the way you installed Meku (deb, Arch,
+AppImage, tarball, macOS app, Windows or source).
+
+To turn this off, untick **Check for updates** in Settings. Meku then never goes
+online. **Check for updates** in the command palette still works when you ask.
+
+On Linux with Wayland (GNOME, for example), copying a picture out of Meku needs
+`xclip` or `wl-clipboard` installed. Pasting works everywhere.
+
+<details>
+<summary><b>Keyboard shortcuts</b></summary>
+
+<br>
+
+On a Mac, use `Cmd` where this says `Ctrl`. The full list is in the `...` menu at
+the top of the editor.
+
+| Keys | Action |
 |---|---|
 | `Ctrl+O` | Open a folder |
 | `Ctrl+P` | Jump to a note |
-| `Ctrl+Shift+P` | Run any command |
+| `Ctrl+Shift+P` | Command palette |
 | `Ctrl+T` | New note |
-| `Ctrl+E` | Change view (Edit, Live, Read) |
+| `Ctrl+E` | Cycle Edit, Live and Read |
 | `Ctrl+F` | Find in the note |
 | `Ctrl+Shift+F` | Search every note |
+| `Ctrl+B` / `Ctrl+I` | Bold / italic |
+| `Ctrl+K` | Link |
+| `Ctrl+Alt+T` | Next theme |
 | `Ctrl+,` | Settings |
 
-On a Mac, use `Cmd` where this says `Ctrl`. The full list is in the `⋯` menu at the top of the editor.
+</details>
 
 ## Build from source
 
-You need [Rust](https://rustup.rs) (a recent version).
+You need a recent [Rust](https://rustup.rs) toolchain.
 
 ```
 git clone https://github.com/mebishp/meku.git
@@ -190,10 +182,11 @@ cd meku
 cargo run --release
 ```
 
-To build the install files (deb, AppImage, Arch and tar.gz), run `tools/package.sh`. They appear in `dist/`.
+`tools/package.sh` builds the Linux packages (deb, AppImage, Arch and tar.gz)
+into `dist/`. `tools/demo/` has the scripts that recorded the clips above.
 
 ## License
 
-Meku is released under the [Apache License 2.0](LICENSE).
-
-The icons come from [Iconoir](https://iconoir.com) and keep their own license, which is included in [`crates/meku/assets/icons`](crates/meku/assets/icons).
+Apache License 2.0, see [LICENSE](LICENSE). The icons come from
+[Iconoir](https://iconoir.com) and keep their own license, included in
+[`crates/meku/assets/icons`](crates/meku/assets/icons).

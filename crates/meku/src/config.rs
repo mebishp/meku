@@ -444,6 +444,14 @@ pub const DEFS: &[Def] = &[
         Dv::B(true),
     ),
     def(
+        "check_updates",
+        Section::Files,
+        "Check for updates",
+        "Once a day, ask GitHub whether a newer Meku is out and show how to update. Only the public release list is requested; nothing about you or your notes is sent. Off means Meku never goes online.",
+        Kind::Bool,
+        Dv::B(true),
+    ),
+    def(
         "restore_session",
         Section::Files,
         "Reopen last tabs",
@@ -875,13 +883,44 @@ pub fn remember_mekuto(root: &Path) {
 }
 
 fn write_last_mekuto(state: &Path, root: &Path) {
-    let body = serde_json::json!({ "last_mekuto": root.to_string_lossy() });
+    write_state_key(
+        state,
+        "last_mekuto",
+        Value::String(root.to_string_lossy().into_owned()),
+    );
+}
+
+/// Set one key of the app-state file, keeping the others. Best effort.
+fn write_state_key(state: &Path, key: &str, value: Value) {
+    let mut map = std::fs::read_to_string(state)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    map.insert(key.to_string(), value);
     if let Some(dir) = state.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = state.with_extension("json.tmp");
-    if std::fs::write(&tmp, body.to_string()).is_ok() {
+    if std::fs::write(&tmp, Value::Object(map).to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, state);
+    }
+}
+
+fn read_state_key(state: &Path, key: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(state).ok()?).ok()?;
+    value.get(key).cloned()
+}
+
+/// App state kept next to the settings (last mekuto, last update check, a
+/// version the user chose to skip).
+pub fn state_value(key: &str) -> Option<Value> {
+    read_state_key(&state_path()?, key)
+}
+
+pub fn set_state_value(key: &str, value: Value) {
+    if let Some(path) = state_path() {
+        write_state_key(&path, key, value);
     }
 }
 
@@ -1458,5 +1497,29 @@ mod tests {
             assert_eq!(by_home, PathBuf::from("/home/a/.config").join(&tail));
         }
         assert_eq!(config_file(None, None, None), None);
+    }
+
+    #[test]
+    fn state_keys_are_kept_side_by_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let vault = dir.path().join("v");
+        std::fs::create_dir(&vault).unwrap();
+        write_last_mekuto(&state, &vault);
+        write_state_key(&state, "skip_update", Value::String("1.2.3".into()));
+        write_state_key(&state, "last_update_check", Value::from(42u64));
+        assert_eq!(
+            read_last_mekuto(&state),
+            Some(vault),
+            "the mekuto survives later keys"
+        );
+        assert_eq!(
+            read_state_key(&state, "skip_update"),
+            Some(Value::String("1.2.3".into()))
+        );
+        assert_eq!(
+            read_state_key(&state, "last_update_check").and_then(|v| v.as_u64()),
+            Some(42)
+        );
     }
 }

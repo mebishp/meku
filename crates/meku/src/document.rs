@@ -32,6 +32,7 @@ use meku_table::Align;
 
 use crate::MekuShell;
 use crate::Mode;
+use crate::context_menu::Target;
 
 /// Per-row syntax spans in line-content byte offsets (`None` = plain).
 pub(crate) type RowSpans = Vec<Option<meku_markdown::highlight::SharedSpans>>;
@@ -187,6 +188,7 @@ impl MekuShell {
             || self.palette_open()
             || self.lightbox.is_some()
             || self.settings.is_some()
+            || self.update_open
     }
 
     /// Relative path of the note shown by the active tab, when it has a buffer.
@@ -319,7 +321,7 @@ impl MekuShell {
     pub(crate) fn render_document(
         &mut self,
         rel: &Path,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(model) = self.doc_model(rel, cx) else {
@@ -338,7 +340,7 @@ impl MekuShell {
         let count = model.rows.len();
         // Unmeasured rows count as zero height to the scroll bar, so give
         // every row an estimate; real heights replace it as rows are drawn.
-        let line_h = f32::from(_window.line_height()) * crate::theme::zoom(cx);
+        let line_h = f32::from(window.line_height()) * crate::theme::zoom(cx);
         let hint = px(estimated_row_height(&model.rows, line_h));
         let old_count = self.doc_list.item_count();
         if self.doc_list_rel.as_deref() != Some(rel) {
@@ -393,9 +395,13 @@ impl MekuShell {
         let title_input = self.title_inputs.get(rel).cloned();
         let reveal_pref = Reveal::of(cx);
         let column_em = column_em(cx);
+        // While the title field has focus the typing goes there, so the body
+        // must not draw a caret of its own on the first line.
+        let title_has_focus = self.title_focused(window, cx);
+        let picture_cache = self.images.clone();
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
-            let is_caret_row = mode != Mode::Read && ix == active;
+            let is_caret_row = mode != Mode::Read && ix == active && !title_has_focus;
             let reveal = row_is_revealed_with(reveal_pref, mode, row, ix, active, &selection);
             let base = window.text_style().font_size.to_pixels(window.rem_size());
             let el = row_element(
@@ -428,6 +434,7 @@ impl MekuShell {
                     None
                 },
                 &shell,
+                &picture_cache,
                 &views,
                 window,
                 cx,
@@ -457,6 +464,16 @@ impl MekuShell {
             // end of the note when it is below all of it.
             let margin_shell = shell.clone();
             let last = ix + 1 == rows.len();
+            let margin_menu = shell.clone();
+            item = item.on_mouse_down(
+                MouseButton::Right,
+                move |ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    margin_menu.update(cx, |view, cx| {
+                        view.open_doc_menu(Target::Text(Some(ix)), ev.position, window, cx)
+                    });
+                },
+            );
             item = item.on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 margin_shell.update(cx, |view, cx| {
@@ -523,6 +540,14 @@ impl MekuShell {
                     });
                 }
             })
+            .on_mouse_down(MouseButton::Right, {
+                let shell = cx.entity();
+                move |ev: &MouseDownEvent, window, cx| {
+                    shell.update(cx, |view, cx| {
+                        view.open_doc_menu(Target::Text(None), ev.position, window, cx)
+                    });
+                }
+            })
             .child(input_bridge)
             .child(list_body)
             .child(self.row_estimates(hint))
@@ -532,7 +557,7 @@ impl MekuShell {
             ))
             .vertical_scrollbar(&DocBar(self.doc_list.clone()))
             .children(self.render_find_bar(cx))
-            .pipe_fade(rel, cx)
+            .pipe_fade(buffer.entity_id(), cx)
     }
     /// The list forgets its row-height estimates whenever its width changes
     /// (and on its first layout), which leaves the scroll bar with only the
@@ -561,7 +586,7 @@ impl MekuShell {
 
     /// Source byte offset for a point hit on row `ix`. Rows without a text
     /// layout (blank rules, spacers) resolve to their start.
-    fn row_source(&self, ix: usize, pos: Point<Pixels>) -> Option<usize> {
+    pub(crate) fn row_source(&self, ix: usize, pos: Point<Pixels>) -> Option<usize> {
         let views = self.doc_views.borrow();
         if let Some(Some(view)) = views.get(ix) {
             let idx = match view.layout.index_for_position(pos) {
@@ -1625,7 +1650,7 @@ fn heading_scale(kind: RowKind) -> f32 {
 }
 
 /// Where an `![alt](target)` row's pixels come from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ImageSrc {
     Url(String),
     Path(PathBuf),
@@ -2084,12 +2109,14 @@ pub(crate) fn row_is_revealed_with(
 
 /// Short fade when a note becomes the visible one (tab switch, open).
 trait OpenFade: Sized {
-    fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement;
+    fn pipe_fade(self, note: EntityId, cx: &App) -> AnyElement;
 }
 
 impl<E: IntoElement + Styled + 'static> OpenFade for E {
-    fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement {
-        let id = SharedString::from(format!("doc-open-{}", rel.display()));
+    fn pipe_fade(self, note: EntityId, cx: &App) -> AnyElement {
+        // Keyed by the note's buffer, which survives a rename, so renaming
+        // the open note does not replay the fade.
+        let id = SharedString::from(format!("doc-open-{}", note.as_u64()));
         crate::theme::fade_in(self, id, 160, 0.0, cx)
     }
 }
@@ -2420,6 +2447,7 @@ fn row_element(
     caret_on: bool,
     slash: Option<&crate::slash::SlashView>,
     shell: &Entity<MekuShell>,
+    pictures: &Entity<RetainAllImageCache>,
     views: &RowViews,
     window: &mut Window,
     cx: &mut App,
@@ -2427,6 +2455,7 @@ fn row_element(
     let base_font = window.text_style().font_size.to_pixels(window.rem_size());
     let down_shell = shell.clone();
     let drag_shell = shell.clone();
+    let menu_shell = shell.clone();
     let row_div = div()
         .id(("doc-row", ix))
         .test_support()
@@ -2445,6 +2474,15 @@ fn row_element(
                 view.doc_pointer(ix, ev.position, ev.modifiers.shift, ev.click_count, cx);
             });
         })
+        .on_mouse_down(
+            MouseButton::Right,
+            move |ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                menu_shell.update(cx, |view, cx| {
+                    view.open_doc_menu(Target::Text(Some(ix)), ev.position, window, cx)
+                });
+            },
+        )
         .on_mouse_move(move |ev: &MouseMoveEvent, _window, cx| {
             if ev.pressed_button == Some(MouseButton::Left) {
                 drag_shell.update(cx, |view, cx| view.doc_drag(ix, ev.position, cx));
@@ -2481,6 +2519,7 @@ fn row_element(
                 caret.is_some(),
                 avail,
                 shell,
+                pictures,
                 cx,
             ))
             .into_any_element();
@@ -2528,12 +2567,15 @@ fn row_element(
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
         }
-        let row_h = base_font * 1.1;
-        let mut el = row_div.h(row_h);
-        // Empty lines still need a caret: without one the cursor visibly
-        // vanishes whenever the user creates a new line. Approximate the
-        // text rows' glyph centering: the glyph box (~1em) sits centered in
-        // the 1.1em row, so offset it by the slack.
+        // The line the caret sits on is as tall as a text line, so typing the
+        // first character does not make the row (and everything below) jump.
+        let line_h = window.text_style().line_height_in_pixels(window.rem_size());
+        let row_h = if caret.is_some() {
+            line_h.max(base_font * 1.1)
+        } else {
+            base_font * 1.1
+        };
+        let mut el = row_div.h(row_h).text_size(base_font);
         // A brand-new note says how to begin.
         if text.is_empty() && ix == 0 {
             el = el.child(
@@ -2546,13 +2588,13 @@ fn row_element(
             );
         }
         if caret.is_some() && caret_on {
-            el = el.child(caret_element(
-                px(0.),
-                (row_h - base_font) / 2.0,
-                base_font,
-                base_font,
-                cx.theme().caret,
-            ));
+            // Same caret box a text row gets: shape one space so the height
+            // and vertical offset match the glyphs typed here next.
+            let style = window.text_style();
+            let runs = [style.to_run(1)];
+            let (y, h) = caret_geometry(window, " ", &runs, base_font, 0, None)
+                .map_or(((row_h - base_font) / 2.0, base_font), |(_, y, h)| (y, h));
+            el = el.child(caret_element(px(0.), y, h, base_font, cx.theme().caret));
         }
         return el.into_any_element();
     }
@@ -2831,7 +2873,18 @@ pub(crate) fn image_frame_size(info: &ImageInfo, avail: Pixels, max_h: f32) -> (
 
 /// The image picture itself, `Contain`-fit into whatever box it is given,
 /// with loading / unavailable states. Shared by the row and the lightbox.
-pub(crate) fn picture(src: &ImageSrc, cx: &App) -> AnyElement {
+fn with_cache(img: Img, cache: Option<&Entity<RetainAllImageCache>>) -> Img {
+    match cache {
+        Some(cache) => img.image_cache(cache),
+        None => img,
+    }
+}
+
+pub(crate) fn picture(
+    src: &ImageSrc,
+    pictures: Option<&Entity<RetainAllImageCache>>,
+    cx: &App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let note = move |text: &'static str| {
         move || {
@@ -2847,12 +2900,12 @@ pub(crate) fn picture(src: &ImageSrc, cx: &App) -> AnyElement {
         }
     };
     match src {
-        ImageSrc::Path(path) => img(path.clone())
+        ImageSrc::Path(path) => with_cache(img(path.clone()), pictures)
             .size_full()
             .object_fit(ObjectFit::Contain)
             .with_fallback(note("Image unavailable"))
             .into_any_element(),
-        ImageSrc::Url(url) => img(url.clone())
+        ImageSrc::Url(url) => with_cache(img(url.clone()), pictures)
             .size_full()
             .object_fit(ObjectFit::Contain)
             .with_loading(note("Loading…"))
@@ -2870,6 +2923,7 @@ fn image_row_element(
     focused: bool,
     avail: Pixels,
     shell: &Entity<MekuShell>,
+    pictures: &Entity<RetainAllImageCache>,
     cx: &App,
 ) -> AnyElement {
     let theme_colors = cx.theme();
@@ -2883,6 +2937,8 @@ fn image_row_element(
     for (k, info) in images.into_iter().enumerate() {
         let (fw, fh) = image_frame_size(&info, avail, max_h);
         let open = info.clone();
+        let menu_info = info.clone();
+        let menu_shell = shell.clone();
         let shell = shell.clone();
         let id: ElementId = if k == 0 {
             ("image-row", ix).into()
@@ -2901,6 +2957,16 @@ fn image_row_element(
             .cursor_pointer()
             .hover(move |s| s.border_color(hover_border))
             // A press on the picture zooms it; it must not move the caret.
+            .on_mouse_down(
+                MouseButton::Right,
+                move |ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let info = menu_info.clone();
+                    menu_shell.update(cx, |view, cx| {
+                        view.open_doc_menu(Target::Image(info), ev.position, window, cx)
+                    });
+                },
+            )
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 cx.stop_propagation();
                 if !zoomable {
@@ -2913,7 +2979,7 @@ fn image_row_element(
                     view.open_lightbox(open, cx);
                 });
             })
-            .child(picture(&info.src, cx));
+            .child(picture(&info.src, Some(pictures), cx));
         let mut column = v_flex().gap_1().child(frame);
         if !info.caption.is_empty() {
             column = column.child(

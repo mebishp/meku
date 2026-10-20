@@ -1,24 +1,27 @@
-# Demo video
+# README clips
 
-How `docs/images/meku-demo.gif` was made. It is a real screen recording of Meku
-(real key presses and mouse), edited with [Remotion](https://www.remotion.dev).
+How the GIFs in `docs/images/` are made: `meku-live`, `-menu`, `-themes`,
+`-navigate` and `-speed`.
 
-Needs GNOME on Wayland, write access to `/dev/uinput`, Python with `evdev` and
-`gi`, ffmpeg, Node and a release build of Meku. The paths inside the scripts
-are the ones used on the author's machine; adjust them to yours.
+Meku runs on its own throwaway X display (Xwayland) and is driven there with
+XTEST key and pointer events, so **your real keyboard and mouse are never used**
+and the clips do not depend on your desktop, window manager or theme.
 
-1. Open Meku on a demo folder, with an empty note:
-   `target/release/meku /path/to/vault "Notes/Quick start.md"`
-2. `python3 record.py` presses the keys, moves the pointer, switches themes and
-   records the window with GNOME's screencast service. It writes `raw.mp4` and
-   `events.json` (pointer path and click times).
-3. In `remotion/`: copy `raw.mp4` to `public/`, `events.json` to `src/`, run
-   `npm install`, then
-   `npx remotion render src/index.ts MekuDemo meku-demo.mp4 --codec h264 --crf 17`.
-4. Make the GIF with [gifski](https://gif.ski) (clean colours, no smearing):
-   `ffmpeg -i meku-demo.mp4 -vf "fps=20,scale=960:-1:flags=lanczos" frames/f%04d.png`
-   then `gifski --fps 20 --quality 100 --width 960 -o meku-demo.gif frames/f*.png`
+Needs `Xwayland`, `python-xlib`, `ffmpeg`, [gifski](https://gif.ski) and a release
+build of Meku (`cargo build --release`). Run from the repository root.
 
-`record.py` records the maximized window (1920x1048) at 60 fps with a high quality
-x264 pipeline, so the video stays sharp when the edit zooms in. The final render
-is 1920x1080 at 60 fps.
+1. The demo notes are in `tools/demo/vault`. Every clip starts from a fresh copy in
+   `$CLIPS_VAULT` (the 10,000-line note is generated). `CLIPS_DIR` is where the
+   recordings go.
+2. `python3 tools/demo/clips.py live menu themes navigate speed` records
+   `$CLIPS_DIR/<name>.mp4`. `python3 tools/demo/clips.py still menu` saves a frame
+   at each step instead, which is how click positions are found.
+3. `tools/demo/make_gifs.sh` turns the clips into GIFs. `WIDTH`, `FPS` and
+   `QUALITY` trade sharpness for size: the README clips are 900 px wide, 25 to
+   30 fps, quality 85 (the scrolling one is 760 px, 15 fps, quality 60) and stay
+   under 1.5 MB each.
+
+`drive.py`, `record.py` and `remotion/` are the older, edited demo (real input
+through `/dev/uinput`, GNOME screencast, Remotion camera moves). That one takes
+over the pointer and keyboard of the desktop it runs on, so use it only on a
+machine you are not working on. It produced `docs/images/meku-demo.mp4`.

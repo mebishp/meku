@@ -4,6 +4,7 @@
 mod chrome;
 mod clipboard;
 mod config;
+mod context_menu;
 mod document;
 mod explorer;
 mod find;
@@ -14,9 +15,10 @@ mod settings_page;
 mod slash;
 mod smooth;
 mod theme;
+mod update;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -211,6 +213,19 @@ pub struct MekuShell {
     naming_input: Option<Entity<InputState>>,
     _naming_sub: Option<Subscription>,
     pending_delete: Option<PathBuf>,
+    /// A newer release than the running version, once one has been found.
+    update: Option<update::Release>,
+    /// The "update available" dialog is open.
+    update_open: bool,
+    update_checking: bool,
+    /// The right-click menu of the document, while open.
+    doc_menu: Option<context_menu::DocMenu>,
+    /// Decoded pictures of the open notes. GPUI keeps every picture it has
+    /// ever drawn unless told otherwise, so closed notes' pictures are evicted
+    /// from here (see `prune_closed`).
+    images: Entity<RetainAllImageCache>,
+    evict_images: Vec<document::ImageSrc>,
+    doc_menu_serial: usize,
     notice: Option<String>,
     /// Caret blink phase and the last keystroke/click (blink holds solid
     /// for 600ms after input).
@@ -301,6 +316,13 @@ impl MekuShell {
             naming_input: None,
             _naming_sub: None,
             pending_delete: None,
+            update: None,
+            update_open: false,
+            update_checking: false,
+            doc_menu: None,
+            images: RetainAllImageCache::new(cx),
+            evict_images: Vec::new(),
+            doc_menu_serial: 0,
             notice: None,
             caret_on: true,
             caret_touch: Instant::now(),
@@ -716,6 +738,7 @@ impl MekuShell {
             self.title_inputs.remove(&rel);
             self.title_subs.remove(&rel);
         }
+        self.prune_closed(cx);
         if self.tabs.is_empty() {
             self.tabs.push(EditorTab {
                 rel: None,
@@ -732,6 +755,56 @@ impl MekuShell {
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         self.close_tab(self.active_tab, cx);
+    }
+
+    /// Let go of notes no tab shows any more: their text, undo history and
+    /// parsed rows. A note with unsaved changes is kept until it is saved, so
+    /// closing a tab never loses an edit; reopening one reads it from disk.
+    fn prune_closed(&mut self, cx: &App) {
+        let shown: HashSet<&PathBuf> = self.tabs.iter().filter_map(|t| t.rel.as_ref()).collect();
+        let gone: Vec<PathBuf> = self
+            .buffers
+            .iter()
+            .filter(|(rel, b)| !shown.contains(rel) && !b.read(cx).dirty)
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        for rel in gone {
+            self.buffers.remove(&rel);
+            if let Some(model) = self.doc_models.remove(&rel) {
+                self.evict_images.extend(
+                    model
+                        .images
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .map(|info| info.src.clone()),
+                );
+            }
+            self.last_edit.remove(&rel);
+        }
+        // A picture another loaded note still shows stays cached.
+        if !self.evict_images.is_empty() {
+            let kept: HashSet<document::ImageSrc> = self
+                .doc_models
+                .values()
+                .flat_map(|m| m.images.iter().flatten().flatten())
+                .map(|info| info.src.clone())
+                .collect();
+            self.evict_images.retain(|src| !kept.contains(src));
+        }
+    }
+
+    /// Drop the decoded pictures queued by `prune_closed` (needs the window,
+    /// so it runs while rendering).
+    fn evict_pictures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for src in std::mem::take(&mut self.evict_images) {
+            let resource: Resource = match src {
+                document::ImageSrc::Path(path) => path.into(),
+                document::ImageSrc::Url(url) => SharedUri::from(url).into(),
+            };
+            self.images
+                .update(cx, |cache, cx| cache.remove(&resource, window, cx));
+        }
     }
 
     /// Remember the visible note for back/forward.
@@ -1486,6 +1559,7 @@ impl MekuShell {
         for rel in due {
             self.save_buffer(&rel, cx);
         }
+        self.prune_closed(cx);
         let idle_title = self
             .title_pending
             .as_ref()
@@ -1760,8 +1834,23 @@ impl MekuShell {
         }
     }
 
-    fn on_cancel_overlay(&mut self, _: &CancelOverlay, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_cancel_overlay(
+        &mut self,
+        _: &CancelOverlay,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.doc_menu.take().is_some() {
+            let focus = self.focus_handle.clone();
+            window.focus(&focus, cx);
+            cx.notify();
+            return;
+        }
         if self.close_lightbox(cx) {
+            return;
+        }
+        if std::mem::take(&mut self.update_open) {
+            cx.notify();
             return;
         }
         if self.slash_dismiss() {
@@ -1837,6 +1926,10 @@ impl MekuShell {
             self.sidebar_auto_hidden = false;
         }
         self.sidebar_setting = sidebar;
+        if !c.bool("check_updates") {
+            self.update = None;
+            self.update_open = false;
+        }
         apply_fonts(cx);
         for buffer in self.buffers.values() {
             buffer.update(cx, |b, _| b.auto_close = c.bool("auto_close_pairs"));
@@ -2044,6 +2137,203 @@ impl MekuShell {
         )
     }
 
+    // -- update check ---------------------------------------------------
+
+    /// Look for a newer release. The automatic check (`manual == false`) runs
+    /// only when the setting is on and at most once a day; the "Check for
+    /// updates" command always runs and always answers.
+    pub(crate) fn check_for_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if self.update_checking {
+            return;
+        }
+        if !manual {
+            let day = 24 * 60 * 60;
+            let recent = config::state_value("last_update_check")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|at| unix_now().saturating_sub(at) < day);
+            if !theme::cfg(cx).bool("check_updates") || !theme::state(cx).persists() || recent {
+                return;
+            }
+        }
+        self.update_checking = true;
+        if manual {
+            self.notice = Some("Looking for updates…".into());
+            cx.notify();
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async { update::fetch_latest() }).await;
+            if let Some(view) = this.upgrade() {
+                view.update(cx, |shell, cx| {
+                    shell.finish_update_check(result, manual, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn finish_update_check(
+        &mut self,
+        result: Result<update::Release, String>,
+        manual: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_checking = false;
+        if theme::state(cx).persists() && result.is_ok() {
+            config::set_state_value("last_update_check", unix_now().into());
+        }
+        match result {
+            Ok(release) if update::is_newer(&release.version, update::CURRENT) => {
+                let skipped =
+                    config::state_value("skip_update").and_then(|v| v.as_str().map(str::to_string));
+                if manual || skipped.as_deref() != Some(release.version.as_str()) {
+                    self.notice = None;
+                    self.update = Some(release);
+                    self.update_open = manual;
+                }
+            }
+            Ok(_) => {
+                if manual {
+                    self.notice = Some(format!("Meku {} is up to date", update::CURRENT));
+                }
+            }
+            Err(message) => {
+                if manual {
+                    self.notice = Some(message);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Hide the found update and do not mention this version again.
+    fn skip_update(&mut self, cx: &mut Context<Self>) {
+        if let Some(release) = self.update.take()
+            && theme::state(cx).persists()
+        {
+            config::set_state_value("skip_update", release.version.into());
+        }
+        self.update_open = false;
+        cx.notify();
+    }
+
+    fn render_update_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.update_open {
+            return None;
+        }
+        let release = self.update.clone()?;
+        let howto = update::how_to_update(
+            update::detect_source(),
+            &release,
+            update::appimage_path().as_deref(),
+        );
+        let shell = cx.entity();
+        let (close_shell, skip_shell) = (shell.clone(), shell);
+        let page = release.page.clone();
+        let theme_colors = cx.theme();
+        let (muted, border, field) = (
+            theme_colors.muted_foreground,
+            theme_colors.border,
+            theme_colors.secondary,
+        );
+        let mut card = div()
+            .id("update-dialog")
+            .test_support()
+            .w(px(520.))
+            .max_w_full()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .bg(theme_colors.background)
+            .p_4()
+            .gap_3()
+            .flex()
+            .flex_col()
+            .text_color(theme_colors.foreground)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Meku {} is available", release.version)),
+            )
+            .child(div().text_sm().text_color(muted).child(format!(
+                "You have {}. You installed Meku as: {}.",
+                update::CURRENT,
+                howto.installed_as
+            )));
+        for (i, step) in howto.steps.iter().enumerate() {
+            card = card.child(div().text_sm().child(format!("{}. {step}", i + 1)));
+        }
+        if let Some(command) = howto.command.clone() {
+            card =
+                card.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .id("update-command")
+                                .test_support()
+                                .flex_1()
+                                .min_w_0()
+                                .px_2()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(field)
+                                .text_xs()
+                                .font_family("monospace")
+                                .child(command.clone()),
+                        )
+                        .child(Button::new("update-copy").label("Copy").on_click(
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                            },
+                        )),
+                );
+        }
+        card = card.child(
+            h_flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    Button::new("update-skip")
+                        .label("Skip this version")
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            skip_shell.update(cx, |v, cx| v.skip_update(cx));
+                        }),
+                )
+                .child(
+                    Button::new("update-notes")
+                        .label("Release page")
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            cx.open_url(&page);
+                        }),
+                )
+                .child(
+                    Button::new("update-close")
+                        .label("Close")
+                        .on_click(move |_, _, cx| {
+                            close_shell.update(cx, |v, cx| {
+                                v.update_open = false;
+                                cx.notify();
+                            });
+                        }),
+                ),
+        );
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().absolute().inset_0().bg(theme::scrim(cx)))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
     fn render_delete_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rel = self.pending_delete.clone()?;
         let shell = cx.entity();
@@ -2119,6 +2409,7 @@ impl MekuShell {
 impl Render for MekuShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_active_loaded(cx);
+        self.evict_pictures(window, cx);
         self.ensure_naming_input(window, cx);
         self.ensure_title_input(window, cx);
         self.ensure_palette(window, cx);
@@ -2270,11 +2561,22 @@ impl Render for MekuShell {
                 0.0,
                 cx,
             ));
+        } else if let Some(modal) = self.render_update_modal(cx) {
+            root = root.child(theme::fade_in(
+                div().absolute().inset_0().child(modal),
+                "update-in",
+                140,
+                0.0,
+                cx,
+            ));
         } else if let Some(palette) = self.render_palette(cx) {
             root = root.child(palette);
         }
         if let Some(view) = self.render_lightbox(window, cx) {
             root = root.child(view);
+        }
+        if let Some(menu) = self.render_context_menu(cx) {
+            root = root.child(menu);
         }
         root
     }
@@ -2317,6 +2619,12 @@ fn apply_fonts(cx: &mut App) {
     if let Some(mono) = mono {
         theme.mono_font_family = mono;
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn main() {
@@ -2467,6 +2775,7 @@ fn main() {
                         shell.apply_startup_state(cx);
                     });
                 }
+                view.update(cx, |shell, cx| shell.check_for_updates(false, cx));
                 // First level on the window must be a Root.
                 cx.new(|cx| Root::new(view, window, cx))
             })
@@ -6864,5 +7173,379 @@ mod ui_tests {
         assert_eq!(image.bytes, PNG_1X1);
         let notice = view.read_with(&*cx, |s, _| s.notice.clone());
         assert_eq!(notice.as_deref(), Some("Image copied"));
+    }
+
+    #[test]
+    fn right_click_opens_a_menu_that_keeps_a_selection_and_escape_closes() {
+        run_ui_test("ctx_menu", ctx_menu_body);
+    }
+
+    fn ctx_menu_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "alpha beta\n\ngamma\n");
+        focus_doc_for(cx, &view, window);
+        select_doc_range(cx, &view, 0, 10);
+        step(cx, window, |_, _| {});
+        let open = |cx: &mut TestAppContext| view.read_with(&*cx, |s, _| s.doc_menu.is_some());
+        assert!(!open(cx));
+        step(cx, window, |w, cx| w.right_click(("doc-row", 0usize), cx));
+        step(cx, window, |_, _| {});
+        assert!(open(cx), "right-click opens the menu");
+        let sel = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                view.read_with(cx, |s, cx| {
+                    let rel = s.doc_rel().unwrap();
+                    s.buffers[&rel].read(cx).selection()
+                })
+            })
+        };
+        assert_eq!(sel(cx), 0..10, "a press on the selection keeps it");
+        step(cx, window, |w, cx| w.press("escape", cx));
+        cx.run_until_parked();
+        step(cx, window, |_, _| {});
+        assert!(!open(cx), "Escape closes it");
+
+        // Outside the selection the caret moves to the press, like any editor.
+        step(cx, window, |w, cx| w.right_click(("doc-row", 2usize), cx));
+        step(cx, window, |_, _| {});
+        assert!(open(cx));
+        assert!(sel(cx).is_empty(), "the old selection is gone");
+        let at = cx.update(|cx| {
+            view.read_with(cx, |s, cx| {
+                let rel = s.doc_rel().unwrap();
+                s.buffers[&rel].read(cx).caret()
+            })
+        });
+        assert!(at >= 12, "caret moved into the pressed row: {at}");
+    }
+
+    #[test]
+    fn menu_commands_remove_resize_and_insert() {
+        run_ui_test("ctx_menu_edits", ctx_menu_edits_body);
+    }
+
+    fn ctx_menu_edits_body(cx: &mut TestAppContext) {
+        let (view, window, dir) =
+            open_note_in(cx, 1200.0, 800.0, "intro\n\n![[pic.png]]\n\nafter\n");
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::fs::write(dir.path().join("attachments/pic.png"), PNG_1X1).unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |_, _| {});
+        let rel = PathBuf::from("doc.md");
+
+        // Right-clicking the picture opens its menu without revealing its source.
+        step(cx, window, |w, cx| w.right_click(("image-row", 2usize), cx));
+        step(cx, window, |_, _| {});
+        assert!(view.read_with(&*cx, |s, _| s.doc_menu.is_some()));
+        step(cx, window, |w, cx| w.press("escape", cx));
+
+        let token = 7..19;
+        cx.update(|cx| view.update(cx, |s, cx| s.resize_image(token.clone(), Some(240), cx)));
+        assert!(buffer_text(cx, &view, &rel).0.contains("![[pic.png|240]]"));
+        cx.update(|cx| view.update(cx, |s, cx| s.resize_image(7..23, None, cx)));
+        assert!(buffer_text(cx, &view, &rel).0.contains("![[pic.png]]"));
+
+        cx.update(|cx| view.update(cx, |s, cx| s.remove_image(token.clone(), cx)));
+        assert_eq!(buffer_text(cx, &view, &rel).0, "intro\n\nafter\n");
+        let notice = view.read_with(&*cx, |s, _| s.notice.clone());
+        assert!(notice.unwrap().contains("Undo"));
+        step(cx, window, |w, cx| w.press("ctrl-z", cx));
+        assert!(
+            buffer_text(cx, &view, &rel).0.contains("![[pic.png]]"),
+            "undo restores it"
+        );
+
+        // Blocks go on their own line.
+        move_doc_caret(cx, &view, 3);
+        cx.update(|cx| view.update(cx, |s, cx| s.insert_block("Divider", cx)));
+        let text = buffer_text(cx, &view, &rel).0;
+        assert!(text.starts_with("int\n---\nro"), "{text:?}");
+    }
+
+    #[test]
+    fn closing_a_tab_releases_the_note_unless_it_has_unsaved_changes() {
+        run_ui_test("prune_closed", prune_closed_body);
+    }
+
+    fn prune_closed_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "first\n");
+        std::fs::write(dir.path().join("b.md"), "second\n").unwrap();
+        cx.update(|cx| view.update(cx, |s, _| s.explorer.refresh()));
+        focus_doc_for(cx, &view, window);
+        let a = PathBuf::from("doc.md");
+        let b = PathBuf::from("b.md");
+        let loaded = |cx: &mut TestAppContext, rel: &PathBuf| {
+            view.read_with(&*cx, |s, _| s.buffers.contains_key(rel))
+        };
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&b, cx)));
+        step(cx, window, |_, _| {});
+        assert!(loaded(cx, &a) && loaded(cx, &b));
+
+        // A clean note is let go as soon as its tab closes ...
+        cx.update(|cx| view.update(cx, |s, cx| s.close_tab(0, cx)));
+        assert!(!loaded(cx, &a), "closed clean note is released");
+        assert!(loaded(cx, &b), "the shown note stays");
+
+        // ... a dirty one stays until it is saved, so no edit can be lost.
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&a, cx)));
+        step(cx, window, |w, cx| w.input("edited ", cx));
+        assert!(buffer_text(cx, &view, &a).1, "dirty after typing");
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                let ix = s
+                    .tabs
+                    .iter()
+                    .position(|t| t.rel.as_deref() == Some(a.as_path()))
+                    .unwrap();
+                s.close_tab(ix, cx)
+            })
+        });
+        assert!(loaded(cx, &a), "unsaved note is kept");
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.save_buffer(&a, cx);
+                s.prune_closed(cx);
+            })
+        });
+        assert!(!loaded(cx, &a), "saved note is released");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("doc.md")).unwrap(),
+            "edited first\n"
+        );
+
+        // Reopening reads it back from disk.
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&a, cx)));
+        assert!(buffer_text(cx, &view, &a).0.starts_with("edited first"));
+    }
+
+    #[test]
+    fn closing_a_note_drops_its_decoded_pictures() {
+        run_ui_test("evict_pictures", evict_pictures_body);
+    }
+
+    fn evict_pictures_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200.0, 800.0, "![[pic.png]]\n\ntext\n");
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::fs::write(dir.path().join("attachments/pic.png"), PNG_1X1).unwrap();
+        std::fs::write(dir.path().join("b.md"), "other\n").unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |_, _| {});
+        let cached = |cx: &mut TestAppContext| {
+            cx.update(|cx| view.read_with(cx, |s, cx| s.images.read(cx).len()))
+        };
+        let shown = cached(cx);
+        assert!(shown >= 1, "the shown picture is cached");
+
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&PathBuf::from("b.md"), cx)));
+        step(cx, window, |_, _| {});
+        assert_eq!(cached(cx), shown, "still cached while its note is open");
+        cx.update(|cx| view.update(cx, |s, cx| s.close_tab(0, cx)));
+        step(cx, window, |_, _| {});
+        assert!(cached(cx) < shown, "closing the note frees its picture");
+    }
+
+    #[test]
+    fn the_body_has_no_caret_while_the_title_is_being_typed() {
+        run_ui_test("title_caret", title_caret_body);
+    }
+
+    fn title_caret_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx);
+            });
+        });
+        for _ in 0..3 {
+            step(cx, window, |_, _| {});
+        }
+        let caret_drawn = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find("doc-caret").is_some()
+            })
+            .unwrap()
+        };
+        // The title has focus: the next line must not show a second caret.
+        assert!(!caret_drawn(cx), "no body caret while the title is focused");
+        cx.update_window(window, |_, w, cx| {
+            w.input("Plan", cx);
+        })
+        .unwrap();
+        assert!(!caret_drawn(cx), "still none while typing the name");
+        // Enter hands focus to the body, which then shows its caret.
+        cx.update_window(window, |_, w, cx| {
+            w.press("enter", cx);
+        })
+        .unwrap();
+        for _ in 0..3 {
+            step(cx, window, |_, _| {});
+        }
+        assert!(caret_drawn(cx), "the body caret appears after Enter");
+    }
+
+    #[test]
+    fn double_clicking_title_bar_buttons_does_not_maximize_the_window() {
+        run_ui_test("titlebar_buttons", titlebar_buttons_body);
+    }
+
+    fn titlebar_buttons_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (_view, window) = boot(cx);
+        step(cx, window, |_, _| {});
+        // The test window cannot zoom (`zoom_window` panics there), so any
+        // double click that reaches the title bar's own handler fails this.
+        for id in ["sidebar-toggle", "title-commands"] {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                if w.try_find(id).is_some() {
+                    w.double_click(id, cx);
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    fn sample_release(version: &str) -> crate::update::Release {
+        crate::update::Release {
+            version: version.to_string(),
+            page: format!("https://example.test/releases/v{version}"),
+            assets: vec![crate::update::Asset {
+                name: format!("meku_{version}_amd64.deb"),
+                url: format!("https://example.test/meku_{version}_amd64.deb"),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_found_update_shows_a_chip_that_opens_the_how_to_dialog() {
+        run_ui_test("update_chip", update_chip_body);
+    }
+
+    fn update_chip_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        step(cx, window, |_, _| {});
+        let has = |cx: &mut TestAppContext, id: &'static str| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find(id).is_some()
+            })
+            .unwrap()
+        };
+        assert!(
+            !has(cx, "status-update"),
+            "no chip before an update is found"
+        );
+
+        // A check that finds nothing newer stays quiet; a newer release shows the chip.
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release(crate::update::CURRENT)), false, cx)
+            })
+        });
+        assert!(!has(cx, "status-update"));
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release("99.0.0")), false, cx)
+            })
+        });
+        assert!(has(cx, "status-update"), "a newer release shows the chip");
+        assert!(
+            !has(cx, "update-dialog"),
+            "the automatic check does not pop a dialog up"
+        );
+
+        // The chip opens the dialog; Close hides it but keeps the chip.
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.click("status-update", cx);
+        })
+        .unwrap();
+        assert!(has(cx, "update-dialog"));
+        cx.update_window(window, |_, w, cx| {
+            w.click("update-close", cx);
+        })
+        .unwrap();
+        assert!(!has(cx, "update-dialog") && has(cx, "status-update"));
+
+        // Skipping hides the chip.
+        cx.update_window(window, |_, w, cx| {
+            w.click("status-update", cx);
+        })
+        .unwrap();
+        assert!(has(cx, "update-dialog"));
+        cx.update_window(window, |_, w, cx| {
+            w.click("update-skip", cx);
+        })
+        .unwrap();
+        assert!(!has(cx, "update-dialog") && !has(cx, "status-update"));
+    }
+
+    #[test]
+    fn turning_the_setting_off_removes_the_update_chip_and_manual_checks_still_answer() {
+        run_ui_test("update_off", update_off_body);
+    }
+
+    fn update_off_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release("99.0.0")), false, cx)
+            })
+        });
+        step(cx, window, |_, _| {});
+        let chip = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find("status-update").is_some()
+            })
+            .unwrap()
+        };
+        assert!(chip(cx));
+        cx.update(|cx| crate::theme::set_setting("check_updates", false.into(), cx))
+            .unwrap();
+        step(cx, window, |_, _| {});
+        assert!(
+            !chip(cx),
+            "the chip goes away when updates are switched off"
+        );
+        assert!(view.read_with(&*cx, |s, _| s.update.is_none()));
+
+        // A manual check says so when nothing is newer, and shows errors.
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release(crate::update::CURRENT)), true, cx)
+            })
+        });
+        let notice = view
+            .read_with(&*cx, |s, _| s.notice.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("up to date"), "{notice}");
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Err("Could not reach GitHub".into()), true, cx)
+            })
+        });
+        let notice = view
+            .read_with(&*cx, |s, _| s.notice.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("Could not reach"), "{notice}");
     }
 }
