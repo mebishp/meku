@@ -134,7 +134,7 @@ Meku is a native app, not a web page in a box, and it draws the screen on your g
   </tr>
 </table>
 
-**Good to know:** Meku looks for a new version once a day by asking GitHub for the public release list (nothing about you or your notes is sent), and tells you how to update for the way you installed it. Turn it off in the settings under **Check for updates**, and Meku never goes online. You can also run **Check for updates** from the command palette.  on Linux with Wayland (GNOME, for example), copying a picture out of Meku needs `xclip` or `wl-clipboard` installed. Pasting works everywhere.  Meku notices when a note is changed by another program while it is open, and it never renames or rewrites your files behind your back.
+**Good to know:** Right-click in a note for formatting on a selection, paragraph styles, inserting blocks, link actions, and for pictures: copy, show in file manager, resize or remove from the note.  Meku looks for a new version once a day by asking GitHub for the public release list (nothing about you or your notes is sent), and tells you how to update for the way you installed it. Turn it off in the settings under **Check for updates**, and Meku never goes online. You can also run **Check for updates** from the command palette.  on Linux with Wayland (GNOME, for example), copying a picture out of Meku needs `xclip` or `wl-clipboard` installed. Pasting works everywhere.  Meku notices when a note is changed by another program while it is open, and it never renames or rewrites your files behind your back.
 
 **Not in this first version:** links between notes, plugins and sync.
 

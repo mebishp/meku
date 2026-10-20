@@ -4,6 +4,7 @@
 mod chrome;
 mod clipboard;
 mod config;
+mod context_menu;
 mod document;
 mod explorer;
 mod find;
@@ -217,6 +218,9 @@ pub struct MekuShell {
     /// The "update available" dialog is open.
     update_open: bool,
     update_checking: bool,
+    /// The right-click menu of the document, while open.
+    doc_menu: Option<context_menu::DocMenu>,
+    doc_menu_serial: usize,
     notice: Option<String>,
     /// Caret blink phase and the last keystroke/click (blink holds solid
     /// for 600ms after input).
@@ -310,6 +314,8 @@ impl MekuShell {
             update: None,
             update_open: false,
             update_checking: false,
+            doc_menu: None,
+            doc_menu_serial: 0,
             notice: None,
             caret_on: true,
             caret_touch: Instant::now(),
@@ -1769,7 +1775,18 @@ impl MekuShell {
         }
     }
 
-    fn on_cancel_overlay(&mut self, _: &CancelOverlay, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_cancel_overlay(
+        &mut self,
+        _: &CancelOverlay,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.doc_menu.take().is_some() {
+            let focus = self.focus_handle.clone();
+            window.focus(&focus, cx);
+            cx.notify();
+            return;
+        }
         if self.close_lightbox(cx) {
             return;
         }
@@ -2497,6 +2514,9 @@ impl Render for MekuShell {
         }
         if let Some(view) = self.render_lightbox(window, cx) {
             root = root.child(view);
+        }
+        if let Some(menu) = self.render_context_menu(cx) {
+            root = root.child(menu);
         }
         root
     }
@@ -7093,6 +7113,98 @@ mod ui_tests {
         assert_eq!(image.bytes, PNG_1X1);
         let notice = view.read_with(&*cx, |s, _| s.notice.clone());
         assert_eq!(notice.as_deref(), Some("Image copied"));
+    }
+
+    #[test]
+    fn right_click_opens_a_menu_that_keeps_a_selection_and_escape_closes() {
+        run_ui_test("ctx_menu", ctx_menu_body);
+    }
+
+    fn ctx_menu_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1200.0, 800.0, "alpha beta\n\ngamma\n");
+        focus_doc_for(cx, &view, window);
+        select_doc_range(cx, &view, 0, 10);
+        step(cx, window, |_, _| {});
+        let open = |cx: &mut TestAppContext| view.read_with(&*cx, |s, _| s.doc_menu.is_some());
+        assert!(!open(cx));
+        step(cx, window, |w, cx| w.right_click(("doc-row", 0usize), cx));
+        step(cx, window, |_, _| {});
+        assert!(open(cx), "right-click opens the menu");
+        let sel = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                view.read_with(cx, |s, cx| {
+                    let rel = s.doc_rel().unwrap();
+                    s.buffers[&rel].read(cx).selection()
+                })
+            })
+        };
+        assert_eq!(sel(cx), 0..10, "a press on the selection keeps it");
+        step(cx, window, |w, cx| w.press("escape", cx));
+        cx.run_until_parked();
+        step(cx, window, |_, _| {});
+        assert!(!open(cx), "Escape closes it");
+
+        // Outside the selection the caret moves to the press, like any editor.
+        step(cx, window, |w, cx| w.right_click(("doc-row", 2usize), cx));
+        step(cx, window, |_, _| {});
+        assert!(open(cx));
+        assert!(sel(cx).is_empty(), "the old selection is gone");
+        let at = cx.update(|cx| {
+            view.read_with(cx, |s, cx| {
+                let rel = s.doc_rel().unwrap();
+                s.buffers[&rel].read(cx).caret()
+            })
+        });
+        assert!(at >= 12, "caret moved into the pressed row: {at}");
+    }
+
+    #[test]
+    fn menu_commands_remove_resize_and_insert() {
+        run_ui_test("ctx_menu_edits", ctx_menu_edits_body);
+    }
+
+    fn ctx_menu_edits_body(cx: &mut TestAppContext) {
+        let (view, window, dir) =
+            open_note_in(cx, 1200.0, 800.0, "intro\n\n![[pic.png]]\n\nafter\n");
+        std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+        std::fs::write(dir.path().join("attachments/pic.png"), PNG_1X1).unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |_, _| {});
+        let rel = PathBuf::from("doc.md");
+
+        // Right-clicking the picture opens its menu without revealing its source.
+        step(cx, window, |w, cx| w.right_click(("image-row", 2usize), cx));
+        step(cx, window, |_, _| {});
+        assert!(view.read_with(&*cx, |s, _| s.doc_menu.is_some()));
+        step(cx, window, |w, cx| w.press("escape", cx));
+
+        let token = 7..19;
+        cx.update(|cx| view.update(cx, |s, cx| s.resize_image(token.clone(), Some(240), cx)));
+        assert!(buffer_text(cx, &view, &rel).0.contains("![[pic.png|240]]"));
+        cx.update(|cx| view.update(cx, |s, cx| s.resize_image(7..23, None, cx)));
+        assert!(buffer_text(cx, &view, &rel).0.contains("![[pic.png]]"));
+
+        cx.update(|cx| view.update(cx, |s, cx| s.remove_image(token.clone(), cx)));
+        assert_eq!(buffer_text(cx, &view, &rel).0, "intro\n\nafter\n");
+        let notice = view.read_with(&*cx, |s, _| s.notice.clone());
+        assert!(notice.unwrap().contains("Undo"));
+        step(cx, window, |w, cx| w.press("ctrl-z", cx));
+        assert!(
+            buffer_text(cx, &view, &rel).0.contains("![[pic.png]]"),
+            "undo restores it"
+        );
+
+        // Blocks go on their own line.
+        move_doc_caret(cx, &view, 3);
+        cx.update(|cx| view.update(cx, |s, cx| s.insert_block("Divider", cx)));
+        let text = buffer_text(cx, &view, &rel).0;
+        assert!(text.starts_with("int\n---\nro"), "{text:?}");
     }
 
     #[test]

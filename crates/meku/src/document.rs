@@ -32,6 +32,7 @@ use meku_table::Align;
 
 use crate::MekuShell;
 use crate::Mode;
+use crate::context_menu::Target;
 
 /// Per-row syntax spans in line-content byte offsets (`None` = plain).
 pub(crate) type RowSpans = Vec<Option<meku_markdown::highlight::SharedSpans>>;
@@ -461,6 +462,16 @@ impl MekuShell {
             // end of the note when it is below all of it.
             let margin_shell = shell.clone();
             let last = ix + 1 == rows.len();
+            let margin_menu = shell.clone();
+            item = item.on_mouse_down(
+                MouseButton::Right,
+                move |ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    margin_menu.update(cx, |view, cx| {
+                        view.open_doc_menu(Target::Text(Some(ix)), ev.position, window, cx)
+                    });
+                },
+            );
             item = item.on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 margin_shell.update(cx, |view, cx| {
@@ -527,6 +538,14 @@ impl MekuShell {
                     });
                 }
             })
+            .on_mouse_down(MouseButton::Right, {
+                let shell = cx.entity();
+                move |ev: &MouseDownEvent, window, cx| {
+                    shell.update(cx, |view, cx| {
+                        view.open_doc_menu(Target::Text(None), ev.position, window, cx)
+                    });
+                }
+            })
             .child(input_bridge)
             .child(list_body)
             .child(self.row_estimates(hint))
@@ -565,7 +584,7 @@ impl MekuShell {
 
     /// Source byte offset for a point hit on row `ix`. Rows without a text
     /// layout (blank rules, spacers) resolve to their start.
-    fn row_source(&self, ix: usize, pos: Point<Pixels>) -> Option<usize> {
+    pub(crate) fn row_source(&self, ix: usize, pos: Point<Pixels>) -> Option<usize> {
         let views = self.doc_views.borrow();
         if let Some(Some(view)) = views.get(ix) {
             let idx = match view.layout.index_for_position(pos) {
@@ -2433,6 +2452,7 @@ fn row_element(
     let base_font = window.text_style().font_size.to_pixels(window.rem_size());
     let down_shell = shell.clone();
     let drag_shell = shell.clone();
+    let menu_shell = shell.clone();
     let row_div = div()
         .id(("doc-row", ix))
         .test_support()
@@ -2451,6 +2471,15 @@ fn row_element(
                 view.doc_pointer(ix, ev.position, ev.modifiers.shift, ev.click_count, cx);
             });
         })
+        .on_mouse_down(
+            MouseButton::Right,
+            move |ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                menu_shell.update(cx, |view, cx| {
+                    view.open_doc_menu(Target::Text(Some(ix)), ev.position, window, cx)
+                });
+            },
+        )
         .on_mouse_move(move |ev: &MouseMoveEvent, _window, cx| {
             if ev.pressed_button == Some(MouseButton::Left) {
                 drag_shell.update(cx, |view, cx| view.doc_drag(ix, ev.position, cx));
@@ -2534,12 +2563,15 @@ fn row_element(
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
         }
-        let row_h = base_font * 1.1;
-        let mut el = row_div.h(row_h);
-        // Empty lines still need a caret: without one the cursor visibly
-        // vanishes whenever the user creates a new line. Approximate the
-        // text rows' glyph centering: the glyph box (~1em) sits centered in
-        // the 1.1em row, so offset it by the slack.
+        // The line the caret sits on is as tall as a text line, so typing the
+        // first character does not make the row (and everything below) jump.
+        let line_h = window.text_style().line_height_in_pixels(window.rem_size());
+        let row_h = if caret.is_some() {
+            line_h.max(base_font * 1.1)
+        } else {
+            base_font * 1.1
+        };
+        let mut el = row_div.h(row_h).text_size(base_font);
         // A brand-new note says how to begin.
         if text.is_empty() && ix == 0 {
             el = el.child(
@@ -2552,13 +2584,13 @@ fn row_element(
             );
         }
         if caret.is_some() && caret_on {
-            el = el.child(caret_element(
-                px(0.),
-                (row_h - base_font) / 2.0,
-                base_font,
-                base_font,
-                cx.theme().caret,
-            ));
+            // Same caret box a text row gets: shape one space so the height
+            // and vertical offset match the glyphs typed here next.
+            let style = window.text_style();
+            let runs = [style.to_run(1)];
+            let (y, h) = caret_geometry(window, " ", &runs, base_font, 0, None)
+                .map_or(((row_h - base_font) / 2.0, base_font), |(_, y, h)| (y, h));
+            el = el.child(caret_element(px(0.), y, h, base_font, cx.theme().caret));
         }
         return el.into_any_element();
     }
@@ -2889,6 +2921,8 @@ fn image_row_element(
     for (k, info) in images.into_iter().enumerate() {
         let (fw, fh) = image_frame_size(&info, avail, max_h);
         let open = info.clone();
+        let menu_info = info.clone();
+        let menu_shell = shell.clone();
         let shell = shell.clone();
         let id: ElementId = if k == 0 {
             ("image-row", ix).into()
@@ -2907,6 +2941,16 @@ fn image_row_element(
             .cursor_pointer()
             .hover(move |s| s.border_color(hover_border))
             // A press on the picture zooms it; it must not move the caret.
+            .on_mouse_down(
+                MouseButton::Right,
+                move |ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let info = menu_info.clone();
+                    menu_shell.update(cx, |view, cx| {
+                        view.open_doc_menu(Target::Image(info), ev.position, window, cx)
+                    });
+                },
+            )
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 cx.stop_propagation();
                 if !zoomable {
