@@ -942,7 +942,9 @@ fn group_of(key: &str) -> &'static str {
         "caret_blink" | "caret_blink_ms" => "Caret",
         "autosave" | "autosave_delay_ms" => "Saving",
         "new_note_folder" | "attachments_folder" => "Folders",
-        "confirm_delete" | "reopen_last_mekuto" | "restore_session" => "Behaviour",
+        "confirm_delete" | "reopen_last_mekuto" | "restore_session" | "check_updates" => {
+            "Behaviour"
+        }
         _ => "",
     }
 }

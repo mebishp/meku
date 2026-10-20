@@ -187,6 +187,7 @@ impl MekuShell {
             || self.palette_open()
             || self.lightbox.is_some()
             || self.settings.is_some()
+            || self.update_open
     }
 
     /// Relative path of the note shown by the active tab, when it has a buffer.

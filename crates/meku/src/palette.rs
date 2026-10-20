@@ -74,6 +74,7 @@ pub(crate) enum Command {
     ZoomReset,
     ShortcutsHelp,
     OpenSettings,
+    CheckForUpdates,
 }
 
 /// `(command, title, shortcut)` in the order shown for an empty query.
@@ -103,6 +104,7 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::ZoomReset, "Reset zoom", "Ctrl Alt 0"),
     (Command::OpenSettings, "Open settings", "Ctrl ,"),
     (Command::ShortcutsHelp, "Keyboard shortcuts", ""),
+    (Command::CheckForUpdates, "Check for updates", ""),
 ];
 
 #[derive(Clone)]
@@ -568,6 +570,10 @@ impl MekuShell {
             Command::ZoomReset => theme::set_zoom(None, cx),
             Command::OpenSettings => self.open_settings(None, window, cx),
             Command::ShortcutsHelp => self.open_palette(PaletteKind::Shortcuts, cx),
+            Command::CheckForUpdates => {
+                self.close_palette(false, cx);
+                self.check_for_updates(true, cx);
+            }
             Command::ToggleReduceMotion => {
                 let on = !theme::cfg(cx).bool("reduce_motion");
                 let _ = theme::set_setting("reduce_motion", on.into(), cx);

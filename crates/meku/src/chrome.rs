@@ -1133,6 +1133,34 @@ impl MekuShell {
         };
 
         let mut right = h_flex().gap_4().items_center();
+        // A newer release is out: one quiet chip that opens how to update.
+        if let Some(release) = self.update.as_ref() {
+            let update_shell = cx.entity();
+            let accent = theme::accent_alpha(cx, 1.0);
+            let hover = cx.theme().list_hover;
+            right = right.child(
+                h_flex()
+                    .id("status-update")
+                    .test_support()
+                    .gap_1()
+                    .px_1()
+                    .items_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(accent)
+                    .hover(move |s| s.bg(hover))
+                    .tooltip(|window, cx| {
+                        Tooltip::new("A new version is available").build(window, cx)
+                    })
+                    .child(format!("Update {} available", release.version))
+                    .on_click(move |_, _, cx| {
+                        update_shell.update(cx, |v, cx| {
+                            v.update_open = true;
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
         if let Some(words) = words {
             let hover = cx.theme().list_hover;
             let goto_shell = cx.entity();

@@ -14,6 +14,7 @@ mod settings_page;
 mod slash;
 mod smooth;
 mod theme;
+mod update;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -211,6 +212,11 @@ pub struct MekuShell {
     naming_input: Option<Entity<InputState>>,
     _naming_sub: Option<Subscription>,
     pending_delete: Option<PathBuf>,
+    /// A newer release than the running version, once one has been found.
+    update: Option<update::Release>,
+    /// The "update available" dialog is open.
+    update_open: bool,
+    update_checking: bool,
     notice: Option<String>,
     /// Caret blink phase and the last keystroke/click (blink holds solid
     /// for 600ms after input).
@@ -301,6 +307,9 @@ impl MekuShell {
             naming_input: None,
             _naming_sub: None,
             pending_delete: None,
+            update: None,
+            update_open: false,
+            update_checking: false,
             notice: None,
             caret_on: true,
             caret_touch: Instant::now(),
@@ -1764,6 +1773,10 @@ impl MekuShell {
         if self.close_lightbox(cx) {
             return;
         }
+        if std::mem::take(&mut self.update_open) {
+            cx.notify();
+            return;
+        }
         if self.slash_dismiss() {
             cx.notify();
         } else if self.palette_open() || self.naming.is_some() || self.pending_delete.is_some() {
@@ -1837,6 +1850,10 @@ impl MekuShell {
             self.sidebar_auto_hidden = false;
         }
         self.sidebar_setting = sidebar;
+        if !c.bool("check_updates") {
+            self.update = None;
+            self.update_open = false;
+        }
         apply_fonts(cx);
         for buffer in self.buffers.values() {
             buffer.update(cx, |b, _| b.auto_close = c.bool("auto_close_pairs"));
@@ -2040,6 +2057,203 @@ impl MekuShell {
                                 ),
                         ),
                 )
+                .into_any_element(),
+        )
+    }
+
+    // -- update check ---------------------------------------------------
+
+    /// Look for a newer release. The automatic check (`manual == false`) runs
+    /// only when the setting is on and at most once a day; the "Check for
+    /// updates" command always runs and always answers.
+    pub(crate) fn check_for_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if self.update_checking {
+            return;
+        }
+        if !manual {
+            let day = 24 * 60 * 60;
+            let recent = config::state_value("last_update_check")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|at| unix_now().saturating_sub(at) < day);
+            if !theme::cfg(cx).bool("check_updates") || !theme::state(cx).persists() || recent {
+                return;
+            }
+        }
+        self.update_checking = true;
+        if manual {
+            self.notice = Some("Looking for updates…".into());
+            cx.notify();
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async { update::fetch_latest() }).await;
+            if let Some(view) = this.upgrade() {
+                view.update(cx, |shell, cx| {
+                    shell.finish_update_check(result, manual, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn finish_update_check(
+        &mut self,
+        result: Result<update::Release, String>,
+        manual: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_checking = false;
+        if theme::state(cx).persists() && result.is_ok() {
+            config::set_state_value("last_update_check", unix_now().into());
+        }
+        match result {
+            Ok(release) if update::is_newer(&release.version, update::CURRENT) => {
+                let skipped =
+                    config::state_value("skip_update").and_then(|v| v.as_str().map(str::to_string));
+                if manual || skipped.as_deref() != Some(release.version.as_str()) {
+                    self.notice = None;
+                    self.update = Some(release);
+                    self.update_open = manual;
+                }
+            }
+            Ok(_) => {
+                if manual {
+                    self.notice = Some(format!("Meku {} is up to date", update::CURRENT));
+                }
+            }
+            Err(message) => {
+                if manual {
+                    self.notice = Some(message);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Hide the found update and do not mention this version again.
+    fn skip_update(&mut self, cx: &mut Context<Self>) {
+        if let Some(release) = self.update.take()
+            && theme::state(cx).persists()
+        {
+            config::set_state_value("skip_update", release.version.into());
+        }
+        self.update_open = false;
+        cx.notify();
+    }
+
+    fn render_update_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.update_open {
+            return None;
+        }
+        let release = self.update.clone()?;
+        let howto = update::how_to_update(
+            update::detect_source(),
+            &release,
+            update::appimage_path().as_deref(),
+        );
+        let shell = cx.entity();
+        let (close_shell, skip_shell) = (shell.clone(), shell);
+        let page = release.page.clone();
+        let theme_colors = cx.theme();
+        let (muted, border, field) = (
+            theme_colors.muted_foreground,
+            theme_colors.border,
+            theme_colors.secondary,
+        );
+        let mut card = div()
+            .id("update-dialog")
+            .test_support()
+            .w(px(520.))
+            .max_w_full()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .bg(theme_colors.background)
+            .p_4()
+            .gap_3()
+            .flex()
+            .flex_col()
+            .text_color(theme_colors.foreground)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Meku {} is available", release.version)),
+            )
+            .child(div().text_sm().text_color(muted).child(format!(
+                "You have {}. You installed Meku as: {}.",
+                update::CURRENT,
+                howto.installed_as
+            )));
+        for (i, step) in howto.steps.iter().enumerate() {
+            card = card.child(div().text_sm().child(format!("{}. {step}", i + 1)));
+        }
+        if let Some(command) = howto.command.clone() {
+            card =
+                card.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .id("update-command")
+                                .test_support()
+                                .flex_1()
+                                .min_w_0()
+                                .px_2()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(field)
+                                .text_xs()
+                                .font_family("monospace")
+                                .child(command.clone()),
+                        )
+                        .child(Button::new("update-copy").label("Copy").on_click(
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                            },
+                        )),
+                );
+        }
+        card = card.child(
+            h_flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    Button::new("update-skip")
+                        .label("Skip this version")
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            skip_shell.update(cx, |v, cx| v.skip_update(cx));
+                        }),
+                )
+                .child(
+                    Button::new("update-notes")
+                        .label("Release page")
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            cx.open_url(&page);
+                        }),
+                )
+                .child(
+                    Button::new("update-close")
+                        .label("Close")
+                        .on_click(move |_, _, cx| {
+                            close_shell.update(cx, |v, cx| {
+                                v.update_open = false;
+                                cx.notify();
+                            });
+                        }),
+                ),
+        );
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().absolute().inset_0().bg(theme::scrim(cx)))
+                .child(card)
                 .into_any_element(),
         )
     }
@@ -2270,6 +2484,14 @@ impl Render for MekuShell {
                 0.0,
                 cx,
             ));
+        } else if let Some(modal) = self.render_update_modal(cx) {
+            root = root.child(theme::fade_in(
+                div().absolute().inset_0().child(modal),
+                "update-in",
+                140,
+                0.0,
+                cx,
+            ));
         } else if let Some(palette) = self.render_palette(cx) {
             root = root.child(palette);
         }
@@ -2317,6 +2539,12 @@ fn apply_fonts(cx: &mut App) {
     if let Some(mono) = mono {
         theme.mono_font_family = mono;
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn main() {
@@ -2467,6 +2695,7 @@ fn main() {
                         shell.apply_startup_state(cx);
                     });
                 }
+                view.update(cx, |shell, cx| shell.check_for_updates(false, cx));
                 // First level on the window must be a Root.
                 cx.new(|cx| Root::new(view, window, cx))
             })
@@ -6928,5 +7157,135 @@ mod ui_tests {
             })
             .unwrap();
         }
+    }
+
+    fn sample_release(version: &str) -> crate::update::Release {
+        crate::update::Release {
+            version: version.to_string(),
+            page: format!("https://example.test/releases/v{version}"),
+            assets: vec![crate::update::Asset {
+                name: format!("meku_{version}_amd64.deb"),
+                url: format!("https://example.test/meku_{version}_amd64.deb"),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_found_update_shows_a_chip_that_opens_the_how_to_dialog() {
+        run_ui_test("update_chip", update_chip_body);
+    }
+
+    fn update_chip_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        step(cx, window, |_, _| {});
+        let has = |cx: &mut TestAppContext, id: &'static str| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find(id).is_some()
+            })
+            .unwrap()
+        };
+        assert!(
+            !has(cx, "status-update"),
+            "no chip before an update is found"
+        );
+
+        // A check that finds nothing newer stays quiet; a newer release shows the chip.
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release(crate::update::CURRENT)), false, cx)
+            })
+        });
+        assert!(!has(cx, "status-update"));
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release("99.0.0")), false, cx)
+            })
+        });
+        assert!(has(cx, "status-update"), "a newer release shows the chip");
+        assert!(
+            !has(cx, "update-dialog"),
+            "the automatic check does not pop a dialog up"
+        );
+
+        // The chip opens the dialog; Close hides it but keeps the chip.
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.click("status-update", cx);
+        })
+        .unwrap();
+        assert!(has(cx, "update-dialog"));
+        cx.update_window(window, |_, w, cx| {
+            w.click("update-close", cx);
+        })
+        .unwrap();
+        assert!(!has(cx, "update-dialog") && has(cx, "status-update"));
+
+        // Skipping hides the chip.
+        cx.update_window(window, |_, w, cx| {
+            w.click("status-update", cx);
+        })
+        .unwrap();
+        assert!(has(cx, "update-dialog"));
+        cx.update_window(window, |_, w, cx| {
+            w.click("update-skip", cx);
+        })
+        .unwrap();
+        assert!(!has(cx, "update-dialog") && !has(cx, "status-update"));
+    }
+
+    #[test]
+    fn turning_the_setting_off_removes_the_update_chip_and_manual_checks_still_answer() {
+        run_ui_test("update_off", update_off_body);
+    }
+
+    fn update_off_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release("99.0.0")), false, cx)
+            })
+        });
+        step(cx, window, |_, _| {});
+        let chip = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find("status-update").is_some()
+            })
+            .unwrap()
+        };
+        assert!(chip(cx));
+        cx.update(|cx| crate::theme::set_setting("check_updates", false.into(), cx))
+            .unwrap();
+        step(cx, window, |_, _| {});
+        assert!(
+            !chip(cx),
+            "the chip goes away when updates are switched off"
+        );
+        assert!(view.read_with(&*cx, |s, _| s.update.is_none()));
+
+        // A manual check says so when nothing is newer, and shows errors.
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Ok(sample_release(crate::update::CURRENT)), true, cx)
+            })
+        });
+        let notice = view
+            .read_with(&*cx, |s, _| s.notice.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("up to date"), "{notice}");
+        cx.update(|cx| {
+            view.update(cx, |s, cx| {
+                s.finish_update_check(Err("Could not reach GitHub".into()), true, cx)
+            })
+        });
+        let notice = view
+            .read_with(&*cx, |s, _| s.notice.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("Could not reach"), "{notice}");
     }
 }
