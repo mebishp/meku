@@ -1215,6 +1215,9 @@ impl MekuShell {
                 let text = buffer.read(cx).selected_text();
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
+                } else if let Some(path) = self.image_under_caret(&rel, cx) {
+                    // Nothing selected on an image line: copy the picture.
+                    self.copy_image_file(&path, cx);
                 }
                 false
             }
@@ -1230,6 +1233,13 @@ impl MekuShell {
             }
             DocKey::Paste => {
                 let clip = cx.read_from_clipboard();
+                // Picture files copied in a file manager: copy them into the
+                // attachments folder and link them in.
+                if let Some(files) = clip.as_ref().and_then(crate::clipboard::image_files) {
+                    self.on_drop_paths(&files, cx);
+                    self.doc_note_edit(&rel);
+                    return;
+                }
                 match clip.as_ref().and_then(|item| item.text()) {
                     Some(text) => {
                         buffer.update(cx, |b, _| b.paste(&text));
@@ -1307,6 +1317,31 @@ impl MekuShell {
         {
             buffer.update(cx, |b, _| b.move_caret(at, false));
         }
+        cx.notify();
+    }
+
+    /// The local picture on the caret's line, when that line is an image.
+    fn image_under_caret(&mut self, rel: &Path, cx: &App) -> Option<PathBuf> {
+        let caret = self.buffers.get(rel)?.read(cx).caret();
+        let model = self.doc_model(rel, cx)?;
+        let ix = row_at(&model.rows, caret);
+        model
+            .images
+            .get(ix)?
+            .as_ref()?
+            .iter()
+            .find_map(|info| match &info.src {
+                ImageSrc::Path(path) if path.is_file() => Some(path.clone()),
+                _ => None,
+            })
+    }
+
+    /// Copy a picture file to the system clipboard and say how it went.
+    pub(crate) fn copy_image_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.notice = Some(match crate::clipboard::copy_image(path, cx) {
+            Ok(()) => "Image copied".to_string(),
+            Err(e) => e,
+        });
         cx.notify();
     }
 
@@ -1424,7 +1459,11 @@ impl MekuShell {
                 let Some(buffer) = self.buffers.get(&rel).cloned() else {
                     continue;
                 };
-                let dir = rel.parent().unwrap_or(Path::new("")).join("attachments");
+                let folder = crate::theme::cfg(cx)
+                    .str("attachments_folder")
+                    .trim_matches('/')
+                    .to_string();
+                let dir = rel.parent().unwrap_or(Path::new("")).join(folder);
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
                 let mut file = name.clone();
                 let mut n = 1;

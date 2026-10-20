@@ -115,7 +115,13 @@ impl MekuShell {
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
                 .on_click(move |_, window, cx| on(window, cx))
         };
-        let (zi, zo, zf, zc) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
+        let (zi, zo, zf, zc, zy) = (
+            shell.clone(),
+            shell.clone(),
+            shell.clone(),
+            shell.clone(),
+            shell.clone(),
+        );
         let percent = shown_scale.map(|s| format!("{}%", (s * 100.0).round() as u32));
         let mut controls = h_flex().gap_1().items_center();
         if let Some(p) = percent {
@@ -172,6 +178,14 @@ impl MekuShell {
                                     v.lightbox_zoom = None;
                                     cx.notify();
                                 });
+                            }),
+                        ))
+                        .child(button(
+                            "lightbox-copy",
+                            Ico::Copy,
+                            "Copy image",
+                            Box::new(move |_, cx| {
+                                zy.update(cx, |v, cx| v.copy_lightbox_image(cx));
                             }),
                         ))
                         .child(button(
@@ -244,5 +258,22 @@ impl MekuShell {
             .child(bar);
         let _ = cx.theme();
         Some(crate::theme::fade_in(root, "lightbox-in", 160, 0.0, cx))
+    }
+}
+
+impl MekuShell {
+    /// Copy the picture shown in the zoom view to the clipboard.
+    pub(crate) fn copy_lightbox_image(&mut self, cx: &mut Context<Self>) {
+        let path = self.lightbox.as_ref().and_then(|info| match &info.src {
+            crate::document::ImageSrc::Path(p) => Some(p.clone()),
+            crate::document::ImageSrc::Url(_) => None,
+        });
+        match path {
+            Some(path) => self.copy_image_file(&path, cx),
+            None => {
+                self.notice = Some("Only images saved in the folder can be copied".into());
+                cx.notify();
+            }
+        }
     }
 }

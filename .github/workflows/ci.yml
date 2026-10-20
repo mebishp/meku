@@ -1,11 +1,20 @@
 name: CI
 
+# Checks (no packaging) on Linux, macOS and Windows for every push.
+# Packages are only built by the Release workflow, when a version tag is pushed.
 on:
   push:
-  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  linux:
+    name: Linux (fmt, clippy, check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,5 +39,29 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: check
+        run: cargo check --workspace --message-format short
+
+  macos:
+    name: macOS (check)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+      - name: check
+        run: cargo check --workspace --message-format short
+
+  windows:
+    name: Windows (check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
       - name: check
         run: cargo check --workspace --message-format short

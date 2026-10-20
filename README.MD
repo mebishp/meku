@@ -121,7 +121,7 @@ Meku is a native app, not a web page in a box, and it draws the screen on your g
   <tr>
     <td width="33%" valign="top">
       <h4>✍️ Writing</h4>
-      Live preview, Edit and Read views · headings, bold, italic, strikethrough, highlights and inline code · bullet, numbered and task lists · tables · callouts · code blocks with colours · images (paste or drop them in) · a <code>/</code> menu for quick inserts · find and replace · go to line · autosave
+      Live preview, Edit and Read views · headings, bold, italic, strikethrough, highlights and inline code · bullet, numbered and task lists · tables · callouts · code blocks with colours · images (paste a screenshot, paste picture files from your file manager, or drop them in; copy a picture out with `Ctrl+C` on its line) · a <code>/</code> menu for quick inserts · find and replace · go to line · autosave
     </td>
     <td width="33%" valign="top">
       <h4>🗂️ Organising</h4>
@@ -134,7 +134,7 @@ Meku is a native app, not a web page in a box, and it draws the screen on your g
   </tr>
 </table>
 
-**Good to know:** Meku notices when a note is changed by another program while it is open, and it never renames or rewrites your files behind your back.
+**Good to know:** on Linux with Wayland (GNOME, for example), copying a picture out of Meku needs `xclip` or `wl-clipboard` installed. Pasting works everywhere.  Meku notices when a note is changed by another program while it is open, and it never renames or rewrites your files behind your back.
 
 **Not in this first version:** links between notes, plugins and sync.
 
@@ -146,10 +146,10 @@ Download the file for your system from the [latest release](https://github.com/m
 |---|---|---|
 | macOS (Apple silicon) | `.dmg` | Open it and drag Meku to Applications |
 | Windows (64-bit) | `.zip` | Unzip it and run `Meku.exe` |
-| Ubuntu, Debian | `.deb` | `sudo apt install ./meku_1.0.1_amd64.deb` |
-| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.1-1-x86_64.pkg.tar.zst` |
-| Any Linux | `.AppImage` | Make it executable, then run it |
-| Any Linux | `.tar.gz` | Unpack it and run `meku` |
+| Ubuntu 22.04+, Debian 12+ | `.deb` | `sudo apt install ./meku_1.0.2_amd64.deb` |
+| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.2-1-x86_64.pkg.tar.zst` |
+| Any Linux (glibc 2.35+) | `.AppImage` | Make it executable, then run it |
+| Any Linux (glibc 2.35+) | `.tar.gz` | Unpack it and run `meku` (`INSTALL.txt` lists what to install) |
 
 Meku needs a graphics card driver with modern graphics support (Vulkan on Linux,
 Metal on macOS, DirectX on Windows), which most computers already have. Intel Macs
