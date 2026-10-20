@@ -319,7 +319,7 @@ impl MekuShell {
     pub(crate) fn render_document(
         &mut self,
         rel: &Path,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(model) = self.doc_model(rel, cx) else {
@@ -338,7 +338,7 @@ impl MekuShell {
         let count = model.rows.len();
         // Unmeasured rows count as zero height to the scroll bar, so give
         // every row an estimate; real heights replace it as rows are drawn.
-        let line_h = f32::from(_window.line_height()) * crate::theme::zoom(cx);
+        let line_h = f32::from(window.line_height()) * crate::theme::zoom(cx);
         let hint = px(estimated_row_height(&model.rows, line_h));
         let old_count = self.doc_list.item_count();
         if self.doc_list_rel.as_deref() != Some(rel) {
@@ -393,9 +393,12 @@ impl MekuShell {
         let title_input = self.title_inputs.get(rel).cloned();
         let reveal_pref = Reveal::of(cx);
         let column_em = column_em(cx);
+        // While the title field has focus the typing goes there, so the body
+        // must not draw a caret of its own on the first line.
+        let title_has_focus = self.title_focused(window, cx);
         let list_body = list(self.doc_list.clone(), move |ix, window, cx| {
             let row = &rows[ix];
-            let is_caret_row = mode != Mode::Read && ix == active;
+            let is_caret_row = mode != Mode::Read && ix == active && !title_has_focus;
             let reveal = row_is_revealed_with(reveal_pref, mode, row, ix, active, &selection);
             let base = window.text_style().font_size.to_pixels(window.rem_size());
             let el = row_element(
@@ -532,7 +535,7 @@ impl MekuShell {
             ))
             .vertical_scrollbar(&DocBar(self.doc_list.clone()))
             .children(self.render_find_bar(cx))
-            .pipe_fade(rel, cx)
+            .pipe_fade(buffer.entity_id(), cx)
     }
     /// The list forgets its row-height estimates whenever its width changes
     /// (and on its first layout), which leaves the scroll bar with only the
@@ -2084,12 +2087,14 @@ pub(crate) fn row_is_revealed_with(
 
 /// Short fade when a note becomes the visible one (tab switch, open).
 trait OpenFade: Sized {
-    fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement;
+    fn pipe_fade(self, note: EntityId, cx: &App) -> AnyElement;
 }
 
 impl<E: IntoElement + Styled + 'static> OpenFade for E {
-    fn pipe_fade(self, rel: &Path, cx: &App) -> AnyElement {
-        let id = SharedString::from(format!("doc-open-{}", rel.display()));
+    fn pipe_fade(self, note: EntityId, cx: &App) -> AnyElement {
+        // Keyed by the note's buffer, which survives a rename, so renaming
+        // the open note does not replay the fade.
+        let id = SharedString::from(format!("doc-open-{}", note.as_u64()));
         crate::theme::fade_in(self, id, 160, 0.0, cx)
     }
 }

@@ -6865,4 +6865,46 @@ mod ui_tests {
         let notice = view.read_with(&*cx, |s, _| s.notice.clone());
         assert_eq!(notice.as_deref(), Some("Image copied"));
     }
+
+    #[test]
+    fn the_body_has_no_caret_while_the_title_is_being_typed() {
+        run_ui_test("title_caret", title_caret_body);
+    }
+
+    fn title_caret_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx);
+            });
+        });
+        for _ in 0..3 {
+            step(cx, window, |_, _| {});
+        }
+        let caret_drawn = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find("doc-caret").is_some()
+            })
+            .unwrap()
+        };
+        // The title has focus: the next line must not show a second caret.
+        assert!(!caret_drawn(cx), "no body caret while the title is focused");
+        cx.update_window(window, |_, w, cx| {
+            w.input("Plan", cx);
+        })
+        .unwrap();
+        assert!(!caret_drawn(cx), "still none while typing the name");
+        // Enter hands focus to the body, which then shows its caret.
+        cx.update_window(window, |_, w, cx| {
+            w.press("enter", cx);
+        })
+        .unwrap();
+        for _ in 0..3 {
+            step(cx, window, |_, _| {});
+        }
+        assert!(caret_drawn(cx), "the body caret appears after Enter");
+    }
 }
