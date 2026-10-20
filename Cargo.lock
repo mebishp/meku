@@ -3892,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "meku"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -3913,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "meku-buffer"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "meku-table",
@@ -3923,14 +3923,14 @@ dependencies = [
 
 [[package]]
 name = "meku-index"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "meku-vault",
 ]
 
 [[package]]
 name = "meku-markdown"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "meku-table",
  "memchr",
@@ -3946,11 +3946,11 @@ dependencies = [
 
 [[package]]
 name = "meku-table"
-version = "0.1.0"
+version = "1.0.1"
 
 [[package]]
 name = "meku-vault"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "notify",

@@ -820,11 +820,34 @@ impl Default for ConfigState {
     }
 }
 
-/// `~/.config/meku/settings.json` (or `$XDG_CONFIG_HOME`).
+/// The per-user settings file: `~/.config/meku/settings.json` on Linux (or under
+/// `$XDG_CONFIG_HOME`), `~/Library/Application Support/meku/` on macOS and
+/// `%APPDATA%\meku\` on Windows.
 pub fn global_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let var = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    config_file(var("XDG_CONFIG_HOME"), var("HOME"), var("APPDATA"))
+}
+
+/// Pick the settings file from the environment values (separated so each
+/// platform's rule is testable on any machine).
+fn config_file(
+    xdg: Option<PathBuf>,
+    home: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let base = if let Some(xdg) = xdg {
+        xdg
+    } else if cfg!(windows) {
+        appdata.or_else(|| home.map(|h| h.join("AppData").join("Roaming")))?
+    } else if cfg!(target_os = "macos") {
+        home?.join("Library").join("Application Support")
+    } else {
+        home?.join(".config")
+    };
     Some(base.join("meku").join("settings.json"))
 }
 
@@ -1411,5 +1434,29 @@ mod tests {
         );
         std::fs::write(&state, "{ broken").unwrap();
         assert_eq!(read_last_mekuto(&state), None);
+    }
+
+    #[test]
+    fn the_settings_file_follows_each_platforms_convention() {
+        let p = |s: &str| Some(PathBuf::from(s));
+        let tail = std::path::Path::new("meku").join("settings.json");
+        let explicit = config_file(p("/x"), p("/home/a"), p("C:/Users/a/AppData/Roaming")).unwrap();
+        assert_eq!(
+            explicit,
+            PathBuf::from("/x").join(&tail),
+            "XDG_CONFIG_HOME wins everywhere"
+        );
+        let by_home = config_file(None, p("/home/a"), p("/appdata")).unwrap();
+        if cfg!(windows) {
+            assert_eq!(by_home, PathBuf::from("/appdata").join(&tail));
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(
+                by_home,
+                PathBuf::from("/home/a/Library/Application Support").join(&tail)
+            );
+        } else {
+            assert_eq!(by_home, PathBuf::from("/home/a/.config").join(&tail));
+        }
+        assert_eq!(config_file(None, None, None), None);
     }
 }
