@@ -2,11 +2,13 @@ name: Release
 
 # Builds the macOS (Apple silicon) and Windows (x64) packages.
 #  - Push a tag like v1.0.1: builds both and attaches them to that tag's GitHub release.
+#  - Push to a release/* branch: builds both and keeps the files as workflow artifacts.
 #  - Run it by hand (Actions > Release > Run workflow): builds both and keeps the files
 #    as workflow artifacts, without publishing anything.
 on:
   push:
     tags: ["v*"]
+    branches: ["release/**"]
   workflow_dispatch:
 
 permissions:
