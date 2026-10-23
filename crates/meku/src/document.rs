@@ -8,7 +8,7 @@
 //! The GPUI text-input handler lives here too, so IME, dead keys and the
 //! platform text services reach the same caret as keyboard actions do.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -176,6 +176,16 @@ pub(crate) struct RowView {
     /// A checkbox control sits left of the text (hidden task rows): presses
     /// there belong to the control, not the caret.
     pub(crate) has_checkbox: bool,
+    /// Set once the row has been laid out and painted. `TextLayout` panics
+    /// when queried before that, and rows are registered while being built.
+    painted: Rc<Cell<bool>>,
+}
+
+impl RowView {
+    /// Whether the layout may be queried (it has been measured and painted).
+    pub(crate) fn is_painted(&self) -> bool {
+        self.painted.get()
+    }
 }
 
 /// Row views shared between the render pass and pointer handlers.
@@ -485,6 +495,7 @@ impl MekuShell {
                             .borrow()
                             .get(ix)
                             .and_then(|v| v.as_ref())
+                            .filter(|v| v.is_painted())
                             .is_none_or(|v| ev.position.y > v.layout.bounds().bottom());
                     if below {
                         view.doc_click_below(cx);
@@ -588,7 +599,9 @@ impl MekuShell {
     /// layout (blank rules, spacers) resolve to their start.
     pub(crate) fn row_source(&self, ix: usize, pos: Point<Pixels>) -> Option<usize> {
         let views = self.doc_views.borrow();
-        if let Some(Some(view)) = views.get(ix) {
+        if let Some(Some(view)) = views.get(ix)
+            && view.is_painted()
+        {
             let idx = match view.layout.index_for_position(pos) {
                 Ok(i) | Err(i) => i,
             };
@@ -602,7 +615,7 @@ impl MekuShell {
     /// Source offset under `pos` among all rendered rows.
     fn source_at(&self, pos: Point<Pixels>) -> Option<usize> {
         let views = self.doc_views.borrow();
-        views.iter().flatten().find_map(|view| {
+        views.iter().flatten().filter(|v| v.is_painted()).find_map(|view| {
             view.layout.bounds().contains(&pos).then(|| {
                 let idx = match view.layout.index_for_position(pos) {
                     Ok(i) | Err(i) => i,
@@ -652,6 +665,7 @@ impl MekuShell {
         self.touch_caret();
         self.flush_title(cx);
         if let Some(Some(view)) = self.doc_views.borrow().get(ix)
+            && view.is_painted()
             && view.has_checkbox
             && pos.x < view.layout.bounds().left()
         {
@@ -728,6 +742,7 @@ impl MekuShell {
         // The pointer must really be over the text, not the padding beside it.
         let views = self.doc_views.borrow();
         if let Some(Some(view)) = views.get(ix)
+            && view.is_painted()
             && !view.layout.bounds().contains(&pos)
         {
             return None;
@@ -2650,11 +2665,13 @@ fn row_element(
     let caret_shape = caret_disp.map(|index| (display.text.clone(), runs.clone(), index));
     let styled = StyledText::new(display.text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
+    let painted = Rc::new(Cell::new(false));
     if let Some(slot) = views.borrow_mut().get_mut(ix) {
         *slot = Some(RowView {
             layout: layout.clone(),
             display,
             has_checkbox: !reveal && row.task().is_some(),
+            painted: painted.clone(),
         });
     }
 
@@ -2797,7 +2814,17 @@ fn row_element(
     // A title-less callout shows its default title instead of empty text.
     let title_less = callout.is_some_and(|c| c.role == CalloutRole::Title) && display_empty;
     if !title_less {
-        el = el.child(styled);
+        el = el.child(styled).child(
+            canvas(
+                {
+                    let painted = painted.clone();
+                    move |_, _, _| painted.set(true)
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_0(),
+        );
     }
     let right_pad = if row.kind == RowKind::Code {
         px(14.)
@@ -3177,7 +3204,7 @@ impl EntityInputHandler for MekuShell {
         let model = self.doc_models.get(&rel)?;
         let row = row_at(&model.rows, caret);
         let views = self.doc_views.borrow();
-        let view = views.get(row)?.as_ref()?;
+        let view = views.get(row)?.as_ref().filter(|v| v.is_painted())?;
         let origin = view
             .layout
             .position_for_index(view.display.to_disp(caret))?;

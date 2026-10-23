@@ -432,6 +432,7 @@ impl MekuShell {
                         .borrow()
                         .get(ix)
                         .and_then(|v| v.as_ref())
+                        .filter(|v| v.is_painted())
                         .is_none_or(|v| v.layout.bounds().contains(&pos));
                     if row.kind != RowKind::Code && over_text {
                         let line = &model.text[row.src.clone()];
