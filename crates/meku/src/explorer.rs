@@ -163,10 +163,15 @@ impl Explorer {
     /// level. Returns the stored session for tab restoration.
     pub fn open(&mut self, dir: &Path) -> anyhow::Result<Session> {
         let vault = meku_vault::open_root(dir)?;
+        let session = meku_vault::load_session(&vault.root);
+        // Everything below must see the new root, not the mekuto being left:
+        // folders are collected from `self.vault`, so install it first.
         self.files = meku_vault::scan_md(&vault.root);
+        self.vault = Some(vault);
+        *self.attachments.borrow_mut() = None;
+        self.dirs.clear();
         self.derive_dirs();
         self.index.rebuild(&self.files);
-        let session = meku_vault::load_session(&vault.root);
         // Expand first-level directories so a fresh mekuto shows its shape.
         self.expanded = self
             .dirs
@@ -174,7 +179,6 @@ impl Explorer {
             .filter(|d| d.components().count() == 1)
             .cloned()
             .collect();
-        self.vault = Some(vault);
         Ok(session)
     }
 
@@ -473,6 +477,27 @@ mod tests {
         let mut explorer = Explorer::new();
         let _ = explorer.open(root).unwrap();
         (dir, explorer)
+    }
+
+    #[test]
+    fn switching_mekuto_shows_only_the_new_mekutos_folders() {
+        let (_first, mut explorer) = open_fixture();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(other.path().join("journal")).unwrap();
+        std::fs::create_dir_all(other.path().join("empty-folder")).unwrap();
+        std::fs::write(other.path().join("journal/day.md"), "# Day\n").unwrap();
+        explorer.open(other.path()).unwrap();
+        let labels: Vec<String> = explorer.flat_rows().into_iter().map(|r| r.label).collect();
+        assert!(labels.contains(&"journal".to_string()));
+        assert!(
+            labels.contains(&"empty-folder".to_string()),
+            "empty folders of the new mekuto show: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l == "notes" || l == "projects"),
+            "nothing of the previous mekuto lingers: {labels:?}"
+        );
+        assert!(!explorer.is_dir(Path::new("notes")));
     }
 
     #[test]

@@ -879,7 +879,117 @@ fn read_last_mekuto(state: &Path) -> Option<PathBuf> {
 pub fn remember_mekuto(root: &Path) {
     if let Some(path) = state_path() {
         write_last_mekuto(&path, root);
+        write_recent_mekutos(&path, root);
     }
+}
+
+/// Every mekuto ever opened, most recent first. A folder that has since been
+/// moved or deleted stays in the record (the switcher marks it).
+pub fn recent_mekutos() -> Vec<PathBuf> {
+    state_path()
+        .map(|state| read_recent_mekutos(&state))
+        .unwrap_or_default()
+}
+
+fn read_recent_mekutos(state: &Path) -> Vec<PathBuf> {
+    let Some(Value::Array(list)) = read_state_key(state, "recent_mekutos") else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|v| v.as_str())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Put `root` first in the record (once); nothing is ever dropped.
+fn write_recent_mekutos(state: &Path, root: &Path) {
+    let mut list = read_recent_mekutos(state);
+    list.retain(|p| p != root);
+    list.insert(0, root.to_path_buf());
+    store_recent_mekutos(state, &list);
+}
+
+/// Drop one mekuto from the record (the folder itself is untouched).
+pub fn forget_mekuto(root: &Path) {
+    if let Some(state) = state_path() {
+        let mut list = read_recent_mekutos(&state);
+        list.retain(|p| p != root);
+        store_recent_mekutos(&state, &list);
+    }
+}
+
+/// Empty the record, keeping only `keep` (the mekuto that is open now).
+pub fn forget_all_mekutos_except(keep: Option<&Path>) {
+    if let Some(state) = state_path() {
+        let list: Vec<PathBuf> = keep.map(Path::to_path_buf).into_iter().collect();
+        store_recent_mekutos(&state, &list);
+    }
+}
+
+fn store_recent_mekutos(state: &Path, list: &[PathBuf]) {
+    let value = list
+        .iter()
+        .map(|p| Value::String(p.to_string_lossy().into_owned()))
+        .collect();
+    write_state_key(state, "recent_mekutos", Value::Array(value));
+}
+
+/// Where Meku keeps its own mekuto: `Meku` inside the user's Documents folder,
+/// or directly in the home folder when there is no Documents folder (common on
+/// minimal Linux setups). `None` only when no home folder can be found.
+pub fn default_mekuto() -> Option<PathBuf> {
+    let var = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = var("HOME").or_else(|| var("USERPROFILE"))?;
+    Some(default_mekuto_in(
+        &home,
+        documents_dir(&home, var("XDG_DOCUMENTS_DIR")),
+    ))
+}
+
+/// Pure choice of the default mekuto: inside `documents` when it exists,
+/// else in `home`.
+fn default_mekuto_in(home: &Path, documents: Option<PathBuf>) -> PathBuf {
+    documents
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(|| home.to_path_buf())
+        .join("Meku")
+}
+
+/// The user's Documents folder, if there is one. Linux honours the XDG setting
+/// (which may be localized, e.g. `Dokumente`); every platform tries
+/// `<home>/Documents` last.
+fn documents_dir(home: &Path, xdg_env: Option<PathBuf>) -> Option<PathBuf> {
+    let from_user_dirs = || {
+        let file = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("user-dirs.dirs");
+        parse_xdg_documents(&std::fs::read_to_string(file).ok()?, home)
+    };
+    xdg_env
+        .or_else(from_user_dirs)
+        .filter(|d| d.is_dir())
+        .or_else(|| Some(home.join("Documents")).filter(|d| d.is_dir()))
+}
+
+/// The `XDG_DOCUMENTS_DIR="$HOME/Documents"` line of `user-dirs.dirs`.
+fn parse_xdg_documents(text: &str, home: &Path) -> Option<PathBuf> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("XDG_DOCUMENTS_DIR"))?;
+    let value = line.split_once('=')?.1.trim().trim_matches('"');
+    let dir = match value.strip_prefix("$HOME") {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(value),
+    };
+    // A path equal to home means "no Documents folder" in this file.
+    (dir != home).then_some(dir)
 }
 
 fn write_last_mekuto(state: &Path, root: &Path) {
@@ -1225,6 +1335,79 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_mekuto_prefers_documents_and_falls_back_to_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        assert_eq!(
+            default_mekuto_in(home, None),
+            home.join("Meku"),
+            "no Documents"
+        );
+        let docs = home.join("Dokumente");
+        assert_eq!(
+            default_mekuto_in(home, Some(docs.clone())),
+            home.join("Meku"),
+            "a Documents path that does not exist is ignored"
+        );
+        std::fs::create_dir(&docs).unwrap();
+        assert_eq!(
+            default_mekuto_in(home, Some(docs.clone())),
+            docs.join("Meku")
+        );
+    }
+
+    #[test]
+    fn every_opened_mekuto_is_kept_most_recent_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state.json");
+        let roots: Vec<PathBuf> = (0..12).map(|i| tmp.path().join(format!("m{i}"))).collect();
+        for root in &roots {
+            write_recent_mekutos(&state, root);
+        }
+        write_recent_mekutos(&state, &roots[3]);
+        let list = read_recent_mekutos(&state);
+        assert_eq!(
+            list.len(),
+            12,
+            "no cap, no duplicates, missing folders kept"
+        );
+        assert_eq!(list[0], roots[3]);
+        assert_eq!(list[1], roots[11]);
+    }
+
+    #[test]
+    fn storing_a_shorter_record_forgets_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state.json");
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        write_recent_mekutos(&state, &a);
+        write_recent_mekutos(&state, &b);
+        store_recent_mekutos(&state, std::slice::from_ref(&a));
+        assert_eq!(read_recent_mekutos(&state), vec![a]);
+        store_recent_mekutos(&state, &[]);
+        assert!(read_recent_mekutos(&state).is_empty());
+    }
+
+    #[test]
+    fn xdg_documents_line_is_read() {
+        let home = Path::new("/home/a");
+        let text = "XDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOCUMENTS_DIR=\"$HOME/Dokumente\"\n";
+        assert_eq!(
+            parse_xdg_documents(text, home),
+            Some(home.join("Dokumente"))
+        );
+        assert_eq!(
+            parse_xdg_documents("XDG_DOCUMENTS_DIR=\"/data/docs\"", home),
+            Some(PathBuf::from("/data/docs"))
+        );
+        assert_eq!(
+            parse_xdg_documents("XDG_DOCUMENTS_DIR=\"$HOME/\"", home),
+            None
+        );
+        assert_eq!(parse_xdg_documents("", home), None);
+    }
+
     use super::*;
     use serde_json::json;
 

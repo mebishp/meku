@@ -206,6 +206,32 @@ pub fn scrim(cx: &App) -> gpui_kit::Hsla {
     gpui_kit::hsla(0.0, 0.0, 0.0, if active(cx).dark { 0.5 } else { 0.3 })
 }
 
+/// The darkened layer behind a dialog or the palette. It takes every mouse
+/// press, so nothing underneath is hit (clicks, hover, scroll), and a press on
+/// it closes the dialog without also reaching the window behind.
+pub fn backdrop(
+    id: impl Into<gpui_kit::ElementId>,
+    cx: &App,
+    on_close: impl Fn(&mut gpui_kit::Window, &mut App) + 'static,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    use gpui_kit::{InteractiveElement as _, MouseButton, Styled as _};
+    let on_close = std::rc::Rc::new(on_close);
+    let mut layer = gpui_kit::div()
+        .id(id)
+        .absolute()
+        .inset_0()
+        .bg(scrim(cx))
+        .occlude();
+    for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+        let on_close = on_close.clone();
+        layer = layer.on_mouse_down(button, move |_, window, cx| {
+            cx.stop_propagation();
+            on_close(window, cx);
+        });
+    }
+    layer
+}
+
 /// The active accent color at the given opacity (find highlights etc.).
 pub fn accent_alpha(cx: &App, alpha: f32) -> gpui_kit::Hsla {
     let mut c: gpui_kit::Hsla = gpui_kit::rgb(active(cx).accent).into();

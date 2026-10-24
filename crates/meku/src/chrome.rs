@@ -2,10 +2,12 @@
 //! Icon-led and quiet: Iconoir glyphs, hairline borders, hover/active tints
 //! from the active theme.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
@@ -561,17 +563,17 @@ impl MekuShell {
                     div()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("No folder open"),
+                        .child("No mekuto open"),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(muted)
-                        .child("A mekuto is any folder of markdown notes."),
+                        .child("A mekuto is a folder that holds your notes. Pick one to start."),
                 )
                 .child(
                     gpui_kit::component::button::Button::new("sidebar-open-folder")
-                        .label("Open folder")
+                        .label("Open a mekuto")
                         .on_click(move |_, window, cx| {
                             open_shell.update(cx, |v, cx| {
                                 v.on_open_folder(&crate::OpenFolder, window, cx)
@@ -581,9 +583,8 @@ impl MekuShell {
                 .into_any_element();
         }
         let shell = cx.entity();
-        let new_note = shell.clone();
-        let new_folder = shell.clone();
         let search = shell.clone();
+        let switch = shell.clone();
         let hover_bg = cx.theme().list_hover;
         let field_bg = cx.theme().secondary;
         let border = cx.theme().sidebar_border;
@@ -596,46 +597,61 @@ impl MekuShell {
             .items_center()
             .justify_between()
             .child(
+                // The mekuto's name is also the switcher: it says what this is
+                // ("Mekuto", not "folder") and where to change it.
                 h_flex()
+                    .id("mekuto-switcher")
+                    .test_support()
                     .gap_2()
                     .items_center()
                     .min_w_0()
-                    .child(icon(Ico::Journal, px(17.), theme::accent_alpha(cx, 1.0)))
+                    .px_1()
+                    .py_0p5()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .tooltip(|window, cx| {
+                        Tooltip::new(
+                            "Your mekuto: the folder holding these notes. Click to switch.",
+                        )
+                        .build(window, cx)
+                    })
+                    .on_click(move |_, _, cx| {
+                        switch.update(cx, |v, cx| {
+                            v.open_palette(crate::palette::PaletteKind::Mekutos, cx)
+                        });
+                    })
+                    // A monogram tile, like a workspace switcher: the initial
+                    // tells mekutos apart at a glance.
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(22.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(theme::accent_alpha(cx, 0.16))
+                            .text_color(theme::accent_alpha(cx, 1.0))
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .child(
+                                self.explorer
+                                    .root_name()
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.to_uppercase().to_string())
+                                    .unwrap_or_default(),
+                            ),
+                    )
                     .child(
                         div()
                             .truncate()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(self.explorer.root_name()),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap(px(2.))
-                    .child(icon_button(
-                        "new-note",
-                        Ico::NotePlus,
-                        false,
-                        "New note",
-                        cx,
-                        move |_, cx| {
-                            new_note.update(cx, |view, cx| {
-                                view.begin_naming(NamingMode::NewNote, PathBuf::new(), None, cx)
-                            });
-                        },
-                    ))
-                    .child(icon_button(
-                        "new-folder",
-                        Ico::FolderPlus,
-                        false,
-                        "New folder",
-                        cx,
-                        move |_, cx| {
-                            new_folder.update(cx, |view, cx| {
-                                view.begin_naming(NamingMode::NewFolder, PathBuf::new(), None, cx)
-                            });
-                        },
-                    )),
+                    )
+                    .child(icon(Ico::ChevronDown, px(13.), muted)),
             );
 
         // A search field that is really a button into the file finder.
@@ -692,7 +708,7 @@ impl MekuShell {
 
         base.child(header)
             .child(search_field)
-            .child(self.section_label("Notes", Ico::Notes, None, cx))
+            .child(self.notes_label(cx))
             .child(crate::smooth::frame(
                 "tree-scrollbar",
                 div().flex_1().min_h_0(),
@@ -759,6 +775,90 @@ impl MekuShell {
             .into_any_element()
     }
 
+    /// The "Notes" heading doubles as the top-level folder: hovering it shows
+    /// the same create buttons as every folder row.
+    fn notes_label(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let shell = cx.entity();
+        let weak = shell.downgrade();
+        let root = PathBuf::new();
+        let label = self.section_label("Notes", Ico::Notes, None, cx);
+        let mut el = h_flex()
+            .id("notes-root")
+            .test_support()
+            .justify_between()
+            .items_center()
+            .pr_2()
+            .on_hover(move |hovered, _, cx| {
+                shell.update(cx, |v, cx| v.set_tree_hover(Path::new(""), *hovered, cx));
+            })
+            .child(label);
+        if self.tree_hover.as_deref() == Some(root.as_path()) {
+            el = el.child(self.tree_actions(root, weak, cx));
+        }
+        el.into_any_element()
+    }
+
+    /// New note / new folder buttons for `dir` ("" is the top level). They
+    /// fade in when the row is hovered, so the tree stays quiet otherwise.
+    fn tree_actions(&self, dir: PathBuf, shell: WeakEntity<MekuShell>, cx: &App) -> AnyElement {
+        let name = if dir.as_os_str().is_empty() {
+            "the top level".to_string()
+        } else {
+            format!(
+                "\"{}\"",
+                dir.file_name().and_then(|n| n.to_str()).unwrap_or_default()
+            )
+        };
+        let make = |ico: Ico, mode: NamingMode, tip: String, key: &'static str| {
+            let shell = shell.clone();
+            let dir = dir.clone();
+            let theme_colors = cx.theme();
+            let (fg, muted, hover) = (
+                theme_colors.foreground,
+                theme_colors.muted_foreground,
+                theme_colors.list_active,
+            );
+            div()
+                .id(format!("tree-{key}-{}", dir.display()))
+                .test_support()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(22.))
+                .rounded_md()
+                .cursor_pointer()
+                .text_color(muted)
+                .hover(move |s| s.bg(hover).text_color(fg))
+                .child(icon(ico, px(14.), muted))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(shell) = shell.upgrade() {
+                        shell.update(cx, |view, cx| {
+                            view.begin_naming(mode, dir.clone(), None, cx)
+                        });
+                    }
+                })
+        };
+        let row = h_flex()
+            .flex_none()
+            .gap(px(2.))
+            .child(make(
+                Ico::NotePlus,
+                NamingMode::NewNote,
+                format!("New note in {name}"),
+                "note",
+            ))
+            .child(make(
+                Ico::FolderPlus,
+                NamingMode::NewFolder,
+                format!("New folder in {name}"),
+                "folder",
+            ));
+        theme::fade_in(row, format!("tree-actions-{}", dir.display()), 220, 0.0, cx)
+    }
+
     /// File tree rows: chevron + folder/note icon + name, hover/selected tints.
     fn render_tree_rows(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shell = cx.entity();
@@ -771,9 +871,22 @@ impl MekuShell {
         let hover_bg = theme_colors.list_hover;
         let active_bg = theme_colors.list_active;
         let accent = theme::accent_alpha(cx, 1.0);
-        let rows: Vec<AnyElement> = self
-            .explorer
-            .flat_rows()
+        let flat = self.explorer.flat_rows();
+        // A folder being created shows as an editable row, first inside its
+        // parent (or first overall), instead of a dialog.
+        let draft = self.folder_draft().map(|(dir, input)| {
+            if dir.as_os_str().is_empty() {
+                (0, 0, input)
+            } else {
+                let at = flat.iter().position(|r| r.rel == dir);
+                (
+                    at.map_or(0, |i| i + 1),
+                    at.map_or(0, |i| flat[i].depth + 1),
+                    input,
+                )
+            }
+        });
+        let mut rows: Vec<AnyElement> = flat
             .into_iter()
             .map(|row| {
                 let open_shell = shell.clone();
@@ -821,10 +934,20 @@ impl MekuShell {
                         px(15.),
                         if selected { accent } else { muted },
                     ))
-                    .child(div().truncate().child(label))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
                     .on_click(move |_, _, cx| {
                         open_shell.update(cx, |view, cx| view.open_file(&open_rel, cx));
                     });
+                if row.is_dir {
+                    let hover_shell = shell.clone();
+                    let hover_rel = row.rel.clone();
+                    el = el.on_hover(move |hovered, _, cx| {
+                        hover_shell.update(cx, |v, cx| v.set_tree_hover(&hover_rel, *hovered, cx));
+                    });
+                    if self.tree_hover.as_deref() == Some(row.rel.as_path()) {
+                        el = el.child(self.tree_actions(row.rel.clone(), shell.downgrade(), cx));
+                    }
+                }
                 el = if selected {
                     el.bg(active_bg)
                 } else {
@@ -875,6 +998,38 @@ impl MekuShell {
                 .into_any_element()
             })
             .collect();
+        if let Some((at, depth, input)) = draft {
+            let ring = accent;
+            rows.insert(
+                at.min(rows.len()),
+                h_flex()
+                    .id("tree-new-folder")
+                    .test_support()
+                    .h(px(28.))
+                    .pl(px(depth as f32 * 14.0 + 6.0))
+                    .pr_2()
+                    .gap_1p5()
+                    .items_center()
+                    .rounded_md()
+                    .child(icon(
+                        Ico::ChevronRight,
+                        px(12.),
+                        gpui_kit::transparent_black(),
+                    ))
+                    .child(icon(Ico::Folder, px(15.), ring))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&input)
+                                .id("naming-input")
+                                .appearance(false)
+                                .bordered(false)
+                                .focus_bordered(false)
+                                .small(),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
         v_flex().gap(px(1.)).children(rows).into_any_element()
     }
 
@@ -1002,7 +1157,7 @@ impl MekuShell {
         } else {
             let s = shell.clone();
             actions.push((
-                "Open a folder",
+                "Open a mekuto",
                 Ico::Folder,
                 "Ctrl O",
                 Box::new(move |window, cx| {
@@ -1067,12 +1222,30 @@ impl MekuShell {
                             .child("Meku"),
                     )
                     .child(div().text_sm().text_color(muted).child(if open {
-                        "Pick a note from the sidebar, or start a new one."
+                        "Pick a note from the sidebar, or start a new one. Everything here lives in your mekuto."
                     } else {
-                        "Notes are plain markdown files in a folder."
+                        "Your notes live in a mekuto: a folder on your computer."
                     })),
             )
             .child(v_flex().gap_1().children(rows))
+            .child(
+                // The empty state teaches the one idea the editor is built on;
+                // it needs no dismissal because it only shows with no note open.
+                v_flex()
+                    .w(px(300.))
+                    .mt_2()
+                    .px_3()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(muted)
+                    .children(
+                        [
+                            "Markup hides until the caret reaches it. Move into a line to edit its source.",
+                            "Type / at the start of a line to insert a heading, list, table or code block.",
+                        ]
+                        .map(|tip| div().child(tip)),
+                    ),
+            )
             .into_any_element()
     }
 

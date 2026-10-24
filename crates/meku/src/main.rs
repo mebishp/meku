@@ -5,6 +5,7 @@ mod chrome;
 mod clipboard;
 mod config;
 mod context_menu;
+mod demo;
 mod document;
 mod explorer;
 mod find;
@@ -17,6 +18,7 @@ mod smooth;
 mod theme;
 mod update;
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -233,6 +235,9 @@ pub struct MekuShell {
     caret_touch: Instant,
     /// Row whose rendered link the pointer is over (pointing-hand cursor).
     hover_link: Option<usize>,
+    /// The tree row under the mouse ("" is the top-level heading): it shows
+    /// its create buttons.
+    tree_hover: Option<PathBuf>,
     /// Window currently narrower than the sidebar breakpoint, and whether the
     /// sidebar was hidden by that (so it comes back when the window widens).
     narrow: bool,
@@ -327,6 +332,7 @@ impl MekuShell {
             caret_on: true,
             caret_touch: Instant::now(),
             hover_link: None,
+            tree_hover: None,
             narrow: false,
             sidebar_auto_hidden: false,
             nav_history: Vec::new(),
@@ -935,9 +941,16 @@ impl MekuShell {
         cx.spawn(async move |this, cx| {
             let dir = cx
                 .background_spawn(async move {
-                    rfd::FileDialog::new()
-                        .set_title("Open mekuto folder")
-                        .pick_folder()
+                    let mut dialog = rfd::FileDialog::new().set_title(
+                        "Choose a mekuto: a folder of notes (create a new folder for a fresh one)",
+                    );
+                    if let Some(start) = config::default_mekuto()
+                        .and_then(|d| d.parent().map(Path::to_path_buf))
+                        .filter(|d| d.is_dir())
+                    {
+                        dialog = dialog.set_directory(start);
+                    }
+                    dialog.pick_folder()
                 })
                 .await;
             if let Some(dir) = dir
@@ -954,6 +967,9 @@ impl MekuShell {
             Ok(session) => {
                 let root = self.explorer.root().unwrap().to_path_buf();
                 theme::update_config(cx, |s| s.set_mekuto(Some(&root)));
+                // A failed watcher must not leave the old mekuto's one running.
+                self.watcher = None;
+                self.watcher_rx = None;
                 let (tx, rx) = mpsc::channel();
                 match meku_vault::start_watcher(&root, tx) {
                     Ok(watcher) => {
@@ -964,6 +980,14 @@ impl MekuShell {
                         self.notice = Some(format!("Watching disabled: {e}"));
                     }
                 }
+                // Nothing of the mekuto being left may linger.
+                self.nav_history.clear();
+                self.nav_pos = 0;
+                self.naming = None;
+                self.naming_input = None;
+                self._naming_sub = None;
+                self.pending_delete = None;
+                self.tree_hover = None;
                 self.tabs.clear();
                 self.buffers.clear();
                 self.last_edit.clear();
@@ -1644,6 +1668,10 @@ impl MekuShell {
             self.new_untitled_note(dir, cx);
             return;
         }
+        if mode == NamingMode::NewFolder {
+            // The new row appears inside its parent, so open it.
+            self.explorer.reveal(&dir.join("_"));
+        }
         self.naming = Some(Naming {
             mode,
             dir,
@@ -1654,6 +1682,29 @@ impl MekuShell {
         // The InputState entity is created on the next render, where a
         // Window is available; the preset is derived there too.
         cx.notify();
+    }
+
+    pub(crate) fn set_tree_hover(&mut self, rel: &Path, hovered: bool, cx: &mut Context<Self>) {
+        let next = if hovered {
+            Some(rel.to_path_buf())
+        } else if self.tree_hover.as_deref() == Some(rel) {
+            None
+        } else {
+            return;
+        };
+        if self.tree_hover != next {
+            self.tree_hover = next;
+            cx.notify();
+        }
+    }
+
+    /// The folder being created inline: its parent and name field.
+    pub(crate) fn folder_draft(&self) -> Option<(PathBuf, Entity<InputState>)> {
+        let naming = self
+            .naming
+            .as_ref()
+            .filter(|n| n.mode == NamingMode::NewFolder)?;
+        Some((naming.dir.clone(), self.naming_input.clone()?))
     }
 
     fn ensure_naming_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1668,6 +1719,13 @@ impl MekuShell {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(preset));
         let sub = cx.subscribe(&input, Self::on_naming_event);
         window.focus(&input.read(cx).focus_handle(cx), cx);
+        if self
+            .naming
+            .as_ref()
+            .is_some_and(|n| n.mode == NamingMode::NewFolder)
+        {
+            input.update(cx, |state, cx| state.select_all(window, cx));
+        }
         self.naming_input = Some(input);
         self._naming_sub = Some(sub);
     }
@@ -1678,8 +1736,18 @@ impl MekuShell {
         event: &InputEvent,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event, InputEvent::PressEnter { .. }) {
-            self.commit_naming(cx);
+        match event {
+            InputEvent::PressEnter { .. } => self.commit_naming(cx),
+            // The inline folder row has no Cancel button: leaving it cancels.
+            InputEvent::Blur
+                if self
+                    .naming
+                    .as_ref()
+                    .is_some_and(|n| n.mode == NamingMode::NewFolder) =>
+            {
+                self.cancel_naming(cx)
+            }
+            _ => {}
         }
     }
 
@@ -2075,6 +2143,10 @@ impl MekuShell {
 
     fn render_naming_modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let naming = self.naming.clone()?;
+        if naming.mode == NamingMode::NewFolder {
+            // Folders are named in the tree itself (see `render_tree_rows`).
+            return None;
+        }
         let input = self.naming_input.clone()?;
         let shell = cx.entity();
         let commit_shell = shell.clone();
@@ -2227,6 +2299,7 @@ impl MekuShell {
             update::appimage_path().as_deref(),
         );
         let shell = cx.entity();
+        let scrim_shell = shell.clone();
         let (close_shell, skip_shell) = (shell.clone(), shell);
         let page = release.page.clone();
         let theme_colors = cx.theme();
@@ -2238,6 +2311,7 @@ impl MekuShell {
         let mut card = div()
             .id("update-dialog")
             .test_support()
+            .occlude()
             .w(px(520.))
             .max_w_full()
             .rounded_md()
@@ -2328,7 +2402,12 @@ impl MekuShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(div().absolute().inset_0().bg(theme::scrim(cx)))
+                .child(theme::backdrop("update-scrim", cx, move |_, cx| {
+                    scrim_shell.update(cx, |v, cx| {
+                        v.update_open = false;
+                        cx.notify();
+                    });
+                }))
                 .child(card)
                 .into_any_element(),
         )
@@ -2339,6 +2418,7 @@ impl MekuShell {
         let shell = cx.entity();
         let delete_shell = shell.clone();
         let cancel_shell = shell.clone();
+        let scrim_shell = shell.clone();
         let is_dir = self.explorer.is_dir(&rel);
         Some(
             div()
@@ -2349,9 +2429,12 @@ impl MekuShell {
                 .justify_center()
                 // The scrim is its own layer; opacity on a parent would also
                 // fade the dialog card inside it.
-                .child(div().absolute().inset_0().bg(theme::scrim(cx)))
+                .child(theme::backdrop("delete-scrim", cx, move |_, cx| {
+                    scrim_shell.update(cx, |v, cx| v.cancel_delete(cx));
+                }))
                 .child(
                     div()
+                        .occlude()
                         .w(px(360.))
                         .rounded_md()
                         .border_1()
@@ -2429,7 +2512,11 @@ impl Render for MekuShell {
             .size_full()
             .relative()
             .track_focus(&focus)
-            .key_context("Meku")
+            .key_context(if self.blocks_shortcuts() {
+                "MekuModal"
+            } else {
+                "Meku"
+            })
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_cycle_theme))
@@ -2585,7 +2672,27 @@ impl Render for MekuShell {
 /// Prefer a clean humanist sans for the interface/document and a coding
 /// mono for code, using whichever of the candidates is installed; anything
 /// else keeps the theme default.
+/// Inter and JetBrains Mono (SIL OFL, see `assets/fonts/`), trimmed to Latin,
+/// Greek, Cyrillic and common symbols so the look does not depend on what the
+/// system has installed. Other scripts fall back to system fonts per glyph.
+const BUNDLED_FONTS: [&[u8]; 8] = [
+    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+    include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+    include_bytes!("../assets/fonts/Inter-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
+];
+
 fn apply_fonts(cx: &mut App) {
+    if let Err(e) = cx
+        .text_system()
+        .add_fonts(BUNDLED_FONTS.iter().map(|b| Cow::Borrowed(*b)).collect())
+    {
+        eprintln!("bundled fonts failed to load: {e}");
+    }
     let installed = cx.text_system().all_font_names();
     let has = |name: &str| installed.iter().any(|n| n.eq_ignore_ascii_case(name));
     let pick = |wanted: &str, candidates: &[&str]| -> Option<SharedString> {
@@ -2643,6 +2750,17 @@ fn main() {
                 .then(config::last_mekuto)
                 .flatten()
                 .map(|p| p.to_string_lossy().into_owned())
+        });
+        // Nothing to reopen: start in the default mekuto, `~/Documents/Meku`,
+        // created with the tutorial notes on the very first run.
+        let mut first_run = false;
+        let initial_dir = initial_dir.or_else(|| {
+            if !theme::state(cx).persists() {
+                return None;
+            }
+            let (dir, created) = demo::default_start()?;
+            first_run = created;
+            Some(dir.to_string_lossy().into_owned())
         });
 
         // `secondary` is Ctrl on Linux and Windows and Cmd on macOS.
@@ -2771,6 +2889,9 @@ fn main() {
                         // screenshots.
                         for file in std::env::args().skip(2) {
                             shell.open_file_inner(Path::new(&file), cx);
+                        }
+                        if first_run {
+                            shell.open_file_inner(Path::new(demo::FIRST_NOTE), cx);
                         }
                         shell.apply_startup_state(cx);
                     });
@@ -5113,6 +5234,136 @@ mod ui_tests {
             f(window, cx);
         })
         .unwrap();
+    }
+
+    #[test]
+    fn the_sidebar_follows_every_mekuto_switch() {
+        run_ui_test("switch_tree", switch_tree_body);
+    }
+
+    fn switch_tree_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let make = |folders: &[(&str, &[&str])]| {
+            let dir = tempfile::tempdir().unwrap();
+            for (folder, notes) in folders {
+                std::fs::create_dir_all(dir.path().join(folder)).unwrap();
+                for note in *notes {
+                    std::fs::write(dir.path().join(folder).join(note), "# n\n").unwrap();
+                }
+            }
+            dir
+        };
+        let a = make(&[("a1", &["x.md", "y.md"]), ("a2", &["z.md"]), ("a3", &[])]);
+        let b = make(&[("b1", &["p.md"]), ("b2", &["q.md", "r.md"])]);
+        let rows_of = |cx: &mut TestAppContext| -> Vec<String> {
+            cx.update(|cx| {
+                view.read_with(cx, |s, _| {
+                    s.explorer
+                        .flat_rows()
+                        .into_iter()
+                        .map(|r| r.rel.display().to_string())
+                        .collect()
+                })
+            })
+        };
+        let rendered = |cx: &mut TestAppContext, rows: &[String], also: &[String]| -> Vec<String> {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                rows.iter()
+                    .chain(also)
+                    .filter(|r| w.try_find(format!("tree-row-{r}")).is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap()
+        };
+        let mut previous: Vec<String> = Vec::new();
+        for (i, dir) in [&a, &b, &a, &b, &a].into_iter().enumerate() {
+            let root = dir.path().to_path_buf();
+            cx.update(|cx| view.update(cx, |s, cx| s.open_mekuto(&root, cx)));
+            let expected = rows_of(cx);
+            let shown = rendered(cx, &expected, &previous);
+            assert_eq!(shown, expected, "switch {i}: rendered rows match the model");
+            let leftovers: Vec<_> = previous.iter().filter(|p| !expected.contains(p)).collect();
+            assert!(
+                leftovers.is_empty() || rendered(cx, &[], &previous).is_empty(),
+                "switch {i}: rows of the previous mekuto linger"
+            );
+            previous = expected;
+        }
+    }
+
+    #[test]
+    fn new_folder_is_named_inline_in_the_tree() {
+        run_ui_test("inline_folder", inline_folder_body);
+    }
+
+    fn inline_folder_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let dir = open_fixture(cx, &view);
+        // The create buttons live on the folder row and show on hover.
+        step(cx, window, |w, cx| w.hover("notes-root", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.click("tree-folder-", cx));
+        step(cx, window, |_, _| {});
+        let has = |cx: &mut TestAppContext, id: &'static str| {
+            cx.update_window(window, |_, w, _| w.try_find(id).is_some())
+                .unwrap()
+        };
+        assert!(has(cx, "tree-new-folder"), "the row appears in the tree");
+        assert!(!has(cx, "naming-cancel"), "no dialog");
+        step(cx, window, |w, cx| {
+            w.input("Ideas", cx);
+            w.press("enter", cx);
+        });
+        step(cx, window, |_, _| {});
+        assert!(dir.path().join("Ideas").is_dir(), "Enter creates it");
+        assert!(!has(cx, "tree-new-folder"));
+
+        // Escape cancels without creating anything.
+        step(cx, window, |w, cx| w.hover("notes-root", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.click("tree-folder-", cx));
+        step(cx, window, |_, _| {});
+        step(cx, window, |w, cx| w.press("escape", cx));
+        step(cx, window, |_, _| {});
+        assert!(!has(cx, "tree-new-folder"));
+        assert!(!dir.path().join("Untitled folder").exists());
+    }
+
+    #[test]
+    fn an_open_palette_blocks_shortcuts_and_swallows_the_click_that_closes_it() {
+        run_ui_test("palette_modal", palette_modal_body);
+    }
+
+    fn palette_modal_body(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        let (view, window) = boot(cx);
+        let _dir = open_fixture(cx, &view);
+        focus_doc_for(cx, &view, window);
+        let tabs =
+            |cx: &mut TestAppContext| cx.update(|cx| view.read_with(cx, |s, _| s.tabs.len()));
+        let before = tabs(cx);
+        step(cx, window, |w, cx| w.press("ctrl-p", cx));
+        step(cx, window, |_, _| {});
+        assert!(cx.update(|cx| view.read_with(cx, |s, _| s.palette.is_some())));
+
+        step(cx, window, |w, cx| w.press("ctrl-t", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(tabs(cx), before, "Ctrl+T is silent behind the palette");
+        assert!(cx.update(|cx| view.read_with(cx, |s, _| s.palette.is_some())));
+
+        // The "new tab" button sits behind the backdrop: the press closes the
+        // palette and must not reach the button.
+        step(cx, window, |w, cx| w.click("new-tab", cx));
+        step(cx, window, |_, _| {});
+        assert!(
+            cx.update(|cx| view.read_with(cx, |s, _| s.palette.is_none())),
+            "a press on the backdrop closes the palette"
+        );
+        assert_eq!(tabs(cx), before, "and does not click what is behind it");
     }
 
     #[test]

@@ -201,6 +201,13 @@ impl MekuShell {
             || self.update_open
     }
 
+    /// A dialog that owns the keyboard: the shell's own shortcuts (save, new
+    /// tab, caret movement, ...) stay silent behind it. The naming dialog keeps
+    /// its old behaviour.
+    pub(crate) fn blocks_shortcuts(&self) -> bool {
+        self.pending_delete.is_some() || self.palette_open() || self.update_open
+    }
+
     /// Relative path of the note shown by the active tab, when it has a buffer.
     pub(crate) fn doc_rel(&self) -> Option<PathBuf> {
         self.tabs
@@ -537,6 +544,7 @@ impl MekuShell {
             .relative()
             .id("md-scroll")
             .test_support()
+            .cursor_text()
             .px_4()
             // Zoom scales the document only (chrome keeps its size): every row
             // measure derives from this container's text size.
@@ -615,14 +623,18 @@ impl MekuShell {
     /// Source offset under `pos` among all rendered rows.
     fn source_at(&self, pos: Point<Pixels>) -> Option<usize> {
         let views = self.doc_views.borrow();
-        views.iter().flatten().filter(|v| v.is_painted()).find_map(|view| {
-            view.layout.bounds().contains(&pos).then(|| {
-                let idx = match view.layout.index_for_position(pos) {
-                    Ok(i) | Err(i) => i,
-                };
-                view.display.to_src(idx)
+        views
+            .iter()
+            .flatten()
+            .filter(|v| v.is_painted())
+            .find_map(|view| {
+                view.layout.bounds().contains(&pos).then(|| {
+                    let idx = match view.layout.index_for_position(pos) {
+                        Ok(i) | Err(i) => i,
+                    };
+                    view.display.to_src(idx)
+                })
             })
-        })
     }
 
     /// A press below all the text: focus the note and put the caret at the end
@@ -2510,7 +2522,7 @@ fn row_element(
     let row_div = if pointer {
         row_div.cursor_pointer()
     } else {
-        row_div
+        row_div.cursor_text()
     };
 
     // Standalone image rows draw their picture when hidden; the caret row and
