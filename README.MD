@@ -116,8 +116,8 @@ Download the file for your system from the
 |---|---|---|
 | macOS (Apple silicon) | `.dmg` | Open it and drag Meku to Applications |
 | Windows (64-bit) | `.zip` | Unzip and run `Meku.exe` |
-| Ubuntu 22.04+, Debian 12+ | `.deb` | `sudo apt install ./meku_1.3.1_amd64.deb` |
-| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.3.1-1-x86_64.pkg.tar.zst` |
+| Ubuntu 22.04+, Debian 12+ | `.deb` | `sudo apt install ./meku_1.0.4_amd64.deb` |
+| Arch Linux | `.pkg.tar.zst` | `sudo pacman -U meku-1.0.4-1-x86_64.pkg.tar.zst` |
 | Other Linux (glibc 2.35+) | `.AppImage` | `chmod +x` it, then run it |
 | Other Linux (glibc 2.35+) | `.tar.gz` | Unpack and run `meku`; `INSTALL.txt` lists the libraries |
 
