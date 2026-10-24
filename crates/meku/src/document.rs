@@ -574,6 +574,13 @@ impl MekuShell {
                 &self.smooth.doc,
                 crate::smooth::for_list(&self.doc_list),
             ))
+            .children(crate::bench::path().map(|_| {
+                crate::bench::probe(
+                    &self.smooth.doc,
+                    crate::smooth::for_list(&self.doc_list),
+                    &self.doc_list,
+                )
+            }))
             .vertical_scrollbar(&DocBar(self.doc_list.clone()))
             .children(self.render_find_bar(cx))
             .pipe_fade(buffer.entity_id(), cx)

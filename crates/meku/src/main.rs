@@ -1,6 +1,7 @@
 //! Meku: a GPU-accelerated native markdown editor.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod bench;
 mod chrome;
 mod clipboard;
 mod config;
@@ -2875,6 +2876,10 @@ fn main() {
             options.window_bounds = Some(WindowBounds::Windowed(bounds));
             options.window_min_size = Some(size(px(640.0), px(420.0)));
             options.app_id = Some("meku".to_string());
+            if bench::path().is_some() {
+                // The benchmark runs unfocused; GPUI would cap it to 30fps.
+                options.inactive_frame_interval = None;
+            }
             cx.open_window(options, |window, cx| {
                 let view = cx.new(MekuShell::new);
                 window
@@ -7204,6 +7209,15 @@ mod ui_tests {
                 w.render_frame(cx);
             })
             .unwrap();
+        }
+        // The wheel glides over the following frames; let it run to rest.
+        for _ in 0..400 {
+            cx.update_window(window, |_, w, cx| {
+                w.simulate_next_frame(cx);
+                w.render_frame(cx);
+            })
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let (max1, off1) = metrics(cx);
         assert!(off1 < -20.0, "the tree scrolled: {off1}");
