@@ -285,6 +285,7 @@ pub struct MekuShell {
     settings: Option<settings_page::SettingsPage>,
     /// Open the settings page on this tab at the next render (needs a window).
     settings_request: Option<settings_page::Tab>,
+    last_window_title: Option<String>,
 }
 
 impl MekuShell {
@@ -357,6 +358,7 @@ impl MekuShell {
             sidebar_setting: true,
             settings: None,
             settings_request: None,
+            last_window_title: None,
         };
         this.start_watcher_pump(cx);
         this.start_caret_blink(cx);
@@ -2404,10 +2406,31 @@ impl MekuShell {
                 .into_any_element(),
         )
     }
+
+    fn window_title(&self) -> String {
+        let doc = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|t| t.rel.is_some())
+            .map(|t| t.title.as_str());
+        let vault = self.explorer.is_open().then(|| self.explorer.root_name());
+
+        match (doc, vault) {
+            (Some(doc), Some(vault)) => format!("{doc} — {vault}"),
+            (Some(doc), None) => doc.to_string(),
+            (None, Some(vault)) => vault.to_string(),
+            (None, None) => "Meku".to_string(),
+        }
+    }
 }
 
 impl Render for MekuShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = self.window_title();
+        if self.last_window_title.as_deref() != Some(&title) {
+            window.set_window_title(&title);
+            self.last_window_title = Some(title);
+        }
         self.ensure_active_loaded(cx);
         self.evict_pictures(window, cx);
         self.ensure_naming_input(window, cx);
@@ -2757,6 +2780,9 @@ fn main() {
             options.window_bounds = Some(WindowBounds::Windowed(bounds));
             options.window_min_size = Some(size(px(640.0), px(420.0)));
             options.app_id = Some("meku".to_string());
+            if let Some(titlebar) = options.titlebar.as_mut() {
+                titlebar.title = Some("Meku".into());
+            }
             cx.open_window(options, |window, cx| {
                 let view = cx.new(MekuShell::new);
                 window
@@ -2972,6 +2998,32 @@ mod ui_tests {
             view.update(cx, |shell, cx| shell.open_mekuto(&root, cx));
         });
         dir
+    }
+
+    #[test]
+    fn window_title_reflects_document_and_vault() {
+        run_ui_test("window_title", window_title_body);
+    }
+
+    fn window_title_body(cx: &mut TestAppContext) {
+        let (view, _window) = boot(cx);
+        assert_eq!(view.read_with(&*cx, |s, _| s.window_title()), "Meku");
+
+        let dir = open_fixture(cx, &view);
+        let vault_name = dir.path().file_name().unwrap().to_str().unwrap();
+        // Vault opened without active document
+        assert_eq!(view.read_with(&*cx, |s, _| s.window_title()), vault_name);
+
+        // Open a note inside the vault
+        cx.update(|cx| {
+            view.update(cx, |shell, cx| {
+                shell.open_file_inner(&PathBuf::from("note.md"), cx)
+            });
+        });
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.window_title()),
+            format!("note.md — {vault_name}")
+        );
     }
 
     #[test]
