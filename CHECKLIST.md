@@ -403,6 +403,6 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 
 - [x] Move macOS CI and release packaging from the retired `macos-14` runner to `macos-15` (Apple silicon).
 - [x] Bump all six workspace packages and their lockfile entries to 1.0.5; refresh README installation examples.
-- [x] Validate locally: locked Cargo check, workspace formatting, workflow YAML, packaging-script syntax, and diff whitespace checks pass. macOS execution awaits upstream CI.
-- [ ] Merge `pre-release` into `main` after CI passes.
-- [ ] Publish `v1.0.5` with Linux, macOS, and Windows packages and checksums.
+- [x] Validate locally: locked Cargo check, workspace formatting, workflow YAML, packaging-script syntax, and diff whitespace checks pass. Upstream Linux (including workspace tests), macOS, and Windows CI passed on `pre-release` and merged `main`.
+- [x] Merge `pre-release` into `main` after CI passes (PR #7, merge `6f7860b`).
+- [x] Publish [`v1.0.5`](https://github.com/mebishp/meku/releases/tag/v1.0.5) with all seven Linux, macOS, and Windows packages and `SHA256SUMS`. Release workflow passed; every checksum entry matches its uploaded asset's SHA-256 digest.
