@@ -361,7 +361,19 @@ pub struct Display {
 pub fn content_spans(text: &str) -> Vec<(Range<usize>, InlineStyle)> {
     let mut out = Vec::new();
     let mut stack: Vec<u8> = Vec::new();
-    for (event, range) in Parser::new_ext(text, parser_options()).into_offset_iter() {
+    let mut events = Parser::new_ext(text, parser_options())
+        .into_offset_iter()
+        .peekable();
+    while let Some((event, mut range)) = events.next() {
+        // The parser may split adjacent text at punctuation such as `_` in a URL.
+        if matches!(event, Event::Text(_)) {
+            while events
+                .peek()
+                .is_some_and(|(e, r)| matches!(e, Event::Text(_)) && r.start == range.end)
+            {
+                range.end = events.next().unwrap().1.end;
+            }
+        }
         match event {
             Event::Start(tag) => stack.push(match tag {
                 Tag::Strong => InlineStyle::STRONG,
@@ -395,7 +407,19 @@ pub fn content_spans(text: &str) -> Vec<(Range<usize>, InlineStyle)> {
                     continue;
                 }
                 if matches!(event, Event::Text(_)) && !style.contains(InlineStyle::CODE) {
-                    split_highlights(text, range, style, &mut out);
+                    let mut at = range.start;
+                    let urls = if style.contains(InlineStyle::LINK) {
+                        Vec::new()
+                    } else {
+                        web_ranges(&text[range.clone()])
+                    };
+                    for url in urls {
+                        let url = range.start + url.start..range.start + url.end;
+                        split_highlights(text, at..url.start, style, &mut out);
+                        out.push((url.clone(), style.with(InlineStyle::LINK)));
+                        at = url.end;
+                    }
+                    split_highlights(text, at..range.end, style, &mut out);
                     continue;
                 }
                 out.push((range, style));
@@ -469,22 +493,86 @@ pub struct LinkRef {
     pub target: String,
 }
 
-/// The inline link of `line` covering byte `col`, if any. Reference-style
-/// links with no inline destination are not resolvable here and yield `None`.
-pub fn link_at(line: &str, col: usize) -> Option<LinkRef> {
-    Parser::new_ext(line, parser_options())
-        .into_offset_iter()
-        .find_map(|(event, range)| match event {
-            Event::Start(Tag::Link { dest_url, .. })
-                if range.start <= col && col < range.end && !dest_url.is_empty() =>
-            {
-                Some(LinkRef {
-                    range,
-                    target: dest_url.to_string(),
-                })
+/// Web addresses in a plain text span. Keep balanced URL parentheses and
+/// leave sentence punctuation outside the clickable range.
+fn web_ranges(text: &str) -> Vec<Range<usize>> {
+    if !text.contains("://") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for token in text.split_inclusive(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"')) {
+        let token_len = token.len();
+        let token =
+            token.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'));
+        let start = token.find("https://").or_else(|| token.find("http://"));
+        if let Some(start) = start {
+            let mut url = token[start..].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            while url.ends_with(')') && url.matches(')').count() > url.matches('(').count() {
+                url = &url[..url.len() - 1];
             }
-            _ => None,
-        })
+            if url
+                .split_once("://")
+                .is_some_and(|(_, host)| !host.is_empty())
+            {
+                out.push(offset + start..offset + start + url.len());
+            }
+        }
+        offset += token_len;
+    }
+    out
+}
+
+/// Resolve links against the entire document so reference definitions work.
+pub fn links(text: &str) -> Vec<LinkRef> {
+    let mut out = Vec::new();
+    let mut suppressed = 0usize;
+    let mut events = Parser::new_ext(text, parser_options())
+        .into_offset_iter()
+        .peekable();
+    while let Some((event, mut range)) = events.next() {
+        // The parser may split adjacent text at punctuation such as `_` in a URL.
+        if matches!(event, Event::Text(_)) {
+            while events
+                .peek()
+                .is_some_and(|(e, r)| matches!(e, Event::Text(_)) && r.start == range.end)
+            {
+                range.end = events.next().unwrap().1.end;
+            }
+        }
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                if !dest_url.is_empty() {
+                    out.push(LinkRef {
+                        range,
+                        target: dest_url.to_string(),
+                    });
+                }
+                suppressed += 1;
+            }
+            Event::Start(Tag::CodeBlock(_) | Tag::Image { .. }) => suppressed += 1,
+            Event::End(TagEnd::Link | TagEnd::CodeBlock | TagEnd::Image) => {
+                suppressed = suppressed.saturating_sub(1)
+            }
+            Event::Text(_) if suppressed == 0 => {
+                for r in web_ranges(&text[range.clone()]) {
+                    let range = range.start + r.start..range.start + r.end;
+                    out.push(LinkRef {
+                        target: text[range.clone()].to_string(),
+                        range,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort_by_key(|l| l.range.start);
+    out
+}
+
+/// Link at a source byte offset; code and image destinations aren't links.
+pub fn link_at(text: &str, col: usize) -> Option<LinkRef> {
+    links(text).into_iter().find(|l| l.range.contains(&col))
 }
 
 /// What a link destination points at, resolved against the note holding it.
@@ -1596,6 +1684,25 @@ mod tests {
         assert_eq!(standalone_image("text ![x](y.png)"), None);
         assert_eq!(standalone_image("[link](x.png)"), None);
         assert_eq!(standalone_image("![x]()"), None);
+    }
+
+    #[test]
+    fn web_and_reference_links_resolve_without_linking_code_or_images() {
+        let text = "See https://example.com/a_(b). and [docs][site].\n\n[site]: https://example.org\n\n`https://code.test` ![https://alt.test](image.png)\n\n```\nhttps://fenced.test\n```\n";
+        let found = links(text);
+        assert_eq!(
+            found.iter().map(|l| l.target.as_str()).collect::<Vec<_>>(),
+            vec!["https://example.com/a_(b)", "https://example.org"]
+        );
+        assert_eq!(&text[found[0].range.clone()], "https://example.com/a_(b)");
+        let rows = build_rows("Visit https://example.com now");
+        assert!(
+            rows[0]
+                .runs
+                .iter()
+                .any(|r| r.style.contains(crate::InlineStyle::LINK))
+        );
+        assert!(link_at("https://example.com, next", 20).is_none());
     }
 
     #[test]

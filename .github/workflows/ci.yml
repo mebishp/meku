@@ -42,9 +42,12 @@ jobs:
       - name: check
         run: cargo check --workspace --message-format short
 
+      - name: tests
+        run: cargo test --workspace
+
   macos:
     name: macOS (check)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust

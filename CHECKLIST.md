@@ -392,3 +392,17 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] Update check: once a day (setting **Check for updates**, default on; off = never online) asks the GitHub releases API via the system `curl`, shows an "Update x.y.z available" chip in the status bar and a dialog with steps/commands for how Meku was installed (deb, Arch, AppImage, tar.gz, macOS app, Windows, source). Command palette: **Check for updates**. Skip-this-version is remembered in `state.json`.
 - [x] Right-click menu in the editor (`context_menu.rs`): selection → Cut/Copy/Paste, inline formats, Paragraph styles, Find in note; caret → Undo/Redo, Paste, Select all, Format/Paragraph/Insert submenus; link → Open, Copy address, Remove link; picture → Open, Copy image, Copy path/address, Show in file manager, Size (240/480/720/original), Remove from note (undoable; file stays); code block → Copy code. Shortcut hints come from the real actions; the menu pops in with a small bounce (not with reduced motion).
 - [x] Memory: closing a tab releases the note's text, undo history and parsed rows (kept only while it has unsaved changes), and a closed note's decoded pictures are dropped from the picture cache. Opening and closing 30 notes with a 1600x900 picture each grew RSS from 154 MB to 524 MB and was still climbing; it now levels off near 205 MB. 40 large notes in a row: 247 MB and climbing, now a flat 159 MB. `tools/demo/memcheck.py` repeats right-click menus, themes, tabs, pictures, typing and scrolling on an isolated display and prints RSS per round (menus, themes, the zoom view, typing and scrolling were already flat).
+
+### 15. Attachment and link fixes (2026-11-11)
+
+- [x] Sidebar scans and watches attachments as well as notes, keeps attachment extensions, and opens pictures in the zoom view. Binary attachments stay out of note search and the file finder; hidden trees are skipped.
+- [x] Plain HTTP(S) addresses are styled and clickable, including URLs with parentheses; reference links resolve using document definitions in clicks and context menus. Code and image destinations stay excluded. Modified clicks use Ctrl on Linux/Windows and Cmd on macOS.
+- [x] CI: fixed the formatting failure in `bench.rs` confirmed in run 40106564066 (macOS and Windows passed); added workspace tests to Linux CI. Local fmt, check, strict Clippy, and workspace tests pass (354 tests, 3 timing tests ignored).
+
+### 16. Release 1.0.5 (2026-11-23)
+
+- [x] Move macOS CI and release packaging from the retired `macos-14` runner to `macos-15` (Apple silicon).
+- [x] Bump all six workspace packages and their lockfile entries to 1.0.5; refresh README installation examples.
+- [x] Validate locally: locked Cargo check, workspace formatting, workflow YAML, packaging-script syntax, and diff whitespace checks pass. macOS execution awaits upstream CI.
+- [ ] Merge `pre-release` into `main` after CI passes.
+- [ ] Publish `v1.0.5` with Linux, macOS, and Windows packages and checksums.

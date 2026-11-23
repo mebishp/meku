@@ -335,7 +335,7 @@ fn with_width(token: &str, width: Option<u32>) -> Option<String> {
 /// `[text](dest)` reduced to `text`.
 fn link_text(whole: &str) -> Option<String> {
     let inner = whole.strip_prefix('[')?;
-    let close = inner.rfind("](")?;
+    let close = inner.rfind("](").or_else(|| inner.find(']'))?;
     Some(inner[..close].to_string())
 }
 
@@ -436,16 +436,28 @@ impl MekuShell {
                         .is_none_or(|v| v.layout.bounds().contains(&pos));
                     if row.kind != RowKind::Code && over_text {
                         let line = &model.text[row.src.clone()];
-                        ctx.link = link_at(line, src.saturating_sub(row.src.start)).map(|l| {
-                            let dest = l.target;
-                            let whole = &line[l.range.clone()];
-                            LinkHit {
-                                range: row.src.start + l.range.start..row.src.start + l.range.end,
-                                dest: dest.clone(),
-                                text: link_text(whole),
-                                target: classify_link(&dest, &rel),
-                            }
-                        });
+                        ctx.link = model
+                            .links
+                            .iter()
+                            .find(|l| l.range.contains(&src))
+                            .cloned()
+                            .or_else(|| {
+                                link_at(line, src.saturating_sub(row.src.start)).map(|mut l| {
+                                    l.range =
+                                        row.src.start + l.range.start..row.src.start + l.range.end;
+                                    l
+                                })
+                            })
+                            .map(|l| {
+                                let dest = l.target;
+                                let whole = &model.text[l.range.clone()];
+                                LinkHit {
+                                    range: l.range,
+                                    dest: dest.clone(),
+                                    text: link_text(whole),
+                                    target: classify_link(&dest, &rel),
+                                }
+                            });
                     }
                     ctx.code = code_block_text(&model.rows, &model.text, ix);
                 }

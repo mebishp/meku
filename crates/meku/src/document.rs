@@ -155,6 +155,8 @@ pub(crate) struct DocModel {
     pub images: Rc<Vec<Option<Vec<ImageInfo>>>>,
     /// Word count of the note (status bar).
     pub words: usize,
+    /// Document-wide destinations when reference definitions are present.
+    pub links: Rc<Vec<meku_markdown::live::LinkRef>>,
     /// Markdown rendering options the model was built with (see [`model_opts`]).
     pub opts: u8,
 }
@@ -199,6 +201,13 @@ impl MekuShell {
             || self.lightbox.is_some()
             || self.settings.is_some()
             || self.update_open
+    }
+
+    /// A dialog that owns the keyboard: the shell's own shortcuts (save, new
+    /// tab, caret movement, ...) stay silent behind it. The naming dialog keeps
+    /// its old behaviour.
+    pub(crate) fn blocks_shortcuts(&self) -> bool {
+        self.pending_delete.is_some() || self.palette_open() || self.update_open
     }
 
     /// Relative path of the note shown by the active tab, when it has a buffer.
@@ -264,7 +273,13 @@ impl MekuShell {
         };
         self.image_dims = dim_cache;
         let words = text.split_whitespace().count();
+        let links = Rc::new(if text.contains("]:") {
+            meku_markdown::live::links(&text)
+        } else {
+            Vec::new()
+        });
         let model = DocModel {
+            links,
             version,
             text,
             rows,
@@ -537,6 +552,7 @@ impl MekuShell {
             .relative()
             .id("md-scroll")
             .test_support()
+            .cursor_text()
             .px_4()
             // Zoom scales the document only (chrome keeps its size): every row
             // measure derives from this container's text size.
@@ -566,6 +582,13 @@ impl MekuShell {
                 &self.smooth.doc,
                 crate::smooth::for_list(&self.doc_list),
             ))
+            .children(crate::bench::path().map(|_| {
+                crate::bench::probe(
+                    &self.smooth.doc,
+                    crate::smooth::for_list(&self.doc_list),
+                    &self.doc_list,
+                )
+            }))
             .vertical_scrollbar(&DocBar(self.doc_list.clone()))
             .children(self.render_find_bar(cx))
             .pipe_fade(buffer.entity_id(), cx)
@@ -615,14 +638,18 @@ impl MekuShell {
     /// Source offset under `pos` among all rendered rows.
     fn source_at(&self, pos: Point<Pixels>) -> Option<usize> {
         let views = self.doc_views.borrow();
-        views.iter().flatten().filter(|v| v.is_painted()).find_map(|view| {
-            view.layout.bounds().contains(&pos).then(|| {
-                let idx = match view.layout.index_for_position(pos) {
-                    Ok(i) | Err(i) => i,
-                };
-                view.display.to_src(idx)
+        views
+            .iter()
+            .flatten()
+            .filter(|v| v.is_painted())
+            .find_map(|view| {
+                view.layout.bounds().contains(&pos).then(|| {
+                    let idx = match view.layout.index_for_position(pos) {
+                        Ok(i) | Err(i) => i,
+                    };
+                    view.display.to_src(idx)
+                })
             })
-        })
     }
 
     /// A press below all the text: focus the note and put the caret at the end
@@ -748,7 +775,12 @@ impl MekuShell {
             return None;
         }
         let line = &model.text[row.src.clone()];
-        let link = link_at(line, src.saturating_sub(row.src.start))?;
+        let link = model
+            .links
+            .iter()
+            .find(|l| l.range.contains(&src))
+            .cloned()
+            .or_else(|| link_at(line, src.saturating_sub(row.src.start)))?;
         Some((rel, link.target))
     }
 
@@ -2483,7 +2515,7 @@ fn row_element(
             down_shell.update(cx, |view, cx| {
                 let focus = view.focus_handle.clone();
                 window.focus(&focus, cx);
-                if view.doc_follow_link(ix, ev.position, ev.modifiers.control, cx) {
+                if view.doc_follow_link(ix, ev.position, ev.modifiers.secondary(), cx) {
                     return;
                 }
                 view.doc_pointer(ix, ev.position, ev.modifiers.shift, ev.click_count, cx);
@@ -2503,14 +2535,14 @@ fn row_element(
                 drag_shell.update(cx, |view, cx| view.doc_drag(ix, ev.position, cx));
             } else {
                 drag_shell.update(cx, |view, cx| {
-                    view.doc_hover(ix, ev.position, ev.modifiers.control, cx)
+                    view.doc_hover(ix, ev.position, ev.modifiers.secondary(), cx)
                 });
             }
         });
     let row_div = if pointer {
         row_div.cursor_pointer()
     } else {
-        row_div
+        row_div.cursor_text()
     };
 
     // Standalone image rows draw their picture when hidden; the caret row and

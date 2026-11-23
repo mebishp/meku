@@ -3,11 +3,14 @@
 
 use std::path::PathBuf;
 
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::*;
 
+use crate::icons::{Ico, icon};
 use crate::theme::{self, Palette};
 use crate::{MekuShell, NamingMode, OpenFolder};
 
@@ -31,6 +34,7 @@ pub(crate) enum PaletteKind {
     Search,
     GotoLine,
     Shortcuts,
+    Mekutos,
 }
 
 impl PaletteKind {
@@ -42,6 +46,7 @@ impl PaletteKind {
             PaletteKind::Search => "Search every note…",
             PaletteKind::GotoLine => "Line number…",
             PaletteKind::Shortcuts => "Search shortcuts…",
+            PaletteKind::Mekutos => "Switch to a mekuto…",
         }
     }
 }
@@ -53,6 +58,7 @@ pub(crate) enum Command {
     NewNote,
     NewFolder,
     OpenFolder,
+    SwitchMekuto,
     Save,
     CloseTab,
     ToggleSidebar,
@@ -82,7 +88,8 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::FileFinder, "Open note…", "Ctrl+P"),
     (Command::NewNote, "New note", "Ctrl+T"),
     (Command::NewFolder, "New folder", ""),
-    (Command::OpenFolder, "Open folder…", "Ctrl+O"),
+    (Command::SwitchMekuto, "Switch mekuto…", ""),
+    (Command::OpenFolder, "Open or create a mekuto…", "Ctrl+O"),
     (Command::Save, "Save", "Ctrl+S"),
     (Command::CloseTab, "Close tab", "Ctrl+W"),
     (Command::ToggleSidebar, "Toggle sidebar", "Ctrl+\\"),
@@ -114,6 +121,7 @@ pub(crate) enum Target {
     Hit(PathBuf, usize),
     Command(Command),
     Theme(&'static str),
+    Mekuto(PathBuf),
     Line(usize),
     None,
 }
@@ -181,6 +189,16 @@ const SHORTCUTS: &[(&str, &str)] = &[
 ];
 
 const MAX_ITEMS: usize = 10;
+
+/// How many rows a palette shows: every remembered mekuto (the list scrolls),
+/// a few more shortcuts, and a short list otherwise.
+fn row_limit(kind: PaletteKind) -> usize {
+    match kind {
+        PaletteKind::Mekutos => usize::MAX,
+        PaletteKind::Shortcuts => 14,
+        _ => MAX_ITEMS,
+    }
+}
 
 impl MekuShell {
     pub(crate) fn palette_open(&self) -> bool {
@@ -309,6 +327,37 @@ impl MekuShell {
                     })
                     .collect()
             }
+            PaletteKind::Mekutos => {
+                let current = self.explorer.root().map(std::path::Path::to_path_buf);
+                let mut items: Vec<Item> = crate::config::recent_mekutos()
+                    .into_iter()
+                    .filter(|dir| {
+                        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                        meku_index::fuzzy_score(q, name).is_some()
+                    })
+                    .map(|dir| Item {
+                        label: dir
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("mekuto")
+                            .to_string(),
+                        detail: if current.as_deref() == Some(dir.as_path()) {
+                            "open now  ✓".to_string()
+                        } else if !dir.is_dir() {
+                            format!("not found · {}", dir.display())
+                        } else {
+                            dir.to_string_lossy().into_owned()
+                        },
+                        target: Target::Mekuto(dir),
+                    })
+                    .collect();
+                items.push(Item {
+                    label: "Open or create another mekuto…".into(),
+                    detail: "pick a folder of notes".into(),
+                    target: Target::Command(Command::OpenFolder),
+                });
+                items
+            }
             PaletteKind::Shortcuts => {
                 let mut scored: Vec<(u64, usize)> = SHORTCUTS
                     .iter()
@@ -362,7 +411,7 @@ impl MekuShell {
         let Some(p) = self.palette.as_mut() else {
             return;
         };
-        let n = p.items.len().min(MAX_ITEMS);
+        let n = p.items.len().min(row_limit(p.kind));
         if n == 0 {
             return;
         }
@@ -432,6 +481,10 @@ impl MekuShell {
                 }
                 self.close_palette(false, cx);
                 theme::choose(name, cx);
+            }
+            Target::Mekuto(dir) => {
+                self.close_palette(true, cx);
+                self.open_mekuto(&dir, cx);
             }
             Target::Command(command) => {
                 self.close_palette(true, cx);
@@ -512,6 +565,7 @@ impl MekuShell {
                 self.begin_naming(NamingMode::NewFolder, PathBuf::new(), None, cx);
             }
             Command::OpenFolder => self.on_open_folder(&OpenFolder, window, cx),
+            Command::SwitchMekuto => self.open_palette(PaletteKind::Mekutos, cx),
             Command::Save => {
                 if let Some(rel) = self.doc_rel() {
                     self.flush_title(cx);
@@ -582,22 +636,40 @@ impl MekuShell {
         }
     }
 
+    /// Remove one mekuto from the record (`Some`), or all but the open one.
+    pub(crate) fn forget_mekutos(&mut self, one: Option<&std::path::Path>, cx: &mut Context<Self>) {
+        match one {
+            Some(dir) => crate::config::forget_mekuto(dir),
+            None => crate::config::forget_all_mekutos_except(self.explorer.root()),
+        }
+        let selected = self.palette.as_ref().map_or(0, |p| p.selected);
+        self.refresh_palette(cx);
+        if let Some(p) = self.palette.as_mut() {
+            p.selected = selected.min(p.items.len().saturating_sub(1));
+        }
+        cx.notify();
+    }
+
     pub(crate) fn render_palette(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.palette.as_ref()?;
         let shell = cx.entity();
         let close_shell = shell.clone();
         let selected = state.selected;
+        let current_mekuto = self.explorer.root().map(std::path::Path::to_path_buf);
         let rows: Vec<AnyElement> = state
             .items
             .iter()
-            .take(if state.kind == PaletteKind::Shortcuts {
-                14
-            } else {
-                MAX_ITEMS
-            })
+            .take(row_limit(state.kind))
             .enumerate()
             .map(|(i, item)| {
                 let click_shell = shell.clone();
+                // Every remembered mekuto but the open one can be forgotten.
+                let forget = match &item.target {
+                    Target::Mekuto(dir) if current_mekuto.as_deref() != Some(dir.as_path()) => {
+                        Some(forget_button(i, dir.clone(), shell.clone(), cx))
+                    }
+                    _ => None,
+                };
                 ListItem::new(("palette-item", i))
                     .selected(i == selected)
                     .child(
@@ -608,11 +680,20 @@ impl MekuShell {
                             .items_center()
                             .child(div().text_sm().truncate().child(item.label.clone()))
                             .child(
-                                div()
+                                h_flex()
                                     .flex_none()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(item.detail.clone()),
+                                    .min_w_0()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(item.detail.clone()),
+                                    )
+                                    .children(forget),
                             ),
                     )
                     .on_click(move |_, _, cx| {
@@ -642,15 +723,67 @@ impl MekuShell {
                     .child("No matches"),
             );
         }
+        // The mekuto switcher keeps one size however many mekutos there are;
+        // a longer record scrolls inside it.
+        let fixed = state.kind == PaletteKind::Mekutos;
         let list = crate::smooth::frame(
             "palette-scrollbar",
-            div().max_h(px(360.)),
-            inner,
+            if fixed {
+                div().h(px(300.))
+            } else {
+                div().max_h(px(360.))
+            },
+            if fixed { inner.max_h(px(300.)) } else { inner },
             &self.smooth.palette_h,
             &self.smooth.palette,
         );
+        let footer = (state.kind == PaletteKind::Mekutos).then(|| {
+            let forgettable = state
+                .items
+                .iter()
+                .filter(|item| {
+                    matches!(&item.target, Target::Mekuto(d) if current_mekuto.as_deref() != Some(d.as_path()))
+                })
+                .count();
+            let clear_shell = shell.clone();
+            let muted = cx.theme().muted_foreground;
+            let (fg, hover) = (cx.theme().foreground, cx.theme().list_hover);
+            h_flex()
+                .px_3()
+                .py_1p5()
+                .justify_between()
+                .items_center()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .text_color(muted)
+                .child(format!(
+                    "{} {}",
+                    forgettable + usize::from(current_mekuto.is_some()),
+                    "remembered"
+                ))
+                .children((forgettable > 0).then(|| {
+                        div()
+                            .id("mekutos-clear-all")
+                            .test_support()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(hover).text_color(fg))
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Forget every mekuto except the open one")
+                                    .build(window, cx)
+                            })
+                            .child("Clear all")
+                            .on_click(move |_, _, cx| {
+                                clear_shell.update(cx, |view, cx| view.forget_mekutos(None, cx));
+                            })
+                }))
+        });
         let panel = v_flex()
             .id("palette")
+            .occlude()
             .w(px(560.))
             .max_w_full()
             .rounded_lg()
@@ -673,7 +806,8 @@ impl MekuShell {
                             .focus_bordered(false),
                     ),
             )
-            .child(list);
+            .child(list)
+            .children(footer);
         Some(
             div()
                 .absolute()
@@ -685,18 +819,42 @@ impl MekuShell {
                 .key_context("Palette")
                 .on_action(cx.listener(|this, _: &PaletteUp, _, cx| this.palette_move(-1, cx)))
                 .on_action(cx.listener(|this, _: &PaletteDown, _, cx| this.palette_move(1, cx)))
-                .child(
-                    div()
-                        .id("palette-scrim")
-                        .absolute()
-                        .inset_0()
-                        .bg(theme::scrim(cx))
-                        .on_click(move |_, _, cx| {
-                            close_shell.update(cx, |view, cx| view.close_palette(true, cx));
-                        }),
-                )
+                .child(theme::backdrop("palette-scrim", cx, move |_, cx| {
+                    close_shell.update(cx, |view, cx| view.close_palette(true, cx));
+                }))
                 .child(theme::fade_in(panel, "palette-in", 140, 6.0, cx))
                 .into_any_element(),
         )
     }
+}
+
+/// The small "forget" icon at the end of a remembered mekuto's row.
+fn forget_button(i: usize, dir: PathBuf, shell: Entity<MekuShell>, cx: &App) -> impl IntoElement {
+    let (fg, muted, hover) = (
+        cx.theme().foreground,
+        cx.theme().muted_foreground,
+        cx.theme().list_active,
+    );
+    div()
+        .id(("mekuto-forget", i))
+        .test_support()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(22.))
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(muted)
+        .hover(move |s| s.bg(hover).text_color(fg))
+        .child(icon(Ico::Trash, px(14.), muted))
+        .tooltip(|window, cx| {
+            Tooltip::new("Forget this mekuto (the folder stays)").build(window, cx)
+        })
+        // The row's own click would open the mekuto.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            shell.update(cx, |view, cx| view.forget_mekutos(Some(&dir), cx));
+        })
 }

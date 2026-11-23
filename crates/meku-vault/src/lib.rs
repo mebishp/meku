@@ -60,9 +60,20 @@ fn is_sidecar(rel: &Path) -> bool {
 /// Full recursive scan of note files, sorted by relative path.
 /// Skips the `.meku/` sidecar. Unreadable entries are ignored.
 pub fn scan_md(root: &Path) -> Vec<VaultFile> {
+    scan_files(root)
+        .into_iter()
+        .filter(|file| is_note(&file.rel))
+        .collect()
+}
+
+/// Scan visible files for the explorer, including attachments.
+pub fn scan_files(root: &Path) -> Vec<VaultFile> {
     let mut out = Vec::new();
-    let walker = walkdir::WalkDir::new(root).follow_links(false);
-    for entry in walker.into_iter().filter_map(Result::ok) {
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'));
+    for entry in walker.filter_map(Result::ok) {
         let abs = entry.path().to_path_buf();
         let Ok(rel) = abs.strip_prefix(root).map(Path::to_path_buf) else {
             continue;
@@ -70,7 +81,7 @@ pub fn scan_md(root: &Path) -> Vec<VaultFile> {
         if rel.as_os_str().is_empty() || is_sidecar(&rel) {
             continue;
         }
-        if !entry.file_type().is_file() || !is_note(&abs) {
+        if !entry.file_type().is_file() {
             continue;
         }
         let mtime = entry
@@ -159,7 +170,10 @@ pub fn save_session_atomic(root: &Path, session: &Session) -> anyhow::Result<()>
 
 fn vault_file_for(path: PathBuf, root: &Path) -> Option<VaultFile> {
     let rel = path.strip_prefix(root).ok()?.to_path_buf();
-    if is_sidecar(&rel) || !is_note(&path) {
+    if rel
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
         return None;
     }
     let meta = fs::metadata(&path).ok()?;
@@ -173,7 +187,7 @@ fn vault_file_for(path: PathBuf, root: &Path) -> Option<VaultFile> {
     })
 }
 
-/// Watch a mekuto root and forward create/modify/remove events for note files.
+/// Watch a mekuto root and forward create/modify/remove events for visible files.
 /// Paths under `.meku/` are filtered out (session saves must not rescans).
 /// The returned watcher must be kept alive for events to keep flowing.
 pub fn start_watcher(
@@ -243,6 +257,30 @@ mod tests {
             ]
         );
         assert!(files.iter().all(|f| f.abs.starts_with(&root)));
+    }
+
+    #[test]
+    fn explorer_scan_includes_attachments_and_skips_hidden_trees() {
+        let (_dir, root) = fixture_root();
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+        fs::write(root.join(".git/objects/hidden.png"), [0xff]).unwrap();
+        let files = scan_files(&root);
+        assert!(files.iter().any(|f| f.rel == Path::new("notes/image.png")));
+        assert!(files
+            .iter()
+            .all(|f| !f.rel.starts_with(".git") && !f.rel.starts_with(".meku")));
+    }
+
+    #[test]
+    fn watcher_reports_created_attachments() {
+        let (_dir, root) = fixture_root();
+        let (tx, rx) = mpsc::channel();
+        let _watcher = start_watcher(&root, tx).unwrap();
+        fs::write(root.join("notes/new.png"), [0xff, 0x00]).unwrap();
+        let event = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            matches!(event, VaultEvent::Created(file) if file.rel == Path::new("notes/new.png"))
+        );
     }
 
     #[test]
