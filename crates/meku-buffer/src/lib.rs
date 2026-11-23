@@ -2324,6 +2324,21 @@ impl OpenBuffer {
         self.coalescing = typing;
     }
 
+    /// Replace text and place the caret inside the inserted region without
+    /// breaking typing coalescing. Useful when an edit supplies a suffix
+    /// (such as a line separator) that the caret should stay before.
+    pub fn replace_with_caret(
+        &mut self,
+        range: Range<usize>,
+        insert: &str,
+        caret: usize,
+        typing: bool,
+    ) {
+        self.replace(range, insert, typing);
+        self.caret = self.snap(caret.min(self.text.len()));
+        self.anchor = self.caret;
+    }
+
     /// Replace the selection (or insert at the caret) with `text`.
     pub fn insert(&mut self, text: &str) {
         let typing = text.chars().count() == 1 && text != "\n";

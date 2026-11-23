@@ -252,9 +252,8 @@ pub struct MekuShell {
     lightbox_zoom: Option<f32>,
     /// Header-probed pixel sizes of local images.
     image_dims: document::DimCache,
-    /// Scroll state of the tab strip, and the tab it was last scrolled to.
-    tabs_scroll: ScrollHandle,
-    tabs_scrolled_to: Option<usize>,
+    /// Measured width shared uniformly by every open tab.
+    tabs_width: Pixels,
     /// Outline section expanded in the sidebar.
     outline_open: bool,
     palette: Option<palette::PaletteState>,
@@ -342,8 +341,7 @@ impl MekuShell {
             lightbox: None,
             lightbox_zoom: None,
             image_dims: HashMap::new(),
-            tabs_scroll: ScrollHandle::new(),
-            tabs_scrolled_to: None,
+            tabs_width: px(0.),
             outline_open: true,
             palette: None,
             slash: None,
@@ -649,7 +647,7 @@ impl MekuShell {
             Ok(rel) => {
                 self.explorer.refresh();
                 self.explorer.reveal(&rel);
-                self.open_file_inner(&rel, cx);
+                self.open_file_in_new_tab(&rel, cx);
                 self.focus_title = Some(rel);
                 self.notice = None;
             }
@@ -704,41 +702,77 @@ impl MekuShell {
         self.open_file_inner(rel, cx);
     }
 
+    /// Normal note navigation reuses the selected tab.
     fn open_file_inner(&mut self, rel: &Path, cx: &mut Context<Self>) {
-        self.flush_title(cx);
-        if let Some(ix) = self.tabs.iter().position(|t| t.rel.as_deref() == Some(rel)) {
-            self.active_tab = ix;
-            self.explorer.reveal(rel);
-            self.record_visit();
-            self.save_session();
-            cx.notify();
+        self.open_note(rel, false, cx);
+    }
+
+    /// Explicit new-tab actions keep the currently visible note open.
+    fn open_file_in_new_tab(&mut self, rel: &Path, cx: &mut Context<Self>) {
+        self.open_note(rel, true, cx);
+    }
+
+    fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
             return;
         }
-        let abs = match self.explorer.abs(rel) {
-            Some(abs) => abs,
-            None => return,
-        };
-        match OpenBuffer::load(rel.to_path_buf(), &abs) {
-            Ok(buffer) => {
-                // The empty "Welcome" placeholder only exists until a real
-                // note is opened.
-                self.tabs
-                    .retain(|t| !(t.rel.is_none() && t.title == "Welcome"));
-                self.buffers.insert(rel.to_path_buf(), cx.new(|_| buffer));
-                self.tabs.push(EditorTab {
-                    rel: Some(rel.to_path_buf()),
-                    title: Self::tab_title(rel),
-                    mode: Mode::from_setting(theme::cfg(cx).str("default_mode")),
-                });
-                self.active_tab = self.tabs.len() - 1;
-                self.explorer.reveal(rel);
-                self.record_visit();
-                self.notice = None;
-            }
-            Err(e) => {
-                self.notice = Some(format!("Cannot open {}: {e}", rel.display()));
+        self.flush_title(cx);
+        self.active_tab = index;
+        self.ensure_active_loaded(cx);
+        if let Some(rel) = self.doc_rel() {
+            self.explorer.reveal(&rel);
+        }
+        self.record_visit();
+        self.save_session();
+        cx.notify();
+    }
+
+    fn open_note(&mut self, rel: &Path, new_tab: bool, cx: &mut Context<Self>) {
+        self.flush_title(cx);
+        if let Some(ix) = self.tabs.iter().position(|t| t.rel.as_deref() == Some(rel)) {
+            self.activate_tab(ix, cx);
+            return;
+        }
+        // Replaced or closed dirty notes retain their buffer and undo stack.
+        // Opening one again must not replace its edits with the disk copy.
+        if !self.buffers.contains_key(rel) {
+            let Some(abs) = self.explorer.abs(rel) else {
+                return;
+            };
+            match OpenBuffer::load(rel.to_path_buf(), &abs) {
+                Ok(buffer) => {
+                    self.buffers.insert(rel.to_path_buf(), cx.new(|_| buffer));
+                }
+                Err(e) => {
+                    self.notice = Some(format!("Cannot open {}: {e}", rel.display()));
+                    cx.notify();
+                    return;
+                }
             }
         }
+        let tab = EditorTab {
+            rel: Some(rel.to_path_buf()),
+            title: Self::tab_title(rel),
+            mode: Mode::from_setting(theme::cfg(cx).str("default_mode")),
+        };
+        if new_tab || self.tabs.is_empty() {
+            self.tabs
+                .retain(|t| !(t.rel.is_none() && t.title == "Welcome"));
+            self.tabs.push(tab);
+            self.active_tab = self.tabs.len() - 1;
+        } else {
+            let index = self.active_tab.min(self.tabs.len() - 1);
+            let old = std::mem::replace(&mut self.tabs[index], tab);
+            if let Some(old_rel) = old.rel {
+                self.title_inputs.remove(&old_rel);
+                self.title_subs.remove(&old_rel);
+            }
+            self.active_tab = index;
+            self.prune_closed(cx);
+        }
+        self.explorer.reveal(rel);
+        self.record_visit();
+        self.notice = None;
         self.save_session();
         cx.notify();
     }
@@ -1823,7 +1857,7 @@ impl MekuShell {
                     }
                     Done::OpenNote(note) => {
                         self.explorer.reveal(&note);
-                        self.open_file_inner(&note, cx);
+                        self.open_file_in_new_tab(&note, cx);
                         return;
                     }
                     Done::Renamed => {}
@@ -2921,7 +2955,7 @@ fn main() {
                         // `MEKU_CARET=<byte>` set up reproducible states for
                         // screenshots.
                         for file in std::env::args().skip(2) {
-                            shell.open_file_inner(Path::new(&file), cx);
+                            shell.open_file_in_new_tab(Path::new(&file), cx);
                         }
                         if first_run {
                             shell.open_file_inner(Path::new(demo::FIRST_NOTE), cx);
@@ -6050,7 +6084,7 @@ mod ui_tests {
         cx.update(|cx| {
             view.update(cx, |s, cx| {
                 s.explorer.refresh();
-                s.open_file_inner(Path::new("second.md"), cx);
+                s.open_file_in_new_tab(Path::new("second.md"), cx);
             })
         });
         let active = |cx: &mut TestAppContext| view.read_with(&*cx, |s, _| s.doc_rel());
@@ -7184,38 +7218,41 @@ mod ui_tests {
             "only the active tab is read"
         );
 
-        // Tabs shrink to fit the strip instead of overflowing it, and the
-        // back/forward buttons sit in the strip.
-        step(cx, window, |_, _| {});
+        for _ in 0..4 {
+            step(cx, window, |_, _| {});
+        }
         cx.update_window(window, |_, w, cx| {
             w.render_frame(cx);
             let strip = w.find("tabs-scroll").bounds();
-            let last = w.find(("tab", 9usize)).bounds();
-            assert!(
-                last.right() <= strip.right() + gpui_kit::px(1.0),
-                "all tabs fit: tab right {:?} vs strip {:?}",
-                last.right(),
-                strip.right()
-            );
-            let back = w.find("nav-back").bounds();
             let first = w.find(("tab", 0usize)).bounds();
-            assert!(back.right() <= first.left(), "nav buttons lead the tabs");
+            for ix in 0usize..10 {
+                let tab = w.find(("tab", ix)).bounds();
+                assert!((tab.size.width - first.size.width).abs() <= px(1.));
+                assert!(
+                    tab.left() >= strip.left() - px(1.) && tab.right() <= strip.right() + px(1.),
+                    "all restored tabs stay visible"
+                );
+                assert!(
+                    w.find(("tab-title", ix)).bounds().size.width >= tab.size.width * 0.65,
+                    "compact tabs give room to the title"
+                );
+            }
             assert!(
-                back.origin.y > gpui_kit::px(30.0),
-                "and are below the title bar"
+                w.try_find("tabs-overflow").is_none(),
+                "there is no overflow menu"
             );
-        })
-        .unwrap();
-
-        // Switching to another tab reads it then.
-        cx.update_window(window, |_, w, cx| {
+            assert!(w.find("new-tab").bounds().right() <= px(900.));
+            assert!(w.find("nav-back").bounds().right() <= strip.left());
             w.click(("tab", 7usize), cx);
         })
         .unwrap();
         step(cx, window, |_, _| {});
-        let (loaded, active) =
-            cx.update(|cx| view.read_with(cx, |s, _| (s.buffers.len(), s.active_tab)));
-        assert_eq!((loaded, active), (2, 7));
+        let (loaded, active) = view.read_with(&*cx, |s, _| (s.buffers.len(), s.active_tab));
+        assert_eq!(
+            (loaded, active),
+            (2, 7),
+            "selecting a restored tab reads only that note"
+        );
     }
 
     #[test]
@@ -7630,7 +7667,7 @@ mod ui_tests {
         let loaded = |cx: &mut TestAppContext, rel: &PathBuf| {
             view.read_with(&*cx, |s, _| s.buffers.contains_key(rel))
         };
-        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&b, cx)));
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file_in_new_tab(&b, cx)));
         step(cx, window, |_, _| {});
         assert!(loaded(cx, &a) && loaded(cx, &b));
 
@@ -7640,7 +7677,7 @@ mod ui_tests {
         assert!(loaded(cx, &b), "the shown note stays");
 
         // ... a dirty one stays until it is saved, so no edit can be lost.
-        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&a, cx)));
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file_in_new_tab(&a, cx)));
         step(cx, window, |w, cx| w.input("edited ", cx));
         assert!(buffer_text(cx, &view, &a).1, "dirty after typing");
         cx.update(|cx| {
@@ -7667,7 +7704,7 @@ mod ui_tests {
         );
 
         // Reopening reads it back from disk.
-        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&a, cx)));
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file_in_new_tab(&a, cx)));
         assert!(buffer_text(cx, &view, &a).0.starts_with("edited first"));
     }
 
@@ -7695,7 +7732,7 @@ mod ui_tests {
         let shown = cached(cx);
         assert!(shown >= 1, "the shown picture is cached");
 
-        cx.update(|cx| view.update(cx, |s, cx| s.open_file(&PathBuf::from("b.md"), cx)));
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file_in_new_tab(Path::new("b.md"), cx)));
         step(cx, window, |_, _| {});
         assert_eq!(cached(cx), shown, "still cached while its note is open");
         cx.update(|cx| view.update(cx, |s, cx| s.close_tab(0, cx)));
@@ -7895,5 +7932,404 @@ mod ui_tests {
             .read_with(&*cx, |s, _| s.notice.clone())
             .unwrap_or_default();
         assert!(notice.contains("Could not reach"), "{notice}");
+    }
+
+    #[test]
+    fn opening_notes_reuses_the_current_tab_and_preserves_unsaved_edits() {
+        run_ui_test("reuse_current_tab", reuse_current_tab_body);
+    }
+
+    fn reuse_current_tab_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1100., 760., "original\n");
+        for name in ["b.md", "c.md"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        cx.update(|cx| view.update(cx, |s, _| s.explorer.refresh()));
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |w, cx| w.input("unsaved ", cx));
+        let original = PathBuf::from("doc.md");
+        for name in ["b.md", "c.md", "doc.md"] {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.click(format!("tree-row-{name}"), cx);
+            })
+            .unwrap();
+            step(cx, window, |_, _| {});
+            assert_eq!(
+                view.read_with(&*cx, |s, _| s.tabs.len()),
+                1,
+                "ordinary sidebar navigation replaces the current note"
+            );
+            assert_eq!(
+                view.read_with(&*cx, |s, _| s.doc_rel()),
+                Some(PathBuf::from(name))
+            );
+        }
+        assert_eq!(
+            buffer_text(cx, &view, &original).0,
+            "unsaved original\n",
+            "reopening reuses the dirty buffer instead of reading over it"
+        );
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |w, cx| w.press("ctrl-z", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &original).0,
+            "original\n",
+            "undo history survives replacing and reopening the tab"
+        );
+        step(cx, window, |w, cx| w.click("new-tab", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.tabs.len()),
+            2,
+            "+ explicitly creates an additional tab"
+        );
+        step(cx, window, |w, cx| w.click("tree-row-b.md", cx));
+        step(cx, window, |_, _| {});
+        assert_eq!(
+            view.read_with(&*cx, |s, _| (s.tabs.len(), s.doc_rel())),
+            (2, Some(PathBuf::from("b.md")))
+        );
+        step(cx, window, |w, cx| w.click("tree-row-doc.md", cx));
+        assert_eq!(
+            view.read_with(&*cx, |s, _| (s.tabs.len(), s.active_tab)),
+            (2, 0),
+            "an already open note is selected without duplicating it"
+        );
+        focus_doc_for(cx, &view, window);
+        step(cx, window, |w, cx| w.press("ctrl-t", cx));
+        assert_eq!(
+            view.read_with(&*cx, |s, _| s.tabs.len()),
+            3,
+            "Ctrl+T explicitly creates an additional tab"
+        );
+        let before = view.read_with(&*cx, |s, _| s.doc_rel());
+        cx.update(|cx| view.update(cx, |s, cx| s.open_file(Path::new("missing.md"), cx)));
+        assert_eq!(
+            view.read_with(&*cx, |s, _| (s.tabs.len(), s.doc_rel())),
+            (3, before),
+            "a failed open keeps the current tab intact"
+        );
+    }
+
+    #[test]
+    fn regression_tabs_remain_visible_and_uniform_on_resize() {
+        run_ui_test("uniform_tabs_resize", uniform_tabs_resize_body);
+    }
+
+    fn uniform_tabs_resize_body(cx: &mut TestAppContext) {
+        let (view, window, dir) = open_note_in(cx, 1200., 800., "body");
+        for name in [
+            "A.md",
+            "A much longer title with many words.md",
+            "中.md",
+            "Fourth.md",
+            "Fifth.md",
+            "Sixth.md",
+            "Seventh.md",
+            "Eighth.md",
+            "Ninth.md",
+            "Tenth.md",
+            "Last.md",
+        ] {
+            std::fs::write(dir.path().join(name), "body").unwrap();
+            cx.update(|cx| view.update(cx, |s, cx| s.open_file_in_new_tab(Path::new(name), cx)));
+        }
+        let mut widths = Vec::new();
+        for width in [1200., 900., 640., 1400.] {
+            cx.simulate_window_resize(window, size(px(width), px(800.)));
+            for _ in 0..4 {
+                step(cx, window, |_, _| {});
+            }
+            let tab_width = cx
+                .update_window(window, |_, w, cx| {
+                    w.render_frame(cx);
+                    let strip = w.find("tabs-scroll").bounds();
+                    let first = w.find(("tab", 0usize)).bounds();
+                    for ix in 0usize..12 {
+                        let tab = w.find(("tab", ix)).bounds();
+                        assert!(
+                            (tab.size.width - first.size.width).abs() <= px(1.),
+                            "active and inactive tabs have equal widths"
+                        );
+                        assert!(
+                            tab.left() >= strip.left() - px(1.)
+                                && tab.right() <= strip.right() + px(1.),
+                            "every tab stays visible at {width}px"
+                        );
+                        assert!(
+                            w.find(("tab-title", ix)).bounds().size.width >= tab.size.width * 0.65,
+                            "compact controls preserve title space"
+                        );
+                    }
+                    assert!(w.find("new-tab").bounds().right() <= px(width));
+                    assert!(w.try_find("tabs-overflow").is_none());
+                    first.size.width
+                })
+                .unwrap();
+            widths.push(tab_width);
+        }
+        assert!(
+            widths[3] > widths[2],
+            "all tabs grow together when the window widens"
+        );
+        let before = cx
+            .update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                let bounds = w.find(("tab", 0usize)).bounds();
+                w.click(("tab", 0usize), cx);
+                bounds.size.width
+            })
+            .unwrap();
+        step(cx, window, |_, _| {});
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert_eq!(
+                w.find(("tab", 0usize)).bounds().size.width,
+                before,
+                "selection does not enlarge a tab"
+            );
+            w.hover(("tab", 0usize), cx);
+            w.render_frame(cx);
+            assert_eq!(
+                w.find(("tab", 0usize)).bounds().size.width,
+                before,
+                "showing close on hover does not resize the tab"
+            );
+            w.click("close-tab-0", cx);
+        })
+        .unwrap();
+        for _ in 0..3 {
+            step(cx, window, |_, _| {});
+        }
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let first = w.find(("tab", 0usize)).bounds();
+            assert!(
+                first.size.width > before,
+                "remaining tabs grow after one is closed"
+            );
+            for ix in 1usize..11 {
+                assert!(
+                    (w.find(("tab", ix)).bounds().size.width - first.size.width).abs() <= px(1.)
+                );
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn regression_empty_line_clicks_do_not_shift_surrounding_text() {
+        run_ui_test("stable_blank_height", stable_blank_height_body);
+    }
+
+    fn stable_blank_height_body(cx: &mut TestAppContext) {
+        let (view, window, _dir) = open_note_in(cx, 1100., 760., "above\n\nbelow\n\nlast");
+        focus_doc_for(cx, &view, window);
+        let bounds = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                (
+                    w.find(("doc-row", 1usize)).bounds(),
+                    w.find(("doc-row", 2usize)).bounds(),
+                    w.find(("doc-row", 4usize)).bounds(),
+                )
+            })
+            .unwrap()
+        };
+        let initial = bounds(cx);
+        for _ in 0..3 {
+            step(cx, window, |w, cx| w.click(("doc-row", 1usize), cx));
+            assert_eq!(
+                bounds(cx),
+                initial,
+                "putting the caret on the blank line leaves every row in place"
+            );
+            step(cx, window, |w, cx| w.click(("doc-row", 3usize), cx));
+            assert_eq!(
+                bounds(cx),
+                initial,
+                "moving between gaps preserves the layout"
+            );
+        }
+        step(cx, window, |w, cx| w.click(("doc-row", 1usize), cx));
+        step(cx, window, |w, cx| w.input("x", cx));
+        let typed = bounds(cx);
+        assert_eq!(
+            typed.1.origin.y, initial.1.origin.y,
+            "the first character does not push the next line down"
+        );
+        assert_eq!(typed.2.origin.y, initial.2.origin.y);
+    }
+
+    #[test]
+    fn regression_image_gaps_reuse_existing_blank_lines() {
+        run_ui_test("image_existing_blank", image_existing_blank_body);
+    }
+
+    fn image_existing_blank_body(cx: &mut TestAppContext) {
+        let original = "above\n\n![[p.png]]\n\nbelow";
+        let (view, window, dir) = open_note_in(cx, 1100., 760., original);
+        let rel = PathBuf::from("doc.md");
+        std::fs::write(dir.path().join("p.png"), PNG_1X1).unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        let geometry = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                (
+                    w.find(("image-row", 2usize)).bounds(),
+                    w.find(("doc-row", 4usize)).bounds(),
+                )
+            })
+            .unwrap()
+        };
+        let before = geometry(cx);
+        for at in ["above\n\n".len(), "above\n\n![[p.png]]".len()] {
+            move_doc_caret(cx, &view, at);
+            step(cx, window, |w, cx| w.input("text", cx));
+            assert_eq!(
+                geometry(cx),
+                before,
+                "typing at either image boundary reuses the neighboring blank line without moving the image or following text"
+            );
+            assert_eq!(
+                buffer_text(cx, &view, &rel).0.lines().count(),
+                original.lines().count()
+            );
+            step(cx, window, |w, cx| w.press("ctrl-z", cx));
+            assert_eq!(buffer_text(cx, &view, &rel).0, original);
+        }
+    }
+
+    #[test]
+    fn regression_image_insertion_lanes_show_a_caret_and_preserve_the_embed() {
+        run_ui_test("image_insertion_lanes", image_insertion_lanes_body);
+    }
+
+    fn image_insertion_lanes_body(cx: &mut TestAppContext) {
+        let original = "![[p.png]]";
+        let (view, window, dir) = open_note_in(cx, 1100., 760., original);
+        let rel = PathBuf::from("doc.md");
+        std::fs::write(dir.path().join("p.png"), PNG_1X1).unwrap();
+        cx.update(|cx| {
+            view.update(cx, |s, _| {
+                s.explorer.refresh();
+                s.doc_models.clear();
+            })
+        });
+        focus_doc_for(cx, &view, window);
+        for after in [false, true] {
+            let before_click = buffer_text(cx, &view, &rel);
+            let before_picture = cx
+                .update_window(window, |_, w, cx| {
+                    w.render_frame(cx);
+                    let picture = w.find(("image-row", 0usize)).bounds();
+                    w.click(
+                        (if after { "image-after" } else { "image-before" }, 0usize),
+                        cx,
+                    );
+                    w.render_frame(cx);
+                    let caret = w.find("doc-caret").bounds();
+                    if after {
+                        assert!(caret.top() >= picture.bottom());
+                    } else {
+                        assert!(caret.bottom() <= picture.top());
+                    }
+                    picture
+                })
+                .unwrap();
+            assert_eq!(
+                buffer_text(cx, &view, &rel),
+                before_click,
+                "clicks alone never edit the note"
+            );
+            step(cx, window, |w, cx| w.input("words", cx));
+            let expected = if after {
+                "![[p.png]]\nwords"
+            } else {
+                "words\n![[p.png]]"
+            };
+            assert_eq!(buffer_text(cx, &view, &rel).0, expected);
+            let image_ix = usize::from(!after);
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                let picture = w.find(("image-row", image_ix)).bounds();
+                assert_eq!(
+                    picture, before_picture,
+                    "the typed line takes over the reserved space without displacing the image"
+                );
+            })
+            .unwrap();
+            step(cx, window, |w, cx| w.press("ctrl-z", cx));
+            assert_eq!(
+                buffer_text(cx, &view, &rel).0,
+                original,
+                "one undo removes text and its separator together"
+            );
+        }
+        step(cx, window, |w, cx| w.click(("image-before", 0usize), cx));
+        step(cx, window, |w, cx| w.press("backspace", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            original,
+            "Backspace before the first image does not remove it"
+        );
+        step(cx, window, |w, cx| w.press("delete", cx));
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "",
+            "Delete at the beginning removes a whole image"
+        );
+        step(cx, window, |w, cx| w.press("ctrl-z", cx));
+        step(cx, window, |w, cx| w.click(("image-before", 0usize), cx));
+        step(cx, window, |w, cx| w.press("enter", cx));
+        assert_eq!(buffer_text(cx, &view, &rel).0, "\n![[p.png]]");
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            0,
+            "Enter before an image leaves the caret on the new blank line"
+        );
+        step(cx, window, |w, cx| w.press("ctrl-z", cx));
+        step(cx, window, |w, cx| {
+            w.click(("image-after", 0usize), cx);
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("one\ntwo".into()));
+            w.press("ctrl-v", cx);
+        });
+        assert_eq!(buffer_text(cx, &view, &rel).0, "![[p.png]]\none\ntwo");
+        step(cx, window, |w, cx| w.press("ctrl-z", cx));
+        step(cx, window, |w, cx| w.click(("image-before", 0usize), cx));
+        cx.update_window(window, |_, w, cx| {
+            view.update(cx, |s, cx| {
+                gpui_kit::EntityInputHandler::replace_and_mark_text_in_range(
+                    s,
+                    None,
+                    "é",
+                    Some(1..1),
+                    w,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            buffer_text(cx, &view, &rel).0,
+            "é\n![[p.png]]",
+            "composition preserves the rendered image"
+        );
+        assert_eq!(
+            doc_caret(cx, &view, &rel),
+            2,
+            "UTF-16 composition offsets map to UTF-8 before the image"
+        );
+        assert_eq!(
+            cx.update(|cx| view.read_with(cx, |s, cx| s.buffers[&rel].read(cx).marked())),
+            Some(0..2)
+        );
     }
 }

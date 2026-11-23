@@ -56,7 +56,7 @@ pub(crate) fn for_list(list: &ListState) -> Scroller {
 }
 
 /// Scroller for a tracked scroll container. `vertical_to_horizontal` makes
-/// the wheel's vertical motion scroll a horizontal strip (the tab bar).
+/// the wheel's vertical motion scroll a horizontal surface.
 pub(crate) fn for_handle(handle: &ScrollHandle, vertical_to_horizontal: bool) -> Scroller {
     let handle = handle.clone();
     Rc::new(move |delta, _| {
@@ -246,7 +246,6 @@ pub(crate) struct Smooth {
     pub doc: GlideState,
     pub tree: GlideState,
     pub outline: GlideState,
-    pub tabs: GlideState,
     pub settings: GlideState,
     pub palette: GlideState,
     pub lightbox: GlideState,

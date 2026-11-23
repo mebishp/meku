@@ -406,3 +406,13 @@ _Decisions (user): several theme presets · tables as grids · callouts + code-b
 - [x] Validate locally: locked Cargo check, workspace formatting, workflow YAML, packaging-script syntax, and diff whitespace checks pass. Upstream Linux (including workspace tests), macOS, and Windows CI passed on `pre-release` and merged `main`.
 - [x] Merge `pre-release` into `main` after CI passes (PR #7, merge `6f7860b`).
 - [x] Publish [`v1.0.5`](https://github.com/mebishp/meku/releases/tag/v1.0.5) with all seven Linux, macOS, and Windows packages and `SHA256SUMS`. Release workflow passed; every checksum entry matches its uploaded asset's SHA-256 digest.
+
+### 17. Tab sizing and live-editing fixes (2026-11-23)
+
+- [x] Show every open tab and share the measured strip width equally (up to 200px each), growing/shrinking all tabs together as the window or tab count changes. Remove tab hiding and the overflow menu; selection never enlarges a tab. Compact tabs prioritize title prefixes and show close on hover; the new-note button remains visible.
+- [x] Ordinary sidebar, finder, link, and history navigation replaces the selected tab. Explicit new-note/new-tab actions (`+`, `Ctrl+T`) add a tab; selecting an already open note reuses its tab. Retain unsaved buffers and undo history when replacing/reopening notes, and leave the current tab intact on a failed open.
+- [x] Keep blank lines at a full text-line height so placing the caret or typing the first character does not move surrounding lines.
+- [x] Show a caret before and after rendered images; reuse existing blank lines and let typed paragraphs take over reserved insertion space. Keep the picture and following text in place on first-line typing; preserve image embeds, typing undo, paste, and Unicode composition. Backspace/Delete handle pictures as whole items.
+- [x] Add Iconoir icons to every title-bar document-menu item, with the current view's checkmark on the right; vendor the shortcuts glyph through the existing icon generator.
+- [x] Keep `=`, `==`, and unfinished highlights visible in callouts instead of letting setext-underline parsing hide them.
+- [x] Verify: 360 workspace tests pass (3 ignored), including all-tab visibility/uniform resizing, compact hover-close without layout shifts, current-tab navigation with unsaved edits, blank-line geometry, image-position/undo/paste/composition, and callout regressions. Cargo check, strict workspace Clippy, formatting, and diff checks pass; debug executable rebuilt. Inspect menu icons, image caret, and uniform tabs at wide and narrow sizes in an isolated preview.

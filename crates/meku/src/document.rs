@@ -175,6 +175,8 @@ pub(crate) fn model_opts(cx: &App) -> u8 {
 pub(crate) struct RowView {
     pub(crate) layout: TextLayout,
     pub(crate) display: Display,
+    /// A rendered image's insertion lane maps to one source boundary.
+    fixed_source: Option<usize>,
     /// A checkbox control sits left of the text (hidden task rows): presses
     /// there belong to the control, not the caret.
     pub(crate) has_checkbox: bool,
@@ -434,6 +436,7 @@ impl MekuShell {
                 row,
                 &text,
                 reveal,
+                mode != Mode::Read,
                 is_caret_row.then_some(caret),
                 match mode {
                     Mode::Read => None,
@@ -628,7 +631,10 @@ impl MekuShell {
             let idx = match view.layout.index_for_position(pos) {
                 Ok(i) | Err(i) => i,
             };
-            return Some(view.display.to_src(idx));
+            return Some(
+                view.fixed_source
+                    .unwrap_or_else(|| view.display.to_src(idx)),
+            );
         }
         let rel = self.doc_rel()?;
         let model = self.doc_models.get(&rel)?;
@@ -647,7 +653,8 @@ impl MekuShell {
                     let idx = match view.layout.index_for_position(pos) {
                         Ok(i) | Err(i) => i,
                     };
-                    view.display.to_src(idx)
+                    view.fixed_source
+                        .unwrap_or_else(|| view.display.to_src(idx))
                 })
             })
     }
@@ -701,7 +708,23 @@ impl MekuShell {
         let (Some(rel), Some(src)) = (self.doc_rel(), self.row_source(ix, pos)) else {
             return;
         };
-        if let Some(buffer) = self.buffers.get(&rel).cloned() {
+        self.doc_place_caret(&rel, src, extend, clicks, cx);
+    }
+
+    fn doc_place_caret(
+        &mut self,
+        rel: &Path,
+        src: usize,
+        extend: bool,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal_open() {
+            return;
+        }
+        self.touch_caret();
+        self.flush_title(cx);
+        if let Some(buffer) = self.buffers.get(rel).cloned() {
             buffer.update(cx, |b, _| match clicks {
                 0 | 1 => b.move_caret(src, extend),
                 2 => b.select_word_at(src),
@@ -710,6 +733,56 @@ impl MekuShell {
         }
         self.update_slash(false, cx);
         cx.notify();
+    }
+
+    /// Start a paragraph beside a rendered image without turning the embed
+    /// into inline source. The separators and text form a single undo edit.
+    fn image_text_insertion(
+        &mut self,
+        rel: &Path,
+        target: &Range<usize>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<(Range<usize>, String, Range<usize>)> {
+        if !target.is_empty() || text.is_empty() {
+            return None;
+        }
+        let model = self.doc_model(rel, cx)?;
+        let ix = row_at(&model.rows, target.start);
+        let row = &model.rows[ix];
+        model.images[ix].as_ref()?;
+        if row_is_revealed_with(Reveal::of(cx), self.tab_mode(), row, ix, ix, target) {
+            return None;
+        }
+        let before = target.start == row.src.start;
+        if !before && target.start != row.src.end {
+            return None;
+        }
+        let neighbor = if before {
+            ix.checked_sub(1).and_then(|ix| model.rows.get(ix))
+        } else {
+            model.rows.get(ix + 1)
+        };
+        if let Some(blank) = neighbor.filter(|r| r.kind == RowKind::Blank) {
+            // Reuse an existing empty source line instead of inserting a
+            // second line and displacing the picture or following text.
+            return Some((
+                blank.src.end..blank.src.end,
+                text.to_string(),
+                0..text.len(),
+            ));
+        }
+        let prefix = usize::from(!before && !text.starts_with('\n'));
+        let suffix = before && !text.ends_with('\n');
+        let mut insert = String::with_capacity(prefix + text.len() + usize::from(suffix));
+        if prefix > 0 {
+            insert.push('\n');
+        }
+        insert.push_str(text);
+        if suffix {
+            insert.push('\n');
+        }
+        Some((target.clone(), insert, prefix..prefix + text.len()))
     }
 
     /// Follow the link under `pos` in row `ix`. Returns `false` when the
@@ -1132,20 +1205,50 @@ impl MekuShell {
             DocKey::Backspace | DocKey::Delete => {
                 let backward = key == DocKey::Backspace;
                 let collapsed = sel.start == sel.end;
-                // Backspace on an image row removes the last image (with the
-                // spaces before it); select the line to edit the source.
-                if backward
-                    && collapsed
+                // Delete images as atoms from either edge. At the outside
+                // boundary, move to the neighboring text without merging
+                // the image's source into that paragraph.
+                if collapsed
                     && !revealed_now
-                    && let Some(last) = model.images[cur_ix].as_ref().and_then(|v| v.last())
+                    && let Some(images) = model.images[cur_ix].as_ref()
                 {
-                    let line_start = model.rows[cur_ix].src.start;
-                    let mut start = last.range.start;
-                    while start > line_start && model.text.as_bytes()[start - 1] == b' ' {
-                        start -= 1;
+                    let row = &model.rows[cur_ix];
+                    if (backward && caret_now == row.src.start)
+                        || (!backward && caret_now == row.src.end)
+                    {
+                        let dest = if backward {
+                            cur_ix.checked_sub(1).map(|ix| model.rows[ix].src.end)
+                        } else {
+                            model.rows.get(cur_ix + 1).map(|r| r.src.start)
+                        };
+                        if let Some(dest) = dest {
+                            buffer.update(cx, |b, _| b.move_caret(dest, false));
+                        }
+                        cx.notify();
+                        return;
                     }
-                    let range = start..last.range.end;
-                    buffer.update(cx, |b, _| b.replace(range, "", false));
+                    let image = if backward {
+                        images.last()
+                    } else {
+                        images.first()
+                    };
+                    if let Some(image) = image {
+                        let mut range = image.range.clone();
+                        if backward {
+                            while range.start > row.src.start
+                                && model.text.as_bytes()[range.start - 1] == b' '
+                            {
+                                range.start -= 1;
+                            }
+                        } else {
+                            while range.end < row.src.end
+                                && model.text.as_bytes()[range.end] == b' '
+                            {
+                                range.end += 1;
+                            }
+                        }
+                        buffer.update(cx, |b, _| b.replace(range, "", false));
+                    }
                     self.doc_note_edit(&rel);
                     cx.notify();
                     return;
@@ -1181,7 +1284,15 @@ impl MekuShell {
                 // Enumeration-aware Enter is skipped inside fenced code:
                 // a `1. item` line there must stay plain source.
                 let caret = buffer.read(cx).caret();
-                if fence_at(&model, caret).0 {
+                if !revealed_now
+                    && model.images[cur_ix].is_some()
+                    && caret == model.rows[cur_ix].src.start
+                {
+                    buffer.update(cx, |b, _| {
+                        b.insert("\n");
+                        b.move_caret(caret, false);
+                    });
+                } else if fence_at(&model, caret).0 {
                     buffer.update(cx, |b, _| b.insert("\n"));
                 } else if !crate::theme::cfg(cx).bool("smart_lists") {
                     buffer.update(cx, |b, _| b.insert("\n"));
@@ -1314,7 +1425,20 @@ impl MekuShell {
                 }
                 match clip.as_ref().and_then(|item| item.text()) {
                     Some(text) => {
-                        buffer.update(cx, |b, _| b.paste(&text));
+                        if let Some((target, insert, inner)) =
+                            self.image_text_insertion(&rel, &sel, &text, cx)
+                        {
+                            buffer.update(cx, |b, _| {
+                                b.replace_with_caret(
+                                    target.clone(),
+                                    &insert,
+                                    target.start + inner.end,
+                                    false,
+                                );
+                            });
+                        } else {
+                            buffer.update(cx, |b, _| b.paste(&text));
+                        }
                         true
                     }
                     None => match clip.as_ref().and_then(pasted_image) {
@@ -1669,13 +1793,13 @@ impl ScrollbarHandle for DocBar {
 }
 
 /// Rough height of an average row, in pixels, for the scroll bar's first
-/// guess (measured on typical notes: blank 0.67 lines, text 1, items 1.15,
+/// guess (measured on typical notes: blank/text 1 line, items 1.15,
 /// headings 2 to 2.4).
 fn estimated_row_height(rows: &[Row], line_h: f32) -> f32 {
     let lines: f32 = rows
         .iter()
         .map(|r| match r.kind {
-            RowKind::Blank => 0.67,
+            RowKind::Blank => 1.0,
             RowKind::Heading(1 | 2) => 2.4,
             RowKind::Heading(3) => 2.0,
             RowKind::Heading(_) => 1.6,
@@ -2480,6 +2604,7 @@ fn row_element(
     row: &Row,
     text: &str,
     reveal: bool,
+    editable: bool,
     caret: Option<usize>,
     selection: Option<Range<usize>>,
     colored: RowColors,
@@ -2545,8 +2670,8 @@ fn row_element(
         row_div.cursor_text()
     };
 
-    // Standalone image rows draw their picture when hidden; the caret row and
-    // Edit mode show the raw text instead (unchanged flow below).
+    // Rendered images keep stable insertion lanes above and below the frame.
+    // Clicking a lane places a visible text caret without opening the picture.
     if !reveal && let Some(images) = image {
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
@@ -2557,18 +2682,105 @@ fn row_element(
         } else {
             px(560.)
         };
+        let mut pictures = Some(image_row_element(
+            images,
+            ix,
+            caret.is_some(),
+            avail,
+            shell,
+            pictures,
+            cx,
+        ));
+        let mut content = v_flex().w_full();
+        let line_h = window.text_style().line_height_in_pixels(window.rem_size());
+        for after in [false, true] {
+            if after {
+                content = content.children(pictures.take());
+            }
+            if !editable {
+                if after {
+                    break;
+                }
+                continue;
+            }
+            let at = if after { row.src.end } else { row.src.start };
+            let active = caret == Some(at);
+            // Existing source rows supply their own text space. Only the
+            // document's leading edge and the gap after an image need a
+            // virtual line; real text takes that space over when typed.
+            let reserved = if after {
+                rows.get(ix + 1).is_none_or(|next| {
+                    meku_markdown::live::image_line(&text[next.src.clone()]).is_some()
+                })
+            } else {
+                ix == 0
+            };
+            let caret_y = if !reserved {
+                if after { px(6.) } else { -line_h - px(6.) }
+            } else {
+                px(0.)
+            };
+            let styled = StyledText::new(" ");
+            let painted = Rc::new(Cell::new(false));
+            if at == caret.unwrap_or(row.src.start)
+                && let Some(slot) = views.borrow_mut().get_mut(ix)
+            {
+                *slot = Some(RowView {
+                    layout: styled.layout().clone(),
+                    display: project(row, text, false),
+                    fixed_source: Some(at),
+                    has_checkbox: false,
+                    painted: painted.clone(),
+                });
+            }
+            let click_shell = shell.clone();
+            let hover_bg = cx.theme().list_hover;
+            let mut lane = div()
+                .id((if after { "image-after" } else { "image-before" }, ix))
+                .test_support()
+                .relative()
+                .w_full()
+                .h(if reserved { line_h } else { px(0.) })
+                .cursor_text()
+                .rounded_sm()
+                .hover(move |style| style.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    click_shell.update(cx, |view, cx| {
+                        window.focus(&view.focus_handle, cx);
+                        if let Some(rel) = view.doc_rel() {
+                            view.doc_place_caret(&rel, at, ev.modifiers.shift, ev.click_count, cx);
+                        }
+                    });
+                })
+                .child(div().absolute().top(caret_y).child(styled))
+                .child(
+                    canvas(move |_, _, _| painted.set(true), |_, _, _, _| {})
+                        .absolute()
+                        .size_0(),
+                );
+            if active && caret_on {
+                let style = window.text_style();
+                let runs = [style.to_run(1)];
+                let (_, y, h) = caret_geometry(window, " ", &runs, base_font, 0, None).unwrap_or((
+                    px(0.),
+                    (line_h - base_font) / 2.,
+                    base_font,
+                ));
+                lane = lane.child(caret_element(
+                    px(0.),
+                    caret_y + y,
+                    h,
+                    base_font,
+                    cx.theme().caret,
+                ));
+            }
+            content = content.child(lane);
+        }
         return row_div
             .pl(inset)
             .py(px(6.))
-            .child(image_row_element(
-                images,
-                ix,
-                caret.is_some(),
-                avail,
-                shell,
-                pictures,
-                cx,
-            ))
+            .child(content)
             .into_any_element();
     }
 
@@ -2614,14 +2826,10 @@ fn row_element(
         if let Some(slot) = views.borrow_mut().get_mut(ix) {
             *slot = None;
         }
-        // The line the caret sits on is as tall as a text line, so typing the
-        // first character does not make the row (and everything below) jump.
+        // Always reserve a full line: focus and the first typed character
+        // must not move the rows below this gap.
         let line_h = window.text_style().line_height_in_pixels(window.rem_size());
-        let row_h = if caret.is_some() {
-            line_h.max(base_font * 1.1)
-        } else {
-            base_font * 1.1
-        };
+        let row_h = line_h.max(base_font * 1.1);
         let mut el = row_div.h(row_h).text_size(base_font);
         // A brand-new note says how to begin.
         if text.is_empty() && ix == 0 {
@@ -2702,6 +2910,7 @@ fn row_element(
         *slot = Some(RowView {
             layout: layout.clone(),
             display,
+            fixed_source: None,
             has_checkbox: !reveal && row.task().is_some(),
             painted: painted.clone(),
         });
@@ -3163,6 +3372,20 @@ impl EntityInputHandler for MekuShell {
                 None => b.marked().unwrap_or_else(|| b.selection()),
             }
         };
+        if let Some((target, insert, inner)) = self.image_text_insertion(&rel, &target, text, cx) {
+            buffer.update(cx, |b, _| {
+                b.replace_with_caret(
+                    target.clone(),
+                    &insert,
+                    target.start + inner.end,
+                    text.chars().count() == 1 && text != "\n",
+                );
+            });
+            self.doc_note_edit(&rel);
+            self.update_slash(false, cx);
+            cx.notify();
+            return;
+        }
         // Plain typing (no explicit range, no composition) gets auto-pairing.
         let mut chars = text.chars();
         if let (true, Some(ch), None) = (plain, chars.next(), chars.next())
@@ -3211,9 +3434,12 @@ impl EntityInputHandler for MekuShell {
                 None => b.marked().unwrap_or_else(|| b.selection()),
             }
         };
-        let start = target.start;
+        let (target, insert, inner) = self
+            .image_text_insertion(&rel, &target, new_text, cx)
+            .unwrap_or_else(|| (target.clone(), new_text.to_string(), 0..new_text.len()));
+        let start = target.start + inner.start;
         buffer.update(cx, |b, _| {
-            b.replace(target, new_text, false);
+            b.replace(target, &insert, false);
             b.set_marked(Some(start..start + new_text.len()));
             if let Some(sel) = new_selected_range {
                 let inner = utf16_range_to_bytes(new_text, sel);
@@ -3239,7 +3465,11 @@ impl EntityInputHandler for MekuShell {
         let view = views.get(row)?.as_ref().filter(|v| v.is_painted())?;
         let origin = view
             .layout
-            .position_for_index(view.display.to_disp(caret))?;
+            .position_for_index(if view.fixed_source.is_some() {
+                0
+            } else {
+                view.display.to_disp(caret)
+            })?;
         Some(Bounds::new(origin, size(px(2.), view.layout.line_height())))
     }
 

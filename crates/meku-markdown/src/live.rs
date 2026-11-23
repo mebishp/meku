@@ -1076,6 +1076,12 @@ fn classify(
     }
 
     let rest = &text[p..src.end];
+    // A line of equals can be parsed as a setext underline, leaving no
+    // content spans. We render source lines independently (including inside
+    // callouts), so keep the symbols visible while they are being typed.
+    if !rest.is_empty() && rest.trim_end().bytes().all(|b| b == b'=') {
+        specials.push((p..src.end, Role::Plain));
+    }
     let hashes = rest.bytes().take_while(|&b| b == b'#').count();
     let heading = ((1..=6).contains(&hashes)
         && (rest.len() == hashes || rest.as_bytes()[hashes] == b' '))
@@ -1835,6 +1841,19 @@ mod tests {
         assert_eq!(shown(text, 0, false), "Careful");
         assert_eq!(shown(text, 0, true), "> [!warning]- Careful");
         assert_eq!(shown(text, 1, false), "body one");
+    }
+
+    #[test]
+    fn callout_equals_stay_visible_during_typing() {
+        for symbols in ["=", "==", "===", "====", "== ", "==x", "==é", "a = b"] {
+            let text = format!("> [!note]\n> {symbols}");
+            let rows = build_rows(&text);
+            assert_eq!(rows[1].callout.unwrap().role, CalloutRole::Body);
+            assert_eq!(project(&rows[1], &text, false).text, symbols, "{text:?}");
+        }
+        assert_eq!(shown("> [!note]\n> ==marked==", 1, false), "marked");
+        assert_eq!(shown("paragraph\n==", 1, false), "==");
+        assert_eq!(shown("```\n==\n```", 1, false), "==");
     }
 
     #[test]

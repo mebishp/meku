@@ -10,7 +10,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Side, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::icons::{Ico, icon};
@@ -87,6 +87,19 @@ fn no_drag(el: impl IntoElement) -> Div {
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(el)
+}
+
+/// Share the measured strip width equally across every open tab.
+fn uniform_tab_layout(total: usize, width: Pixels) -> (Pixels, Pixels) {
+    let count = total.max(1) as f32;
+    let available = if width > px(0.) {
+        f32::from(width)
+    } else {
+        200.
+    };
+    let gap = (available / count * 0.05).min(2.);
+    let width = ((available - gap * (count - 1.)) / count).clamp(0., 200.);
+    (px(width), px(gap))
 }
 
 impl MekuShell {
@@ -249,11 +262,12 @@ impl MekuShell {
             .child(icon(Ico::More, px(16.), muted))
             .tooltip("View and more")
             .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
+                let mut menu = menu.check_side(Side::Right);
                 for mode in [Mode::Edit, Mode::Live, Mode::Read] {
                     let s = shell.clone();
                     menu = menu.item(
                         PopupMenuItem::new(mode.label())
+                            .icon(Icon::default().path(mode.icon().path()))
                             .checked(mode == current)
                             .on_click(move |_, _, cx| {
                                 s.update(cx, |v, cx| v.set_tab_mode(mode, cx));
@@ -261,18 +275,22 @@ impl MekuShell {
                     );
                 }
                 menu = menu.item(PopupMenuItem::separator());
-                let entries: [(&str, Command); 5] = [
-                    ("Find in note", Command::FindInNote),
-                    ("Find and replace", Command::ReplaceInNote),
-                    ("Go to line", Command::GoToLine),
-                    ("Keyboard shortcuts", Command::ShortcutsHelp),
-                    ("Settings", Command::OpenSettings),
+                let entries: [(&str, Ico, Command); 5] = [
+                    ("Find in note", Ico::Search, Command::FindInNote),
+                    ("Find and replace", Ico::Refresh, Command::ReplaceInNote),
+                    ("Go to line", Ico::Hash, Command::GoToLine),
+                    ("Keyboard shortcuts", Ico::Shortcuts, Command::ShortcutsHelp),
+                    ("Settings", Ico::Settings, Command::OpenSettings),
                 ];
-                for (label, command) in entries {
+                for (label, ico, command) in entries {
                     let s = shell.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        s.update(cx, |v, cx| v.run_command(command, window, cx));
-                    }));
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .icon(Icon::default().path(ico.path()))
+                            .on_click(move |_, window, cx| {
+                                s.update(cx, |v, cx| v.run_command(command, window, cx));
+                            }),
+                    );
                 }
                 menu
             })
@@ -330,7 +348,13 @@ impl MekuShell {
         let hover_bg = theme_colors.list_hover;
         let accent = theme::accent_alpha(cx, 1.0);
 
-        let tabs_total = self.tabs.len();
+        let (tab_width, tab_gap) = uniform_tab_layout(self.tabs.len(), self.tabs_width);
+        let compact = tab_width < px(96.);
+        let padding = if compact {
+            px((f32::from(tab_width) * 0.075).clamp(1., 6.))
+        } else {
+            px(8.)
+        };
         let tabs: Vec<AnyElement> = self
             .tabs
             .iter()
@@ -343,10 +367,6 @@ impl MekuShell {
                 let mid_shell = shell.clone();
                 let group = SharedString::from(format!("tab-{index}"));
                 let title = tab.title.trim_end_matches(".md").to_string();
-                // With many tabs the room goes to the titles: inactive tabs
-                // lose the file icon and the close button (middle-click and
-                // the context menu still close them).
-                let crowded = tabs_total > 5;
                 let tip = title.clone();
                 let ico = if tab.rel.is_some() {
                     Ico::Note
@@ -367,7 +387,7 @@ impl MekuShell {
                     .cursor_pointer()
                     .text_color(muted)
                     .hover(move |s| s.bg(hover_bg).text_color(fg))
-                    .child(if dirty {
+                    .child(if dirty && !compact {
                         div()
                             .size(px(7.))
                             .rounded_full()
@@ -380,20 +400,31 @@ impl MekuShell {
                         cx.stop_propagation();
                         close_shell.update(cx, |view, cx| view.close_tab(index, cx));
                     });
-                let show_close = !(crowded && !active && !dirty);
+                let close = if compact {
+                    close
+                        .absolute()
+                        .right(px(2.))
+                        .top(px(7.))
+                        .bg(if active { active_bg } else { bar_bg })
+                        .invisible()
+                        .group_hover(group.clone(), |style| style.visible())
+                } else {
+                    close
+                };
                 let mut el = h_flex()
                     .id(("tab", index))
                     .test_support()
                     .group(group.clone())
-                    .flex_shrink(if active { 0. } else { 1. })
-                    .min_w(px(40.))
+                    .w(tab_width)
+                    .flex_none()
                     .items_center()
                     .gap_1p5()
                     .h(px(32.))
-                    .max_w(px(200.))
-                    .pl(px(8.))
-                    .pr(px(6.))
+                    .px(padding)
                     .rounded_t(px(8.))
+                    .border_1()
+                    .border_b_0()
+                    .border_color(bar_bg)
                     .cursor_pointer()
                     .relative()
                     .text_sm()
@@ -403,29 +434,35 @@ impl MekuShell {
                     })
                     .on_click(move |_, _, cx| {
                         select_shell.update(cx, |view, cx| {
-                            view.flush_title(cx);
-                            view.active_tab = index;
-                            view.save_session();
-                            cx.notify();
+                            view.activate_tab(index, cx);
                         });
                     })
                     .children(
-                        (!crowded || active)
+                        (tab_width >= px(130.))
                             .then(|| icon(ico, px(14.), if active { accent } else { muted })),
                     )
                     .child(
                         div()
+                            .id(("tab-title", index))
+                            .test_support()
                             .truncate()
+                            .flex_1()
                             .min_w_0()
                             .text_color(if active { fg } else { muted })
                             .child(title),
                     )
-                    .children(show_close.then_some(close));
+                    .children((compact && dirty).then(|| {
+                        div()
+                            .absolute()
+                            .right(px(3.))
+                            .top(px(12.))
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(accent)
+                    }))
+                    .child(close);
                 el = if active {
-                    el.bg(active_bg)
-                        .border_1()
-                        .border_b_0()
-                        .border_color(border)
+                    el.bg(active_bg).border_color(border)
                 } else {
                     el.hover(move |s| s.bg(hover_bg))
                 };
@@ -488,25 +525,21 @@ impl MekuShell {
             .flex_1()
             .min_w_0()
             .items_end()
-            .gap(px(2.))
+            .gap(tab_gap)
             .relative()
-            .overflow_x_scroll()
-            .track_scroll(&self.tabs_scroll)
-            .children(tabs)
-            .child(crate::smooth::wheel(
-                &self.smooth.tabs,
-                crate::smooth::for_handle(&self.tabs_scroll, true),
-            ))
-            .child(div().flex_none().pb(px(2.)).pl(px(4.)).child(icon_button(
-                "new-tab",
-                Ico::Plus,
-                false,
-                "New note (Ctrl+T)",
-                cx,
-                move |_, cx| {
-                    new_shell.update(cx, |view, cx| view.new_tab_action(cx));
-                },
-            )));
+            .overflow_hidden()
+            .children(tabs);
+        let new_tab = div().flex_none().pb(px(2.)).child(icon_button(
+            "new-tab",
+            Ico::Plus,
+            false,
+            "New note (Ctrl+T)",
+            cx,
+            move |_, cx| {
+                new_shell.update(cx, |view, cx| view.new_tab_action(cx));
+            },
+        ));
+        let scroll_shell = shell.clone();
         let strip = h_flex()
             .flex_none()
             .w_full()
@@ -522,12 +555,20 @@ impl MekuShell {
                     .pb(px(2.))
                     .child(self.render_nav_buttons(cx)),
             )
-            .child(scroller);
-        // Keep the active tab in view after switching.
-        if self.tabs_scrolled_to != Some(self.active_tab) {
-            self.tabs_scroll.scroll_to_item(self.active_tab);
-            self.tabs_scrolled_to = Some(self.active_tab);
-        }
+            .child(scroller)
+            .child(new_tab)
+            .on_children_prepainted(move |bounds, window, cx| {
+                let Some(viewport) = bounds.get(1) else {
+                    return;
+                };
+                scroll_shell.update(cx, |view, cx| {
+                    if (view.tabs_width - viewport.size.width).abs() > px(0.5) {
+                        view.tabs_width = viewport.size.width;
+                        cx.notify();
+                        window.refresh();
+                    }
+                });
+            });
         div()
             .flex_none()
             .w_full()
